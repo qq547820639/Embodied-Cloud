@@ -1,0 +1,35 @@
+# Full workspace image: Isaac Sim 6.0.1 + Isaac Lab 3.0.0 Beta 2 + code-server.
+# NVIDIA base image and Isaac Sim components remain governed by NVIDIA license terms.
+FROM nvcr.io/nvidia/isaac-sim:6.0.1
+
+USER root
+ARG CODE_SERVER_VERSION=4.130.0
+ARG ISAACLAB_REF=v3.0.0-beta2.patch1
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl git tini \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in amd64) cs_arch=amd64;; arm64) cs_arch=arm64;; *) echo "unsupported arch: $arch"; exit 1;; esac \
+    && curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-${cs_arch}.tar.gz" -o /tmp/code-server.tgz \
+    && tar -xzf /tmp/code-server.tgz -C /opt \
+    && ln -s "/opt/code-server-${CODE_SERVER_VERSION}-linux-${cs_arch}/bin/code-server" /usr/local/bin/code-server \
+    && rm /tmp/code-server.tgz
+
+RUN git clone --depth 1 --branch "${ISAACLAB_REF}" https://github.com/isaac-sim/IsaacLab.git /workspace/IsaacLab \
+    && cd /workspace/IsaacLab \
+    && ./isaaclab.sh --install
+
+COPY runtime/workspace-entrypoint.sh /usr/local/bin/embodiedcloud-workspace
+RUN chmod +x /usr/local/bin/embodiedcloud-workspace \
+    && mkdir -p /workspace/project /workspace/home /home/isaac/.local/share/code-server \
+    && chown -R 1234:1234 /workspace /home/isaac || true
+
+ENV HOME=/workspace/home \
+    IDE_PORT=18000 \
+    LIVESTREAM=0 \
+    PUBLIC_IP=127.0.0.1
+
+USER 1234:1234
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/embodiedcloud-workspace"]

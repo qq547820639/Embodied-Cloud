@@ -1,0 +1,25 @@
+services:
+  control-plane:
+    build:
+      context: ..
+      dockerfile: runtime/Dockerfile.control-plane
+    environment:
+      EMBODIEDCLOUD_PROVIDER: ${EMBODIEDCLOUD_PROVIDER:-mock}
+      EMBODIEDCLOUD_DATABASE_URL: sqlite:////data/embodiedcloud.db
+      EMBODIEDCLOUD_PUBLIC_BASE_URL: ${EMBODIEDCLOUD_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+      EMBODIEDCLOUD_WORKSPACE_ROOT: /workspaces
+      EMBODIEDCLOUD_HOST_PUBLIC_IP: ${EMBODIEDCLOUD_HOST_PUBLIC_IP:-127.0.0.1}
+      EMBODIEDCLOUD_EULA_ACCEPTED: ${EMBODIEDCLOUD_EULA_ACCEPTED:-false}
+      EMBODIEDCLOUD_PRIVACY_CONSENT: ${EMBODIEDCLOUD_PRIVACY_CONSENT:-false}
+    ports:
+      - "8000:8000"
+    volumes:
+      - embodiedcloud-data:/data
+      - embodiedcloud-workspaces:/workspaces
+      # Docker provider only: uncomment both mounts and set provider=docker.
+      # - /var/run/docker.sock:/var/run/docker.sock
+      # - /usr/bin/docker:/usr/bin/docker:ro
+    restart: unless-stopped
+volumes:
+  embodiedcloud-data:
+  embodiedcloud-workspaces:

@@ -1,0 +1,38 @@
+# Development skeleton only. For production, replace SQLite with PostgreSQL
+# before increasing replicas, and add authenticated ingress + secrets.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embodiedcloud-control-plane
+  namespace: embodiedcloud
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: embodiedcloud-control-plane}
+  template:
+    metadata:
+      labels: {app: embodiedcloud-control-plane}
+    spec:
+      containers:
+        - name: api
+          image: embodiedcloud/control-plane:0.1.0
+          ports:
+            - {containerPort: 8000}
+          env:
+            - {name: EMBODIEDCLOUD_PROVIDER, value: "mock"}
+            - {name: EMBODIEDCLOUD_DATABASE_URL, value: "sqlite:////data/embodiedcloud.db"}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embodiedcloud-control-plane
+  namespace: embodiedcloud
+spec:
+  selector: {app: embodiedcloud-control-plane}
+  ports:
+    - {port: 80, targetPort: 8000}
