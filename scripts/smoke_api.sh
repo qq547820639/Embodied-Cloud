@@ -19,7 +19,18 @@ fi
 
 curl -fsS "$BASE/api/health" | "$PYTHON_BIN" -m json.tool
 curl -fsS "$BASE/api/templates" | "$PYTHON_BIN" -m json.tool | head -80
-ID=$(curl -fsS -X POST "$BASE/api/workspaces" -H 'Content-Type: application/json' -d '{"template_id":"newton-cartpole-smoke","auto_start":true}' | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+# 注册并获取 token
+TOKEN=$(curl -fsS -X POST "$BASE/api/auth/register" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"smoke@example.com\",\"username\":\"smoke\",\"password\":\"smoke-pass-123\"}" \
+  | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+AUTH="Authorization: Bearer $TOKEN"
+
+ID=$(curl -fsS -X POST "$BASE/api/workspaces" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"template_id":"cartpole","auto_start":true}' \
+  | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 sleep 1
-curl -fsS "$BASE/api/workspaces/$ID" | "$PYTHON_BIN" -m json.tool
+curl -fsS "$BASE/api/workspaces/$ID" -H "$AUTH" | "$PYTHON_BIN" -m json.tool
+curl -fsS "$BASE/api/usage" -H "$AUTH" | "$PYTHON_BIN" -m json.tool | head -20
+curl -fsS "$BASE/metrics" | head -5
 echo "SMOKE_OK workspace=$ID"

@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# =============================================================================
+# semver release（scripts/release.sh）
+#
+# 用法：./scripts/release.sh [VERSION]
+#   - VERSION 缺省时读取 pyproject.toml 的 [project].version（优先用
+#     .venv/bin/python 解析，其次 python3 / python；老版本 Python 无 tomllib
+#     时回退正则解析）。
+#   - 若传入 VERSION 与 pyproject.toml 不一致 → 中止。版本号修改只允许由
+#     开发者在 pyproject.toml 完成，本脚本不自动改版本。
+#
+# 流程：
+#   1. make lint && make typecheck && make test（任一失败中止并输出原因）
+#   2. make build 生成 dist/*.whl 与 dist/*.tar.gz
+#   3. 生成 dist/checksums.txt（对 dist/*.whl 与 dist/*.tar.gz 计算 sha256sum）
+#   4. 生成 dist/VALIDATION_STATUS.md（分级验证矩阵 + BLOCKED_EXTERNAL_DEPENDENCY 明细）
+#   5. 输出 release 产物清单，并提示 git tag（不自动打 tag、不 push）
+# =============================================================================
+
+cd "$(dirname "$0")/.."
+
+step(){ printf '\n========== %s ==========\n' "$*"; }
+say(){ printf '%s\n' "$*"; }
+
+# ---------- 选择 Python 解释器（优先 .venv/bin/python） ----------
+PYTHON=""
+for cand in .venv/bin/python python3 python; do
+  if command -v "$cand" >/dev/null 2>&1; then PYTHON="$cand"; break; fi
+done
+if [[ -z "$PYTHON" ]]; then
+  say "release FAILED: 未找到 Python 解释器（尝试过 .venv/bin/python、python3、python）" >&2
+  exit 1
+fi
+say "使用 Python: $PYTHON"
+
+# ---------- 读取 pyproject.toml 的 version ----------
+read_pyproject_version() {
+  "$PYTHON" - <<'PY'
+import re
+import sys
+
+try:
+    import tomllib  # Python 3.11+
+
+    with open("pyproject.toml", "rb") as f:
+        print(tomllib.load(f)["project"]["version"])
+except Exception:
+    for line in open("pyproject.toml", encoding="utf-8"):
+        m = re.match(r'^\s*version\s*=\s*"([^"]+)"', line)
+        if m:
+            print(m.group(1))
+            sys.exit(0)
+    sys.exit(1)
+PY
+}
+
+PYPROJECT_VERSION="$(read_pyproject_version)"
+say "pyproject.toml 版本: $PYPROJECT_VERSION"
+
+VERSION="${1:-$PYPROJECT_VERSION}"
+if [[ "$VERSION" != "$PYPROJECT_VERSION" ]]; then
+  say "release FAILED: 传入版本 '$VERSION' 与 pyproject.toml 版本 '$PYPROJECT_VERSION' 不一致" >&2
+  say "版本号修改由开发者在 pyproject.toml 完成（脚本不允许改版本）。请先更新 pyproject.toml 再发布。" >&2
+  exit 1
+fi
+say "发布版本: $VERSION"
+
+trap 'say "release ABORTED: 前置 Gate 或构建失败，原因见上方输出" >&2' ERR
+
+# ---------- 1. G0 软件 Gate（lint / typecheck / test） ----------
+step "1/5 make lint"
+make lint
+step "2/5 make typecheck"
+make typecheck
+step "3/5 make test"
+make test
+
+# ---------- 2. build（清空 dist，确保产物只属于本次版本） ----------
+step "4/5 make build"
+rm -rf dist
+make build
+
+# ---------- 3. dist/checksums.txt ----------
+step "生成 dist/checksums.txt"
+hash_cmd="sha256sum"
+if ! command -v sha256sum >/dev/null 2>&1; then
+  hash_cmd="shasum -a 256"   # macOS 兼容
+fi
+: > dist/checksums.txt
+count=0
+for f in dist/*.whl dist/*.tar.gz; do
+  [[ -f "$f" ]] || continue
+  $hash_cmd "$f" >> dist/checksums.txt
+  count=$((count + 1))
+done
+if (( count == 0 )); then
+  say "release FAILED: dist/ 下没有 *.whl / *.tar.gz，make build 未产出工件" >&2
+  exit 1
+fi
+say "已为 $count 个构建工件生成 SHA-256:"
+cat dist/checksums.txt
+
+# ---------- 4. dist/VALIDATION_STATUS.md（分级验证矩阵） ----------
+step "生成 dist/VALIDATION_STATUS.md"
+
+# 预构建产物清单。注意：必须用 ${f} 花括号形式，避免 bash 把 $f 与紧随的
+# 全角字符（（ ）误解析为变量名（set -u 下会报 unbound variable）。
+ARTIFACTS="$(for f in dist/*.whl dist/*.tar.gz; do [[ -f "$f" ]] && echo "- ${f}（SHA-256 见 dist/checksums.txt）"; done)"
+
+cat > dist/VALIDATION_STATUS.md <<EOF
+# VALIDATION_STATUS — embodiedcloud v${VERSION}
+
+- 生成时间（UTC）：$(date -u +%Y-%m-%dT%H:%M:%SZ)
+- 生成脚本：scripts/release.sh
+- 版本来源：pyproject.toml（本脚本不修改版本号）
+
+## 分级验证矩阵（严禁混为一谈）
+
+| 级别 | 状态 | 说明 |
+|---|---|---|
+| Software Verified | ✅ VERIFIED | 本环境/CI 实际执行 lint / typecheck / test / build 全部通过（明细见下） |
+| GPU Verified | ⏳ PENDING | 需真实 NVIDIA GPU 运行 G1–G4（scripts/preflight_gpu_host.sh、scripts/gpu_acceptance.sh、scripts/isaac_sim_smoke.sh、scripts/isaac_lab_cartpole_smoke.sh、scripts/franka_smoke.sh）；当前 PHYSICAL_GPU_VALIDATION_PENDING |
+| Streaming Verified | ⏳ PENDING | 需真实 Isaac Sim WebRTC 链路验证（49100/TCP + 47998/UDP） |
+| Physical Robot Verified | ⏳ PENDING | 需真实机器人 Sim2Real 验证（Gate G5） |
+
+> 本版本为"部署就绪、物理验证待执行"状态。GPU / Streaming / Physical Robot
+> 三项在真实硬件验证完成前必须保持 PENDING，绝不允许冒充 PASS。
+
+## Software Verified 明细（本次实际执行）
+
+| Gate | 命令 | 结果 |
+|---|---|---|
+| lint | make lint | PASS（退出码 0） |
+| typecheck | make typecheck | PASS（退出码 0） |
+| test | make test | PASS（退出码 0） |
+| build | make build | PASS（退出码 0） |
+
+## 构建产物（dist/）
+
+${ARTIFACTS}
+
+## BLOCKED_EXTERNAL_DEPENDENCY 明细
+
+| 依赖 | 状态 | 影响 |
+|---|---|---|
+| Docker + daemon | 本环境缺失 | G1–G4 无法执行 |
+| NVIDIA GPU + NVIDIA Container Toolkit | 本环境缺失 | G1–G4 无法执行 |
+| NGC（nvcr.io/nvidia/isaac-sim:6.0.1） | 需 NGC 凭据/网络可拉取 | G2–G4 无法执行 |
+| 真实机器人硬件 | 本环境无真机 | G5 Sim2Real 无法执行 |
+
+## 待办（开发者人工执行）
+
+- [ ] 在真实 GPU 主机完成 G1–G4 并更新本文件为 VERIFIED
+- [ ] 更新 docs/CURRENT_STATE.md、docs/ACCEPTANCE_GATES.md
+- [ ] 手工 git tag v${VERSION} 并 push（本脚本不自动打 tag、不 push）
+EOF
+say "已生成 dist/VALIDATION_STATUS.md"
+
+# ---------- 5. 产物清单 + git tag 提示 ----------
+step "release v${VERSION} 产物清单"
+ls -lh dist/
+say ""
+say "release v${VERSION} 完成。"
+say "下一步（人工执行，本脚本不自动打 tag / push）："
+say "  git add CHANGELOG.md docs/ dist/ && git commit -m \"release v${VERSION}\""
+say "  git tag v${VERSION}"
+say "  git push origin v${VERSION}"

@@ -75,6 +75,9 @@ class RequestIDMiddleware:
         async def _send(message):
             if message["type"] == "http.response.start":
                 status_holder["status"] = message["status"]
+                headers = list(message.get("headers", []))
+                headers.append((b"x-request-id", request_id.encode()))
+                message["headers"] = headers
             await send(message)
 
         logger = logging.getLogger("embodiedcloud.request")

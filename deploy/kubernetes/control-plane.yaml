@@ -15,12 +15,29 @@ spec:
     spec:
       containers:
         - name: api
-          image: embodiedcloud/control-plane:0.1.0
+          image: embodiedcloud/control-plane:0.2.0
           ports:
             - {containerPort: 8000}
           env:
             - {name: EMBODIEDCLOUD_PROVIDER, value: "mock"}
             - {name: EMBODIEDCLOUD_DATABASE_URL, value: "sqlite:////data/embodiedcloud.db"}
+            - {name: EMBODIEDCLOUD_AUTO_CREATE_TABLES, value: "true"}
+            - {name: EMBODIEDCLOUD_LOG_JSON, value: "true"}
+            - {name: EMBODIEDCLOUD_WARM_POOL_ENABLED, value: "false"}
+          livenessProbe:
+            httpGet: {path: /api/health, port: 8000}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: {path: /api/health, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: "0.5", memory: "512Mi"}
+            limits: {cpu: "2", memory: "2Gi"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
           volumeMounts:
             - {name: data, mountPath: /data}
       volumes:
@@ -36,3 +53,12 @@ spec:
   selector: {app: embodiedcloud-control-plane}
   ports:
     - {port: 80, targetPort: 8000}
+---
+# GPU workspace pods are provisioned at runtime by KubernetesWorkspaceProvider
+# (Deployment/Service/PVC per workspace) in this namespace. The provider runs
+# with a workload identity / ServiceAccount with scoped RBAC; see docs/ADR 0003.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: embodiedcloud-control-plane
+  namespace: embodiedcloud

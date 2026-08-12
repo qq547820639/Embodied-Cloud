@@ -3,14 +3,23 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>EmbodiedCloud MVP</title>
+  <title>EmbodiedCloud</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div>
-      <strong>EmbodiedCloud</strong><span class="pill">MVP 0.1</span>
+      <strong>EmbodiedCloud</strong><span class="pill">v0.2</span>
       <div class="tagline">让物理世界的 AI 开发，像 Web 开发一样简单。</div>
+    </div>
+    <div id="authbar">
+      <input id="auth-email" type="email" placeholder="邮箱" autocomplete="username" />
+      <input id="auth-username" type="text" placeholder="用户名（注册）" style="display:none" />
+      <input id="auth-password" type="password" placeholder="密码" autocomplete="current-password" />
+      <button id="auth-login" onclick="doLogin()">登录</button>
+      <button id="auth-register" class="secondary" onclick="doRegister()">注册</button>
+      <button id="auth-logout" style="display:none" onclick="doLogout()">退出</button>
+      <span id="auth-user" class="muted" style="display:none"></span>
     </div>
     <div id="health" class="health">检查中…</div>
   </header>
@@ -19,7 +28,7 @@
       <div>
         <div class="eyebrow">ISAAC LAB CLOUD WORKSPACE</div>
         <h1>选择实验，启动工作区，直接改代码。</h1>
-        <p>当前产品只解决一个问题：把 GPU、Isaac Lab 环境和可运行实验模板封装成浏览器工作区。</p>
+        <p>把 GPU、Isaac Lab 环境和可运行实验模板封装成浏览器工作区。每个工作区独占 GPU，按实际运行秒数计费。</p>
       </div>
       <div class="metrics" id="metrics"></div>
     </section>
