@@ -439,7 +439,6 @@ def test_failed_claim_can_not_be_reclaimed():
 def test_docker_provider_reports_no_rotation_support():
     """Docker provider 必须声明不支持凭据轮换（warm pool 因此默认禁用）。"""
     from app.config import Settings as S
-
     from app.services.providers.docker import DockerProvider
 
     provider = DockerProvider(S(workspace_root=Path("/tmp/test-docker-rot")))  # noqa: S108
