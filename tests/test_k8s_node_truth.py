@@ -162,7 +162,9 @@ def test_reconcile_detects_node_mismatch():
     provider = NodeMismatchProvider(
         Settings(eula_accepted=True, k8s_namespace="embodiedcloud"), FakeNodeClient()
     )
-    orchestrator = WorkspaceOrchestrator(Factory, provider, __import__("pathlib").Path("/tmp/test-k8s-node-2"))
+    orchestrator = WorkspaceOrchestrator(  # noqa: S108 测试隔离目录
+        Factory, provider, __import__("pathlib").Path("/tmp/test-k8s-node-2")
+    )
     with Factory() as db:
         _seed_with_node(db, node_name="gpu-node-01")
         ws = Workspace(
@@ -191,7 +193,9 @@ def test_reconcile_keeps_running_when_node_matches():
         Settings(eula_accepted=True, k8s_namespace="embodiedcloud"), FakeNodeClient()
     )
     provider.actual_node = "gpu-node-01"  # 与 reserved 一致
-    orchestrator = WorkspaceOrchestrator(Factory, provider, __import__("pathlib").Path("/tmp/test-k8s-node-3"))
+    orchestrator = WorkspaceOrchestrator(  # noqa: S108 测试隔离目录
+        Factory, provider, __import__("pathlib").Path("/tmp/test-k8s-node-3")
+    )
     with Factory() as db:
         _seed_with_node(db, node_name="gpu-node-01")
         ws = Workspace(
