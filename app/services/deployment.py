@@ -135,7 +135,11 @@ class DeploymentService:
         return deployment
 
     def verify_checksum(self, db: Session, deployment: DeploymentRecord) -> DeploymentRecord:
-        """幂等校验: artifact 当前 checksum 与记录一致 → verified, 否则 failed+error."""
+        """幂等校验: artifact 当前 checksum 与记录一致 → verified, 否则 failed+error.
+
+        防绕过（§23）：必须先 download（PENDING 直接调校验视为绕过，拒绝）；
+        终态（verified/running/success/failed）幂等返回。
+        """
         if deployment.status in {
             DeploymentStatus.VERIFIED.value,
             DeploymentStatus.RUNNING.value,
@@ -143,6 +147,8 @@ class DeploymentService:
             DeploymentStatus.FAILED.value,
         }:
             return deployment
+        if deployment.status != DeploymentStatus.DOWNLOADING.value:
+            raise self._bad_transition(deployment, "verified")
         artifact = db.get(Artifact, deployment.artifact_id) if deployment.artifact_id else None
         if artifact is None:
             return self._fail(db, deployment, "artifact missing")

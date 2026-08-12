@@ -191,6 +191,7 @@ def test_verify_checksum_mismatch_fails(db, tmp_path):
     svc, owner, ws, artifact_file = _setup(db, tmp_path)
     artifact = svc.create_artifact(db, owner, ws, "checkpoint.pt")
     d = svc.deploy(db, owner, ws, artifact, "franka")
+    svc.download(db, d)  # 必须先 download（防绕过，§23）
     artifact_file.write_bytes(b"tampered-bytes")
     svc.verify_checksum(db, d)
     assert d.status == "failed"
