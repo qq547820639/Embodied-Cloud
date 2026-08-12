@@ -187,6 +187,40 @@ class Template(Base):
     )
 
 
+class TemplateVersion(Base):
+    """Template 的不可变版本（identity 与版本分离，§15）。
+
+    - UNIQUE(template_id, version)
+    - 已发布（released=True）版本禁止 mutable update：修改模板必须创建新版本
+    - 记录 image/image_digest/entrypoint/gpu/streaming/outputs/healthcheck/
+      dependency metadata/source revision
+    - Workspace 必须引用具体 TemplateVersion（workspaces.template_version_id）
+    """
+
+    __tablename__ = "template_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    template_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("templates.id"), nullable=False, index=True
+    )
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    image: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    image_digest: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    entrypoint: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    gpu_requirement_gb: Mapped[int] = mapped_column(Integer, default=16, nullable=False)
+    requires_streaming: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    outputs: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    healthcheck: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    source_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    released: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "version", name="uq_template_version"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Workspace
 # ---------------------------------------------------------------------------
@@ -198,6 +232,10 @@ class Workspace(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     template_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # 具体引用的不可变 TemplateVersion（runtime image 的单一事实来源）
+    template_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # 启动时快照的 runtime image（来自 TemplateVersion；provider 据此启动容器）
+    image: Mapped[str | None] = mapped_column(String(255), nullable=True)
     user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     organization_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("organizations.id"), nullable=True, index=True

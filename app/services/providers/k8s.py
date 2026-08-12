@@ -142,8 +142,9 @@ class KubernetesProvider:
         ns = self.settings.k8s_namespace
         deployment_name = self._deployment_name(workspace)
         pvc_name = self._pvc_name(workspace)
-        # 镜像优先级：template.image → settings.workspace_image（模板镜像为真实来源，禁止 latest）
-        image = template.image or self.settings.workspace_image
+        # 镜像优先级：workspace.image（TemplateVersion 快照）→ template.image →
+        # settings.workspace_image（模板镜像为真实来源，禁止 latest）
+        image = workspace.image or template.image or self.settings.workspace_image
         password = secrets.token_urlsafe(16)
         labels = {"app": deployment_name, "embodiedcloud.workspace": workspace.id}
 

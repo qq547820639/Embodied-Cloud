@@ -10,6 +10,7 @@ from ..models import (
     OperationStatus,
     OperationType,
     Template,
+    TemplateVersion,
     Workspace,
     WorkspaceOperation,
     WorkspaceStatus,
@@ -53,11 +54,23 @@ class WorkspaceOrchestrator:
         user_id: str | None = None,
         organization_id: str | None = None,
     ) -> Workspace:
+        # 绑定具体不可变 TemplateVersion（runtime image 的单一事实来源）
+        template_version = db.scalar(
+            select(TemplateVersion)
+            .where(
+                TemplateVersion.template_id == template.id,
+                TemplateVersion.released.is_(True),
+            )
+            .order_by(TemplateVersion.created_at.desc())
+        )
         workspace_id = str(uuid.uuid4())
         workspace = Workspace(
             id=workspace_id,
             name=name or f"{template.name} · {workspace_id[:6]}",
             template_id=template.id,
+            template_version_id=template_version.id if template_version else None,
+            # 快照版本镜像：启动时 provider 使用该镜像（禁止 mutable latest）
+            image=template_version.image if template_version else template.image,
             user_id=user_id,
             organization_id=organization_id,
             provider=self.provider.name,

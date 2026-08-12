@@ -145,9 +145,9 @@ class DockerProvider:
             "-e", f"PUBLIC_IP={self.settings.host_public_ip}",
         ]
 
-        # runtime 镜像：TemplateVersion/Template.image 决定（禁止 latest）；
-        # 仅当 template 未配置镜像时才允许 fallback 到平台默认镜像。
-        image = template.image or self.settings.workspace_image
+        # runtime 镜像：workspace.image（TemplateVersion 快照）→ template.image →
+        # settings.workspace_image 显式 fallback。禁止 mutable latest。
+        image = workspace.image or template.image or self.settings.workspace_image
 
         args = [
             "docker", "run", "-d", "--rm",

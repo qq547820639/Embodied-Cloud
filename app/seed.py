@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Template
+from .models import Template, TemplateVersion
 
 DEPRECATED_BUILTIN_TEMPLATE_IDS = {"franka-reach-play"}
 
@@ -136,10 +136,13 @@ SEED_TEMPLATES = [
 
 
 def seed_templates(db: Session) -> None:
-    """Idempotently seed and update built-in templates.
+    """Idempotently seed built-in templates + 每个模板的不可变 TemplateVersion。
 
-    Built-in template commands are product code, not immutable user data, so an
-    upgrade deliberately refreshes their fields while preserving the same IDs.
+    版本不可变约束（§15）：
+    - UNIQUE(template_id, version) 由数据库兜底
+    - 已发布（released）TemplateVersion 禁止覆盖：seed 只创建缺失版本，
+      绝不修改已存在的 released 版本（修改模板 = 创建新版本）
+    - 模板 identity 字段（名称/价格等展示字段）可刷新，但版本内容不可变
     """
     for template_id in DEPRECATED_BUILTIN_TEMPLATE_IDS:
         old_template = db.scalar(select(Template).where(Template.id == template_id))
@@ -149,9 +152,37 @@ def seed_templates(db: Session) -> None:
     for spec in SEED_TEMPLATES:
         existing = db.scalar(select(Template).where(Template.id == spec["id"]))
         if existing is None:
-            db.add(Template(**spec))
+            existing = Template(**spec)
+            db.add(existing)
+            db.flush()
         else:
-            for key, value in spec.items():
-                setattr(existing, key, value)
+            # identity/展示字段可刷新；版本相关内容不可变
+            for key in ("name", "description", "category", "estimated_hourly_cost_cny", "enabled"):
+                if key in spec:
+                    setattr(existing, key, spec[key])
             existing.enabled = True
+        # 已发布版本不可覆盖：仅创建缺失版本
+        version = str(spec.get("version", "0.1.0"))
+        existing_version = db.scalar(
+            select(TemplateVersion).where(
+                TemplateVersion.template_id == spec["id"], TemplateVersion.version == version
+            )
+        )
+        if existing_version is None:
+            db.add(
+                TemplateVersion(
+                    id=f"tv-{spec['id']}-{version.replace('.', '-')}",
+                    template_id=spec["id"],
+                    version=version,
+                    image=spec.get("image"),
+                    entrypoint=spec.get("entrypoint", ""),
+                    gpu_requirement_gb=spec.get("gpu_requirement_gb", 16),
+                    requires_streaming=spec.get("requires_streaming", False),
+                    outputs=spec.get("outputs", []),
+                    healthcheck=spec.get("healthcheck"),
+                    metadata_json=spec.get("metadata_json", {}),
+                    source_revision=None,
+                    released=True,
+                )
+            )
     db.commit()
