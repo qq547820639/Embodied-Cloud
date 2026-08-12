@@ -67,6 +67,7 @@ def _deploy(db, svc, owner, ws, robot="franka"):
 
 
 def test_edge_reports_matching_checksum_verifies(tmp_path):
+    import hashlib
 
     with Factory() as db:
         svc, owner, ws, _ = _setup(db, tmp_path)
@@ -77,6 +78,7 @@ def test_edge_reports_matching_checksum_verifies(tmp_path):
 
 
 def test_tampered_download_fails(tmp_path):
+    import hashlib
 
     with Factory() as db:
         svc, owner, ws, _ = _setup(db, tmp_path)
@@ -97,6 +99,7 @@ def test_wrong_checksum_fails(tmp_path):
 
 
 def test_duplicate_report_idempotent(tmp_path):
+    import hashlib
 
     with Factory() as db:
         svc, owner, ws, _ = _setup(db, tmp_path)
@@ -110,6 +113,7 @@ def test_duplicate_report_idempotent(tmp_path):
 
 
 def test_replay_after_failed_does_not_resurrect(tmp_path):
+    import hashlib
 
     with Factory() as db:
         svc, owner, ws, _ = _setup(db, tmp_path)
