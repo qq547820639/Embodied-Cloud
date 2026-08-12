@@ -10,3 +10,6 @@ dist/
 build/
 *.egg-info/
 smoke-embodiedcloud.db
+
+# WorkBuddy local memory/artifacts
+.workbuddy/memory/
