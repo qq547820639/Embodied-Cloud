@@ -234,6 +234,15 @@ class DockerProvider:
             return ""
         return result.stdout
 
+    def rotate_credentials(self, workspace: Workspace, credentials: dict) -> bool:
+        """运行中容器的 WORKSPACE_PASSWORD env 不可变；不支持运行时轮换。
+
+        返回 False → warm pool claim 不得交付（fallback 正常 provision）。
+        未来支持路径：镜像改为从文件读取密码（如 /workspace/project/.code-server-passwd）
+        后，此处改为写入文件并返回 True。
+        """
+        return False
+
     def reconcile(self, workspace: Workspace) -> RuntimeState:
         """判定 runtime 存活：容器 running → ALIVE；不存在 → MISSING；docker 不可用 → UNKNOWN。"""
         if shutil.which("docker") is None:

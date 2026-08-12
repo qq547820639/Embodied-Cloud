@@ -70,3 +70,10 @@ class WorkspaceProvider(Protocol):
     def inspect(self, workspace: Workspace) -> dict: ...
     def logs(self, workspace: Workspace, tail: int = 200) -> str: ...
     def reconcile(self, workspace: Workspace) -> RuntimeState: ...
+    def rotate_credentials(self, workspace: Workspace, credentials: dict) -> bool:
+        """轮换 runtime 凭据（§7，warm pool claim 用）。
+
+        - 返回 True：新凭据已生效（runtime 不再接受旧凭据）
+        - 返回 False：不支持/失败 —— 调用方**不得**把 workspace 交付用户，
+          应 DRAINING/FAILED 并 fallback 正常 provision
+        """

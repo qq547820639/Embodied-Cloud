@@ -22,6 +22,7 @@ from .services.providers.docker import DockerProvider
 from .services.providers.k8s import KubernetesProvider
 from .services.providers.mock import MockProvider
 from .services.scheduler import GpuScheduler
+from .services.warmpool import WarmPoolManager
 from .services.worker import OperationWorker
 
 settings = Settings()
@@ -59,6 +60,7 @@ orchestrator = WorkspaceOrchestrator(
     credential_cipher=credential_cipher,
 )
 worker = OperationWorker(SessionFactory, orchestrator)
+warm_pool = WarmPoolManager(SessionFactory, orchestrator, settings)
 
 
 def bootstrap_db() -> None:

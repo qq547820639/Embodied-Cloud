@@ -7,7 +7,7 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
-from ..deps import DB, CurrentUser, billing, credential_cipher, orchestrator
+from ..deps import DB, CurrentUser, billing, credential_cipher, orchestrator, warm_pool
 from ..models import Role, Template, Workspace, WorkspaceStatus
 from ..schemas import WorkspaceAccessOut, WorkspaceCreate, WorkspaceOut
 from ..services.billing import BillingError
@@ -49,6 +49,12 @@ def create_workspace(payload: WorkspaceCreate, db: DB, user: CurrentUser):
         billing.check_launch_eligible(db, user, template)
     except BillingError as exc:
         raise HTTPException(402, str(exc)) from exc
+    # §6：WarmPool claim 真实产品路径 —— Launch → claim(template)
+    # 成功 → 直接返回已绑定用户的 claimed workspace；无 READY → fallback 正常 provision
+    if payload.auto_start:
+        claimed = warm_pool.claim(db, template.id, user, credential_cipher=credential_cipher)
+        if claimed is not None:
+            return claimed
     workspace = orchestrator.create(
         db,
         template,

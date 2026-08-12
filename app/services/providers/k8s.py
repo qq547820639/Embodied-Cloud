@@ -7,6 +7,7 @@
 - kubernetes 依赖懒加载: 模块顶层不 import, 保证 mock 模式下 `from app.deps import provider` 不受影响.
 """
 
+import logging
 import secrets
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,8 @@ from typing import Any
 from ...config import Settings
 from ...models import Template, Workspace
 from .base import ProvisionResult, ResourceReservation, RuntimeState
+
+logger = logging.getLogger("embodiedcloud.providers.k8s")
 
 
 class KubernetesProvider:
@@ -368,6 +371,45 @@ class KubernetesProvider:
             )
         except Exception:
             return ""
+
+    def rotate_credentials(self, workspace: Workspace, credentials: dict) -> bool:
+        """轮换 runtime 凭据：patch Deployment 的 WORKSPACE_PASSWORD env → 滚动重启。
+
+        新 env 注入后 Pod 重建，新密码生效（旧密码不再可登录）。
+        失败返回 False（调用方不得交付）。
+        """
+        password = credentials.get("password")
+        if not password:
+            return False
+        deployment_name = workspace.container_name or self._deployment_name(workspace)
+        try:
+            api = self._require_client()
+            apps = api.AppsV1Api()
+            dep = apps.read_namespaced_deployment(
+                name=deployment_name, namespace=self.settings.k8s_namespace
+            )
+            envs = dep.spec.template.spec.containers[0].env
+            replaced = False
+            for env in envs:
+                if env.name == "WORKSPACE_PASSWORD":
+                    env.value = password
+                    replaced = True
+            if not replaced:
+                envs.append(type(envs[0])(name="WORKSPACE_PASSWORD", value=password))
+            body = {
+                "spec": {
+                    "template": {
+                        "spec": {"containers": [{"name": dep.spec.template.spec.containers[0].name, "env": envs}]}
+                    }
+                }
+            }
+            apps.patch_namespaced_deployment(
+                name=deployment_name, namespace=self.settings.k8s_namespace, body=body
+            )
+            return True
+        except Exception as exc:
+            logger.warning("rotate_credentials failed for %s: %s", deployment_name, self._describe(exc))
+            return False
 
     def reconcile(self, workspace: Workspace) -> RuntimeState:
         """判定 Deployment runtime 存活：available_replicas>=1 → ALIVE；404/0 副本 → MISSING；其他 → UNKNOWN。"""

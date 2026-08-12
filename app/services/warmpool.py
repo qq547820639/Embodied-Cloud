@@ -146,14 +146,36 @@ class WarmPoolManager:
         # attach user
         workspace.user_id = user.id
         workspace.organization_id = user.organization_id
-        # 轮换凭据：warm runtime 的旧密码不属于任何用户，claim 后必须更换。
-        # runtime 侧生效依赖 provider rotate 能力（真实 GPU 环境验证，PENDING）；
-        # 控制面 DB 立即写入新加密凭据，防止旧凭据滞留。
+        # 轮换凭据（§7）：warm runtime 的旧密码不属于任何用户，claim 后必须更换。
+        # 1) 生成新密码并加密落库；2) provider.rotate_credentials 让 runtime 生效。
+        new_password = None
         if credential_cipher is not None:
             import secrets
 
             new_password = secrets.token_urlsafe(16)
             workspace.password = credential_cipher.encrypt(new_password)
+        db.commit()
+        rotated = False
+        if new_password is not None:
+            rotated = self.orchestrator.provider.rotate_credentials(
+                workspace, {"password": new_password}
+            )
+        if not rotated:
+            # 轮换失败：不得把 workspace 交给用户（旧密码仍可登录 = 不能发布）。
+            # → DRAINING + 释放，调用方 fallback 正常 provision。
+            WARM_POOL_CLAIM_FAILED.inc()
+            workspace.warm_pool_state = WarmPoolState.DRAINING.value
+            workspace.user_id = None
+            workspace.organization_id = None
+            workspace.password = None
+            workspace.status = WorkspaceStatus.FAILED.value
+            workspace.error_message = "warm pool claim failed: credential rotation not supported"
+            db.commit()
+            logger.warning(
+                "warm pool claim aborted for %s: credential rotation failed",
+                claimed_id[:8],
+            )
+            return None
         workspace.warm_pool_state = WarmPoolState.CLAIMED.value
         workspace.status = WorkspaceStatus.RUNNING.value
         workspace.started_at = utcnow()

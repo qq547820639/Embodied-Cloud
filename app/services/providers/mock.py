@@ -52,3 +52,7 @@ class MockProvider:
     def reconcile(self, workspace: Workspace) -> RuntimeState:
         # mock runtime 无法判定存活（没有可观测的真实进程）；由上层策略处理
         return RuntimeState.UNKNOWN
+
+    def rotate_credentials(self, workspace: Workspace, credentials: dict) -> bool:
+        # mock 无真实 runtime；凭据轮换视为成功（仅用于 warm pool claim 路径验证）
+        return True
