@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import (
+    Lab,
     OperationStatus,
     OperationType,
     Template,
@@ -400,6 +401,62 @@ class WorkspaceOrchestrator:
             )
             is not None
         )
+
+    def monitor_runtime_quotas(self) -> dict[str, int]:
+        """§12 active-runtime quota monitor：防止 workspace 无限跑成大额负数。
+
+        对每个 RUNNING workspace：
+        - 投影余额 = 当前余额 - 本运行段 live 消耗（预估）
+          投影余额 < 0（即将透支）→ 优雅停止（settle + release + STOPPED）
+        - course quota：模板对应 lab 配额用尽 → 同样停止
+        幂等：停止走 _finalize_stop（幂等结算/释放）；重复 monitor 不重复扣费。
+        """
+        stats = {"stopped": 0, "scanned": 0, "notified": 0}
+        with self.session_factory() as db:
+            running = db.scalars(
+                select(Workspace).where(
+                    Workspace.status == WorkspaceStatus.RUNNING.value,
+                    Workspace.deleted_at.is_(None),
+                )
+            ).all()
+            from .billing import BillingPolicy
+
+            policy = BillingPolicy(
+                self.session_factory, self.ledger,
+                minimum_launch_minutes=5, enforce_preauthorization=False,
+            )
+            for w in running:
+                if w.user_id is None:
+                    continue  # warm pool（无归属）不监控计费
+                stats["scanned"] += 1
+                user = db.get(User, w.user_id)
+                if user is None:
+                    continue
+                # 投影余额：当前余额 - 本运行段已消耗
+                live = 0
+                if w.started_at:
+                    started = w.started_at
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=UTC)
+                    live = max(0, int((utcnow() - started).total_seconds()))
+                projected = self.ledger.balance(db, user.id) - live
+                # course quota 检查
+                labs = db.scalars(
+                    select(Lab).where(Lab.template_id == w.template_id)
+                ).all()
+                quota_exceeded = any(
+                    policy.course_usage_seconds(db, user.id, lab) >= lab.quota_seconds
+                    for lab in labs
+                )
+                if projected < 0 or quota_exceeded:
+                    self.stop(db, w)  # 幂等：streaming→runtime→settle→release→STOPPED
+                    w.error_message = (
+                        "quota monitor: credits exhausted" if projected < 0
+                        else "quota monitor: course quota reached"
+                    )
+                    db.commit()
+                    stats["stopped"] += 1
+        return stats
 
     def crash_recovery(self) -> dict[str, int]:
         """启动恢复：基于 runtime 事实的 reconciliation（幂等、不误杀存活 runtime）。"""

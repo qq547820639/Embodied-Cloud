@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     privacy_consent: bool = False
     default_idle_timeout_minutes: int = 60
 
+    # --- billing（§12）---
+    # 启动预授权（生产开启）：余额必须 ≥ minimum_launch_minutes × 60 credits 才能启动
+    billing_enforce_preauthorization: bool = False
+    billing_minimum_launch_minutes: int = 5
+
     # --- auth ---
     session_ttl_hours: int = 168  # 7 天
     password_pepper: str = ""  # 生产建议配置；未配置时退化为空盐前缀

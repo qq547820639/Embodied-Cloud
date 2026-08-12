@@ -19,6 +19,7 @@ from app.models import (
     Course,
     CourseMember,
     CreditLedger,
+    GpuAllocation,
     Lab,
     LedgerType,
     Role,
@@ -280,3 +281,104 @@ def test_duplicate_stop_no_double_charge():
         assert len(usage) == 1  # 不双重扣费
         ws = db.get(Workspace, wid)
         assert ws.status == WorkspaceStatus.STOPPED.value
+
+
+def _make_orchestrator_for_monitor(provider=None):
+    provider = provider or MockProvider("http://127.0.0.1:8000")
+    ledger = CreditLedgerService(Factory)
+    orchestrator = WorkspaceOrchestrator(
+        Factory, provider, Path("/tmp/test-billing-monitor"), billing=BillingPolicy(Factory, ledger)  # noqa: S108
+    )
+    return orchestrator, ledger
+
+
+def test_preauthorization_requires_minimum_credit():
+    """§12：生产模式（enforce）下余额 < 最低预授权 → 拒绝启动。"""
+    ledger = CreditLedgerService(Factory)
+    policy = BillingPolicy(Factory, ledger, minimum_launch_minutes=5, enforce_preauthorization=True)
+    with Factory() as db:
+        _seed_gpu_template(db)
+        user = _make_user(db)
+        template = db.get(Template, "cartpole")
+
+        # 余额 0（此前可启动）→ 预授权拒绝（需要 5*60=300）
+        with pytest.raises(Exception) as exc_info:
+            policy.check_launch_eligible(db, user, template)
+        assert "preauthorization" in str(exc_info.value)
+
+        # 充值 300 → 允许
+        ledger.record(db, type=LedgerType.RECHARGE, amount=300, user_id=user.id, idempotency_key="pre-1")
+        policy.check_launch_eligible(db, user, template)  # 不抛
+
+
+def test_preauthorization_disabled_by_default_allows_zero_balance():
+    """默认（mock/演示）不强制预授权：0 余额仍可启动（兼容现有行为）。"""
+    ledger = CreditLedgerService(Factory)
+    policy = BillingPolicy(Factory, ledger, minimum_launch_minutes=5, enforce_preauthorization=False)
+    with Factory() as db:
+        _seed_gpu_template(db)
+        user = _make_user(db)
+        policy.check_launch_eligible(db, user, db.get(Template, "cartpole"))  # 不抛
+
+
+def test_runtime_quota_monitor_stops_overdraft():
+    """§12：RUNNING workspace 投影余额将透支 → monitor 优雅停止 + 结算 + GPU 释放。"""
+    from datetime import UTC, datetime, timedelta
+
+    orchestrator, ledger = _make_orchestrator_for_monitor()
+    with Factory() as db:
+        _seed_gpu_template(db)
+        user = _make_user(db)
+        ws = orchestrator.create(db, db.get(Template, "cartpole"), user_id=user.id)
+        wid = ws.id
+        orchestrator._start(wid)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.RUNNING.value
+        # 余额 30，已运行 60s（live 消耗 60）→ 投影 -30 < 0 → 停止
+        ledger.record(db, type=LedgerType.RECHARGE, amount=30, user_id=user.id, idempotency_key="m1")
+        ws.started_at = datetime.now(UTC) - timedelta(seconds=60)
+        db.commit()
+
+    stats = orchestrator.monitor_runtime_quotas()
+    assert stats["stopped"] == 1
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.STOPPED.value
+        assert "quota monitor" in ws.error_message
+        # 结算发生（60s usage 入账）+ GPU 释放
+        usage = db.scalars(
+            select(CreditLedger).where(CreditLedger.workspace_id == wid)
+        ).all()
+        assert any(e.type == LedgerType.USAGE.value for e in usage)
+        assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == wid)) is None
+
+
+def test_runtime_quota_monitor_idempotent():
+    """monitor 重复执行：已停止的 workspace 不再重复停止/扣费。"""
+    from datetime import UTC, datetime, timedelta
+
+    orchestrator, ledger = _make_orchestrator_for_monitor()
+    with Factory() as db:
+        _seed_gpu_template(db)
+        user = _make_user(db)
+        ws = orchestrator.create(db, db.get(Template, "cartpole"), user_id=user.id)
+        wid = ws.id
+        orchestrator._start(wid)
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        ledger.record(db, type=LedgerType.RECHARGE, amount=10, user_id=user.id, idempotency_key="m2")
+        ws.started_at = datetime.now(UTC) - timedelta(seconds=120)
+        db.commit()
+
+    stats1 = orchestrator.monitor_runtime_quotas()
+    stats2 = orchestrator.monitor_runtime_quotas()
+    assert stats1["stopped"] == 1
+    assert stats2["stopped"] == 0  # 幂等
+    with Factory() as db:
+        usage = db.scalars(
+            select(CreditLedger).where(CreditLedger.workspace_id == wid)
+        ).all()
+        assert len([e for e in usage if e.type == LedgerType.USAGE.value]) == 1  # 只结算一次

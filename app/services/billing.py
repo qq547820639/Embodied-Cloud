@@ -18,9 +18,17 @@ class BillingError(RuntimeError):
 
 
 class BillingPolicy:
-    def __init__(self, session_factory: sessionmaker[Session], ledger: CreditLedgerService | None = None):
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        ledger: CreditLedgerService | None = None,
+        minimum_launch_minutes: int = 5,
+        enforce_preauthorization: bool = False,
+    ):
         self.session_factory = session_factory
         self.ledger = ledger or CreditLedgerService(session_factory)
+        self.minimum_launch_minutes = max(1, minimum_launch_minutes)
+        self.enforce_preauthorization = enforce_preauthorization
 
     # ------------------------------------------------------------------
     def check_launch_eligible(
@@ -39,13 +47,25 @@ class BillingPolicy:
         # 1) 有效余额（个人 + 组织）为负 → 拒绝
         personal = self.ledger.balance(db, user.id)
         org = self.ledger.organization_balance(db, user.organization_id) if user.organization_id else 0
-        if personal + org < 0:
+        available = personal + org
+        if available < 0:
             raise BillingError(
                 f"insufficient credits: personal={personal}, organization={org} "
                 f"(workspace {template.id})"
             )
 
-        # 2) course quota：学生在 lab 的实际用量（秒）≥ 配额 → 拒绝
+        # 2) §12 预授权：生产开启时余额必须 ≥ 最低启动授权
+        #    （minimum_launch_minutes × 60 credits，与结算口径 1s=1credit 一致）
+        if self.enforce_preauthorization:
+            required = self.minimum_launch_minutes * 60
+            if available < required:
+                raise BillingError(
+                    f"insufficient credits for launch: {available} available, "
+                    f"minimum {required} required "
+                    f"({self.minimum_launch_minutes} min preauthorization)"
+                )
+
+        # 3) course quota：学生在 lab 的实际用量（秒）≥ 配额 → 拒绝
         if lab is not None:
             used = self.course_usage_seconds(db, user.id, lab)
             if used >= lab.quota_seconds:
