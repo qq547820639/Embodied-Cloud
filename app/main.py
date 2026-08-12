@@ -1,55 +1,57 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from sqlalchemy import func, select
 
 from . import __version__
-from .config import Settings
-from .db import Base, make_engine, make_session_factory, session_dependency
-from .models import Template, Workspace, WorkspaceStatus
-from .schemas import (
-    HealthOut,
-    TemplateOut,
-    UsageOut,
-    WorkspaceAccessOut,
-    WorkspaceCreate,
-    WorkspaceOut,
-)
-from .seed import seed_templates
-from .services.orchestrator import WorkspaceOrchestrator
-from .services.providers.docker import DockerProvider
-from .services.providers.mock import MockProvider
+from .deps import DB, SessionFactory, provider, run_crash_recovery, settings
+from .logging_setup import RequestIDMiddleware, configure_logging
+from .metrics import GPU_ALLOCATED, WORKSPACE_RUNNING
+from .models import Gpu, GpuStatus, Workspace, WorkspaceStatus
+from .routers import auth, courses, deployments, edge, gpus, streaming, templates, usage, workspaces
+from .schemas import HealthOut
 
-settings = Settings()
-settings.ensure_dirs()
-engine = make_engine(settings)
-SessionFactory = make_session_factory(engine)
-get_db = session_dependency(SessionFactory)
-DB = Annotated[Session, Depends(get_db)]
+configure_logging(settings)
+logger = logging.getLogger("embodiedcloud")
 
 
-def make_provider():
-    if settings.provider.lower() == "docker":
-        return DockerProvider(settings)
-    return MockProvider(settings.public_base_url)
-
-
-provider = make_provider()
-orchestrator = WorkspaceOrchestrator(SessionFactory, provider, settings.workspace_root)
+async def _gauge_loop():
+    """周期刷新 Prometheus Gauge（workspace_running / gpu_allocated）。"""
+    while True:
+        try:
+            with SessionFactory() as db:
+                running = db.scalar(
+                    select(func.count(Workspace.id)).where(
+                        Workspace.status == WorkspaceStatus.RUNNING.value
+                    )
+                )
+                allocated = db.scalar(
+                    select(func.count(Gpu.id)).where(
+                        Gpu.status == GpuStatus.ALLOCATED.value
+                    )
+                )
+            WORKSPACE_RUNNING.set(int(running or 0))
+            GPU_ALLOCATED.set(int(allocated or 0))
+        except Exception as exc:  # 指标刷新失败不影响主服务
+            logger.warning("gauge refresh failed: %s", exc)
+        await asyncio.sleep(5)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(engine)
-    with SessionFactory() as db:
-        seed_templates(db)
+    from .deps import bootstrap_db
+
+    bootstrap_db()
+    run_crash_recovery()
+    task = asyncio.create_task(_gauge_loop())
     yield
+    task.cancel()
 
 
 app = FastAPI(
@@ -58,9 +60,20 @@ app = FastAPI(
     description="Browser-first Isaac Lab workspace control plane",
     lifespan=lifespan,
 )
+app.add_middleware(RequestIDMiddleware)
 
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+app.include_router(auth.router, prefix="/api")
+app.include_router(templates.router, prefix="/api")
+app.include_router(workspaces.router, prefix="/api")
+app.include_router(gpus.router, prefix="/api")
+app.include_router(usage.router, prefix="/api")
+app.include_router(streaming.router, prefix="/api")
+app.include_router(courses.router, prefix="/api")
+app.include_router(edge.router, prefix="/api")
+app.include_router(deployments.router, prefix="/api")
 
 
 @app.get("/", include_in_schema=False)
@@ -80,117 +93,19 @@ def health():
     )
 
 
-@app.get("/api/templates", response_model=list[TemplateOut])
-def list_templates(db: DB):
-    stmt = (
-        select(Template)
-        .where(Template.enabled.is_(True))
-        .order_by(Template.category, Template.name)
-    )
-    return list(db.scalars(stmt))
-
-
-@app.get("/api/workspaces", response_model=list[WorkspaceOut])
-def list_workspaces(db: DB):
-    return list(db.scalars(select(Workspace).order_by(Workspace.created_at.desc())))
-
-
-@app.get("/api/workspaces/{workspace_id}", response_model=WorkspaceOut)
-def get_workspace(workspace_id: str, db: DB):
-    workspace = db.get(Workspace, workspace_id)
-    if workspace is None:
-        raise HTTPException(404, "workspace not found")
-    return workspace
-
-
-@app.get("/api/workspaces/{workspace_id}/access", response_model=WorkspaceAccessOut)
-def get_workspace_access(workspace_id: str, db: DB):
-    workspace = db.get(Workspace, workspace_id)
-    if workspace is None:
-        raise HTTPException(404, "workspace not found")
-    return WorkspaceAccessOut(
-        workspace_id=workspace.id,
-        status=workspace.status,
-        ide_url=workspace.ide_url,
-        ide_password=workspace.password,
-        stream_hint=workspace.stream_hint,
-        signal_port=workspace.signal_port,
-        media_port=workspace.media_port,
-    )
-
-
-@app.post("/api/workspaces", response_model=WorkspaceOut, status_code=201)
-def create_workspace(payload: WorkspaceCreate, db: DB):
-    template = db.get(Template, payload.template_id)
-    if template is None or not template.enabled:
-        raise HTTPException(404, "template not found")
-    workspace = orchestrator.create(db, template, payload.name)
-    if payload.auto_start:
-        orchestrator.start_async(workspace.id)
-    return workspace
-
-
-@app.post("/api/workspaces/{workspace_id}/start", response_model=WorkspaceOut)
-def start_workspace(workspace_id: str, db: DB):
-    workspace = db.get(Workspace, workspace_id)
-    if workspace is None:
-        raise HTTPException(404, "workspace not found")
-    if workspace.status in {WorkspaceStatus.PROVISIONING.value, WorkspaceStatus.RUNNING.value}:
-        return workspace
-    workspace.status = WorkspaceStatus.QUEUED.value
-    workspace.error_message = None
-    db.commit()
-    orchestrator.start_async(workspace.id)
-    db.refresh(workspace)
-    return workspace
-
-
-@app.post("/api/workspaces/{workspace_id}/stop", response_model=WorkspaceOut)
-def stop_workspace(workspace_id: str, db: DB):
-    workspace = db.get(Workspace, workspace_id)
-    if workspace is None:
-        raise HTTPException(404, "workspace not found")
-    return orchestrator.stop(db, workspace)
-
-
-@app.delete("/api/workspaces/{workspace_id}", status_code=204)
-def delete_workspace(workspace_id: str, db: DB):
-    workspace = db.get(Workspace, workspace_id)
-    if workspace is None:
-        raise HTTPException(404, "workspace not found")
-    orchestrator.destroy(db, workspace)
-
-
-@app.get("/api/usage", response_model=UsageOut)
-def usage(db: DB):
-    workspaces = list(db.scalars(select(Workspace)))
-    running = [w for w in workspaces if w.status == WorkspaceStatus.RUNNING.value]
-    now = datetime.now(UTC)
-    seconds_by_workspace: dict[str, int] = {}
-    for w in workspaces:
-        live_seconds = 0
-        if w.status == WorkspaceStatus.RUNNING.value and w.started_at:
-            started = w.started_at
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=UTC)
-            live_seconds = max(0, int((now - started).total_seconds()))
-        seconds_by_workspace[w.id] = w.accumulated_seconds + live_seconds
-    seconds = sum(seconds_by_workspace.values())
-    template_rates = {t.id: t.estimated_hourly_cost_cny for t in db.scalars(select(Template))}
-    estimated = sum((seconds_by_workspace[w.id] / 3600.0) * template_rates.get(w.template_id, 0.0) for w in workspaces)
-    return UsageOut(
-        running_workspaces=len(running),
-        total_workspaces=len(workspaces),
-        accumulated_gpu_seconds=seconds,
-        estimated_cost_cny=round(estimated, 2),
-    )
+@app.get("/metrics", include_in_schema=False)
+def metrics():
+    return HTMLResponse(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/demo-workspace/{workspace_id}", response_class=HTMLResponse, include_in_schema=False)
 def demo_workspace(workspace_id: str, db: DB, view: str | None = None):
-    workspace = db.get(Workspace, workspace_id)
+    from .models import Template
+    from .models import Workspace as W
+
+    workspace = db.get(W, workspace_id)
     if workspace is None:
-        raise HTTPException(404, "workspace not found")
+        return HTMLResponse("workspace not found", status_code=404)
     template = db.get(Template, workspace.template_id)
     mode = "仿真流演示" if view == "stream" else "浏览器 IDE 演示"
     command = template.launch_command if template else ""
@@ -216,6 +131,7 @@ def demo_workspace(workspace_id: str, db: DB, view: str | None = None):
 
 def run():
     import uvicorn
+
     uvicorn.run("app.main:app", host=settings.bind_host, port=settings.bind_port, reload=False)
 
 

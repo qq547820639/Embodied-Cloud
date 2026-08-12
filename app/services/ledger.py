@@ -1,0 +1,128 @@
+"""不可变 Credit Ledger：append-only 账本 + 幂等结算。
+
+原则（见 docs/PRODUCT_SPEC.md / SECURITY.md T4）：
+- 永不 UPDATE/DELETE 已入账 transaction；balance 始终 = SUM(amount)。
+- 每笔交易带唯一 idempotency_key；重放不会产生重复交易。
+- GPU 计费单位：实际运行秒数；同一 workspace 的同一运行段只结算一次。
+"""
+
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from ..models import CreditLedger, LedgerType, Template, Workspace
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+class LedgerError(RuntimeError):
+    pass
+
+
+class CreditLedgerService:
+    def __init__(self, session_factory):
+        self.session_factory = session_factory
+
+    def record(
+        self,
+        db: Session,
+        *,
+        type: LedgerType | str,
+        amount: int,
+        user_id: str | None = None,
+        organization_id: str | None = None,
+        description: str = "",
+        workspace_id: str | None = None,
+        template_id: str | None = None,
+        gpu_seconds: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> CreditLedger:
+        """追加一笔交易。幂等：idempotency_key 已存在则返回已有记录，不重复入账。"""
+        key = idempotency_key or f"{type}:{uuid.uuid4()}"
+        existing = db.scalar(select(CreditLedger).where(CreditLedger.idempotency_key == key))
+        if existing is not None:
+            return existing
+        entry = CreditLedger(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            organization_id=organization_id,
+            type=str(type),
+            amount=amount,
+            description=description,
+            workspace_id=workspace_id,
+            template_id=template_id,
+            gpu_seconds=gpu_seconds,
+            idempotency_key=key,
+        )
+        db.add(entry)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            existing = db.scalar(select(CreditLedger).where(CreditLedger.idempotency_key == key))
+            if existing is not None:
+                return existing
+            raise
+        return entry
+
+    def balance(self, db: Session, user_id: str) -> int:
+        total = db.scalar(
+            select(func.coalesce(func.sum(CreditLedger.amount), 0)).where(
+                CreditLedger.user_id == user_id
+            )
+        )
+        return int(total or 0)
+
+    def organization_balance(self, db: Session, organization_id: str) -> int:
+        total = db.scalar(
+            select(func.coalesce(func.sum(CreditLedger.amount), 0)).where(
+                CreditLedger.organization_id == organization_id
+            )
+        )
+        return int(total or 0)
+
+    def settle_workspace_run(
+        self,
+        db: Session,
+        workspace: Workspace,
+        seconds: int,
+        started_at_iso: str,
+    ) -> CreditLedger | None:
+        """结算一次运行段的 GPU 秒数（幂等）。
+
+        idempotency_key = f"usage:{workspace.id}:{started_at_iso}" —— 同一运行段
+        重复结算（进程崩溃重放）只会命中已有记录，不会重复扣款。
+        """
+        if seconds <= 0:
+            return None
+        template = db.get(Template, workspace.template_id)
+        rate = template.estimated_hourly_cost_cny if template else 0.0
+        # 1 秒 = 1 credit（展示口径；未来可乘费率系数）
+        amount = -seconds
+        return self.record(
+            db,
+            type=LedgerType.USAGE,
+            amount=amount,
+            user_id=workspace.user_id,
+            organization_id=workspace.organization_id,
+            description=f"GPU usage {seconds}s @ {rate}/h",
+            workspace_id=workspace.id,
+            template_id=workspace.template_id,
+            gpu_seconds=seconds,
+            idempotency_key=f"usage:{workspace.id}:{started_at_iso}",
+        )
+
+    def history(self, db: Session, user_id: str, limit: int = 100) -> list[CreditLedger]:
+        return list(
+            db.scalars(
+                select(CreditLedger)
+                .where(CreditLedger.user_id == user_id)
+                .order_by(CreditLedger.created_at.desc())
+                .limit(limit)
+            )
+        )

@@ -1,0 +1,104 @@
+"""Workspaces —— 全量 owner/org 隔离。
+
+越权访问一律 404（不泄露资源存在性，见 SECURITY.md T1）。
+"""
+
+
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
+
+from ..deps import DB, CurrentUser, orchestrator
+from ..models import Role, Template, Workspace, WorkspaceStatus
+from ..schemas import WorkspaceAccessOut, WorkspaceCreate, WorkspaceOut
+
+router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+
+
+def _get_owned(db, workspace_id: str, user) -> Workspace:
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(404, "workspace not found")
+    if user.role != Role.ADMIN.value and workspace.user_id != user.id:
+        raise HTTPException(404, "workspace not found")
+    return workspace
+
+
+@router.get("", response_model=list[WorkspaceOut])
+def list_workspaces(db: DB, user: CurrentUser):
+    stmt = select(Workspace).order_by(Workspace.created_at.desc())
+    if user.role != Role.ADMIN.value:
+        stmt = stmt.where(Workspace.user_id == user.id)
+    return list(db.scalars(stmt))
+
+
+@router.post("", response_model=WorkspaceOut, status_code=201)
+def create_workspace(payload: WorkspaceCreate, db: DB, user: CurrentUser):
+    template = db.get(Template, payload.template_id)
+    if template is None or not template.enabled:
+        raise HTTPException(404, "template not found")
+    workspace = orchestrator.create(
+        db,
+        template,
+        payload.name,
+        user_id=user.id,
+        organization_id=user.organization_id,
+    )
+    if payload.auto_start:
+        orchestrator.start_async(workspace.id)
+    return workspace
+
+
+@router.get("/{workspace_id}", response_model=WorkspaceOut)
+def get_workspace(workspace_id: str, db: DB, user: CurrentUser):
+    return _get_owned(db, workspace_id, user)
+
+
+@router.get("/{workspace_id}/access", response_model=WorkspaceAccessOut)
+def get_workspace_access(workspace_id: str, db: DB, user: CurrentUser):
+    workspace = _get_owned(db, workspace_id, user)
+    return WorkspaceAccessOut(
+        workspace_id=workspace.id,
+        status=workspace.status,
+        ide_url=workspace.ide_url,
+        ide_password=workspace.password,
+        stream_hint=workspace.stream_hint,
+        signal_port=workspace.signal_port,
+        media_port=workspace.media_port,
+    )
+
+
+@router.post("/{workspace_id}/start", response_model=WorkspaceOut)
+def start_workspace(workspace_id: str, db: DB, user: CurrentUser):
+    workspace = _get_owned(db, workspace_id, user)
+    if workspace.status in {WorkspaceStatus.PROVISIONING.value, WorkspaceStatus.RUNNING.value}:
+        return workspace
+    workspace.status = WorkspaceStatus.QUEUED.value
+    workspace.error_message = None
+    db.commit()
+    orchestrator.start_async(workspace.id)
+    db.refresh(workspace)
+    return workspace
+
+
+@router.post("/{workspace_id}/stop", response_model=WorkspaceOut)
+def stop_workspace(workspace_id: str, db: DB, user: CurrentUser):
+    workspace = _get_owned(db, workspace_id, user)
+    return orchestrator.stop(db, workspace)
+
+
+@router.delete("/{workspace_id}", status_code=204)
+def delete_workspace(workspace_id: str, db: DB, user: CurrentUser):
+    workspace = _get_owned(db, workspace_id, user)
+    orchestrator.destroy(db, workspace)
+
+
+# ---------------------------------------------------------------------------
+# 管理（admin）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/admin/all", response_model=list[WorkspaceOut], include_in_schema=False)
+def list_all_workspaces(db: DB, user: CurrentUser):
+    if user.role != Role.ADMIN.value:
+        raise HTTPException(403, "admin role required")
+    return list(db.scalars(select(Workspace).order_by(Workspace.created_at.desc())))
