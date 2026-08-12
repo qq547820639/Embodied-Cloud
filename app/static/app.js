@@ -2,12 +2,34 @@ const $ = (s) => document.querySelector(s);
 const TOKEN_KEY = "embodiedcloud.token";
 let TOKEN = localStorage.getItem(TOKEN_KEY) || "";
 function toast(msg){const el=$('#toast');el.textContent=msg;el.style.display='block';setTimeout(()=>el.style.display='none',5000)}
+// 统一 API wrapper：非 2xx 时仅解析一次 response body 并抛出 typed ApiError。
+// 禁止先 response.text() 再 response.json() 的双重 body 读取。
+class ApiError extends Error {
+  constructor(status, detail, url) {
+    const msg = (typeof detail === 'string' && detail) ? detail
+      : (detail && (detail.detail || detail.message)) || `HTTP ${status}`;
+    super(msg);
+    this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+    this.url = url;
+  }
+}
 async function api(path, opts={}){
   const headers={'Content-Type':'application/json'};
   if(TOKEN) headers['Authorization']=`Bearer ${TOKEN}`;
-  const r=await fetch(path,{headers,...opts});
-  if(r.status===401 && !path.startsWith('/api/auth/')){toast('会话已过期，请重新登录');doLogout();throw new Error('unauthorized')}
-  if(!r.ok){let t=await r.text();try{t=JSON.parse(t).detail||t}catch(_){}}// eslint-disable-line no-empty
+  let r;
+  try {
+    r = await fetch(path,{headers,...opts});
+  } catch (e) {
+    throw new ApiError(0, '网络错误，请检查连接', path);
+  }
+  if(r.status===401 && !path.startsWith('/api/auth/')){toast('会话已过期，请重新登录');doLogout();throw new ApiError(401,'unauthorized',path)}
+  if(!r.ok){
+    let body=null;
+    try{body=await r.json()}catch(_){/* 非 JSON body：仅解析一次，失败不重读 */}
+    throw new ApiError(r.status, body, path);
+  }
   if(r.status===204)return null;return r.json()}
 function setAuthUI(user){
   $('#auth-email').style.display=user?'none':'inline-block';
