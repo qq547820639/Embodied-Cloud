@@ -90,6 +90,8 @@ class OperationWorker:
     def start(self) -> None:
         if self._thread is not None:
             return
+        # 重置停止标记：worker 可在 stop() 后重新启动（TestClient/热重启场景）
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run_forever, name="operation-worker", daemon=True)
         self._thread.start()
         logger.info("operation worker started (lease=%ss max_attempts=%d)", self.LEASE_SECONDS, self.MAX_ATTEMPTS)
@@ -102,11 +104,17 @@ class OperationWorker:
 
     def _run_forever(self) -> None:
         while not self._stop.is_set():
+            processed = 0
             try:
-                self.tick_once()
+                # 排空可执行队列（每次循环处理全部积压，避免长队列排队延迟）
+                while not self._stop.is_set():
+                    processed = self.tick_once()
+                    if processed == 0:
+                        break
             except Exception as exc:  # worker 循环永不退出；异常记录后继续
                 logger.exception("worker tick failed: %s", exc)
-            self._stop.wait(self.TICK_INTERVAL)
+            if processed == 0:
+                self._stop.wait(self.TICK_INTERVAL)
 
     # ------------------------------------------------------------------
     # queue

@@ -7,7 +7,7 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
-from ..deps import DB, CurrentUser, billing, orchestrator
+from ..deps import DB, CurrentUser, billing, credential_cipher, orchestrator
 from ..models import Role, Template, Workspace, WorkspaceStatus
 from ..schemas import WorkspaceAccessOut, WorkspaceCreate, WorkspaceOut
 from ..services.billing import BillingError
@@ -69,11 +69,16 @@ def get_workspace(workspace_id: str, db: DB, user: CurrentUser):
 @router.get("/{workspace_id}/access", response_model=WorkspaceAccessOut)
 def get_workspace_access(workspace_id: str, db: DB, user: CurrentUser):
     workspace = _get_owned(db, workspace_id, user)
+    # §20：DB 存加密凭据；此处解密后仅返回给合法 owner（明文不落日志）
+    password = workspace.password
+    if password:
+        decrypted = credential_cipher.decrypt(password)
+        password = decrypted if decrypted is not None else password  # 兼容旧明文
     return WorkspaceAccessOut(
         workspace_id=workspace.id,
         status=workspace.status,
         ide_url=workspace.ide_url,
-        ide_password=workspace.password,
+        ide_password=password,
         stream_hint=workspace.stream_hint,
         signal_port=workspace.signal_port,
         media_port=workspace.media_port,

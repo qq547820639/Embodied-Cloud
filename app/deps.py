@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .config import Settings
 from .db import make_engine, make_session_factory, session_dependency
 from .models import User
-from .security import make_session_dependency
+from .security import WorkspaceCredentialCipher, make_session_dependency
 from .seed import seed_templates
 from .services.billing import BillingPolicy
 from .services.ledger import CreditLedgerService
@@ -37,6 +37,7 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 scheduler = GpuScheduler(SessionFactory)
 ledger = CreditLedgerService(SessionFactory)
 billing = BillingPolicy(SessionFactory, ledger)
+credential_cipher = WorkspaceCredentialCipher(settings.workspace_credential_key)
 
 
 def make_provider() -> WorkspaceProvider:
@@ -49,7 +50,13 @@ def make_provider() -> WorkspaceProvider:
 
 provider = make_provider()
 orchestrator = WorkspaceOrchestrator(
-    SessionFactory, provider, settings.workspace_root, scheduler, ledger, billing=billing
+    SessionFactory,
+    provider,
+    settings.workspace_root,
+    scheduler,
+    ledger,
+    billing=billing,
+    credential_cipher=credential_cipher,
 )
 worker = OperationWorker(SessionFactory, orchestrator)
 
@@ -66,14 +73,19 @@ def bootstrap_db() -> None:
 
 
 def bootstrap_gpu_inventory(db: Session) -> None:
-    """按 provider 同步 GPU inventory；mock 提供 2 张虚拟 GPU 便于全链路演示。"""
+    """按 provider 同步 GPU inventory；mock 提供 8 张虚拟 GPU 便于全链路演示与并发测试。"""
     from .services.scheduler import GpuInfo
 
     provider_name = provider.name
     if provider_name == "mock":
         gpus = [
-            GpuInfo(gpu_uuid="mock-gpu-0001", model="Mock RTX 4090", memory_total=24564, index=0),
-            GpuInfo(gpu_uuid="mock-gpu-0002", model="Mock RTX 6000 Ada", memory_total=49152, index=1),
+            GpuInfo(
+                gpu_uuid=f"mock-gpu-{i:04d}",
+                model="Mock RTX 4090" if i % 2 == 0 else "Mock RTX 6000 Ada",
+                memory_total=24564 if i % 2 == 0 else 49152,
+                index=i,
+            )
+            for i in range(8)
         ]
         scheduler.sync_host(
             db,

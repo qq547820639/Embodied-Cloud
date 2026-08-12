@@ -5,11 +5,13 @@
 - 越权查询一律返回 404（不泄露资源是否存在），详情见 SECURITY.md T1。
 """
 
+import base64
 import hashlib
 import hmac
 import secrets
 from datetime import UTC, datetime
 
+from cryptography.fernet import Fernet
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -103,3 +105,38 @@ def require_admin(user: User) -> User:
     if user.role != Role.ADMIN.value:
         raise HTTPException(403, "admin role required")
     return user
+
+
+# ---------------------------------------------------------------------------
+# Workspace 凭据保护：控制面不长期保存可直接登录的明文密码（§20）
+# ---------------------------------------------------------------------------
+# code-server runtime 需要把密码放进容器 env，因此 runtime 侧必须有一份明文
+# 副本；但控制面 DB 只保存 Fernet 加密后的密文。access endpoint 解密后返回给
+# 合法 owner（短生命周期凭据的过渡设计，未来可替换为 gateway auth）。
+
+_PREFIX = "enc:"
+
+
+class WorkspaceCredentialCipher:
+    def __init__(self, key: str):
+        self._fernet = Fernet(_derive_key(key))
+
+    def encrypt(self, plaintext: str) -> str:
+        return _PREFIX + self._fernet.encrypt(plaintext.encode()).decode()
+
+    def decrypt(self, stored: str) -> str | None:
+        """解密失败（旧明文数据/密钥变更）返回 None，由调用方按明文兼容。"""
+        if not stored.startswith(_PREFIX):
+            return None
+        try:
+            return self._fernet.decrypt(stored[len(_PREFIX):].encode()).decode()
+        except Exception:
+            return None
+
+
+def _derive_key(secret: str) -> bytes:
+    if not secret:
+        # 开发默认密钥（仅 mock/本地）；生产必须配置 EMBODIEDCLOUD_CREDENTIAL_KEY
+        secret = "dev-only-credential-key-change-me"
+    digest = hashlib.sha256(("ec:cred:" + secret).encode()).digest()
+    return base64.urlsafe_b64encode(digest)

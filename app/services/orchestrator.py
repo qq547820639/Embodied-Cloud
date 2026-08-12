@@ -38,6 +38,7 @@ class WorkspaceOrchestrator:
         ledger: CreditLedgerService | None = None,
         streaming: StreamingSessionService | None = None,
         billing: "BillingPolicy | None" = None,
+        credential_cipher=None,
     ):
         self.session_factory = session_factory
         self.provider = provider
@@ -46,6 +47,8 @@ class WorkspaceOrchestrator:
         self.ledger = ledger or CreditLedgerService(session_factory)
         self.streaming = streaming or StreamingSessionService(session_factory)
         self.billing = billing
+        # §20：控制面 DB 不保存明文密码（None 时=测试/无加密环境，直接存明文）
+        self.credential_cipher = credential_cipher
 
     # ------------------------------------------------------------------
     # create
@@ -173,7 +176,13 @@ class WorkspaceOrchestrator:
             workspace.media_port = result.media_port
             workspace.ide_url = result.ide_url
             workspace.stream_hint = result.stream_hint
-            workspace.password = result.password
+            # §20：DB 只保存加密凭据（runtime 侧仍有一份必要副本）
+            if result.password is not None:
+                workspace.password = (
+                    self.credential_cipher.encrypt(result.password)
+                    if self.credential_cipher is not None
+                    else result.password
+                )
             workspace.container_name = result.container_name
             workspace.status = WorkspaceStatus.RUNNING.value
             workspace.started_at = utcnow()

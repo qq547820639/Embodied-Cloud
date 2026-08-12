@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     # --- auth ---
     session_ttl_hours: int = 168  # 7 天
     password_pepper: str = ""  # 生产建议配置；未配置时退化为空盐前缀
+    # workspace 凭据加密密钥（§20）：未配置时使用开发默认密钥（仅本地/mock）
+    workspace_credential_key: str = ""
 
     # --- observability ---
     log_json: bool = False
