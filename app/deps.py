@@ -21,6 +21,7 @@ from .services.providers.docker import DockerProvider
 from .services.providers.k8s import KubernetesProvider
 from .services.providers.mock import MockProvider
 from .services.scheduler import GpuScheduler
+from .services.worker import OperationWorker
 
 settings = Settings()
 settings.ensure_dirs()
@@ -46,6 +47,7 @@ def make_provider() -> WorkspaceProvider:
 
 provider = make_provider()
 orchestrator = WorkspaceOrchestrator(SessionFactory, provider, settings.workspace_root, scheduler, ledger)
+worker = OperationWorker(SessionFactory, orchestrator)
 
 
 def bootstrap_db() -> None:

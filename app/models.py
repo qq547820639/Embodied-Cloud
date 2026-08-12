@@ -89,6 +89,22 @@ class AgentStatus(StrEnum):
     OFFLINE = "offline"
 
 
+class OperationType(StrEnum):
+    PROVISION = "provision"
+    START = "start"
+    STOP = "stop"
+    DESTROY = "destroy"
+    RECONCILE = "reconcile"
+
+
+class OperationStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    RETRYING = "retrying"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 # ---------------------------------------------------------------------------
 # Identity / Auth
 # ---------------------------------------------------------------------------
@@ -284,6 +300,43 @@ class CreditLedger(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     __table_args__ = (Index("ix_ledger_user_created", "user_id", "created_at"),)
+
+
+# ---------------------------------------------------------------------------
+# Durable workspace operations（DB-backed worker，替换 threading.Thread 裸线程）
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceOperation(Base):
+    """一次 workspace 生命周期操作的持久化记录。
+
+    - PENDING → RUNNING（带 lease）→ SUCCEEDED / FAILED
+    - RUNNING lease 过期可由 worker 重新 claim（崩溃恢复）
+    - 同一 workspace 同一时刻至多一个 active（PENDING/RUNNING/RETRYING）operation
+    """
+
+    __tablename__ = "workspace_operations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False, index=True
+    )
+    operation_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=OperationStatus.PENDING.value, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # lease：RUNNING 操作的心跳/租约截止时间；过期后其他 worker 可重新 claim
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_ops_workspace_status", "workspace_id", "status"),
+        Index("ix_ops_status_lease", "status", "lease_expires_at"),
+    )
 
 
 # ---------------------------------------------------------------------------

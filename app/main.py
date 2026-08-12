@@ -45,12 +45,16 @@ async def _gauge_loop():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    from .deps import bootstrap_db
+    from .deps import bootstrap_db, worker
 
     bootstrap_db()
+    # 启动恢复：基于 runtime 事实的 reconciliation（幂等，不误杀存活 runtime）
     run_crash_recovery()
+    # DB-backed operation worker：PENDING/RETRYING 任务跨重启不丢
+    worker.start()
     task = asyncio.create_task(_gauge_loop())
     yield
+    worker.stop()
     task.cancel()
 
 

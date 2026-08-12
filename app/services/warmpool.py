@@ -60,7 +60,7 @@ class WarmPoolManager:
                     user_id=None,
                     organization_id=None,
                 )
-                self.orchestrator.start_async(workspace.id)
+                self.orchestrator._start(workspace.id)
                 record_warm_pool_stats(template_id=template.id, warm_count=1)
 
     def metrics(self, db: Session) -> dict[str, dict[str, int]]:
@@ -96,7 +96,7 @@ class WarmPoolManager:
                 organization_id=None,
             )
             started = time.monotonic()
-            self.orchestrator.start_async(workspace.id)
+            self.orchestrator._start(workspace.id)
             samples.append(self._wait_launch(workspace.id, started))
         sorted_samples = sorted(samples)
         return {
