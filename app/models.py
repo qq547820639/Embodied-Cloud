@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -398,6 +399,16 @@ class WorkspaceOperation(Base):
     __table_args__ = (
         Index("ix_ops_workspace_status", "workspace_id", "status"),
         Index("ix_ops_status_lease", "status", "lease_expires_at"),
+        # §13：数据库级 active operation 唯一性（PostgreSQL/SQLite 部分唯一索引）：
+        # 同一 workspace 至多一个 PENDING/RUNNING/RETRYING —— enqueue 并发插入
+        # 由数据库拒绝（IntegrityError），不依赖"先查再插"。
+        Index(
+            "uq_ops_active_per_workspace",
+            "workspace_id",
+            unique=True,
+            sqlite_where=text("status IN ('pending', 'running', 'retrying')"),
+            postgresql_where=text("status IN ('pending', 'running', 'retrying')"),
+        ),
     )
 
 

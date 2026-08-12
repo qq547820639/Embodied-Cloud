@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import OperationStatus, OperationType, WorkspaceOperation
@@ -46,20 +47,6 @@ def enqueue_operation(
         db = session_factory()
         owns = True
     try:
-        active = db.scalar(
-            select(WorkspaceOperation).where(
-                WorkspaceOperation.workspace_id == workspace_id,
-                WorkspaceOperation.status.in_(
-                    [OperationStatus.PENDING.value, OperationStatus.RUNNING.value, OperationStatus.RETRYING.value]
-                ),
-            )
-        )
-        if active is not None:
-            logger.info(
-                "skip enqueue %s for workspace %s: operation %s already active",
-                operation_type.value, workspace_id[:8], active.operation_type,
-            )
-            return None
         op = WorkspaceOperation(
             id=str(uuid.uuid4()),
             workspace_id=workspace_id,
@@ -68,7 +55,17 @@ def enqueue_operation(
             attempts=0,
         )
         db.add(op)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # §13：数据库级保证（部分唯一索引 uq_ops_active_per_workspace）——
+            # 并发下同 workspace 冲突插入被 DB 拒绝，不依赖"先查再插"
+            db.rollback()
+            logger.info(
+                "skip enqueue %s for workspace %s: active operation exists (db constraint)",
+                getattr(operation_type, "value", operation_type), workspace_id[:8],
+            )
+            return None
         db.refresh(op)
         return op
     finally:

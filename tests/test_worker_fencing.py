@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
@@ -223,3 +223,44 @@ def test_worker_crash_allows_safe_reclaim():
     with Factory() as db:
         ws = db.get(Workspace, wid)
         assert ws.status == "running"
+
+
+def test_concurrent_enqueue_db_constraint():
+    """§13：并发 enqueue 同 workspace 的 PROVISION/STOP —— 数据库级唯一性保证
+    至多一个 active operation（不依赖先查再插）。"""
+    from app.services.worker import enqueue_operation
+
+    with Factory() as db:
+        _seed(db)
+        wid = _make_ws(db)
+
+    results: list[bool] = []
+    lock = threading.Lock()
+
+    def worker_enqueue(op_type):
+        op = enqueue_operation(Factory, wid, op_type)
+        with lock:
+            results.append(op is not None)
+
+    threads = [
+        threading.Thread(target=worker_enqueue, args=(OperationType.PROVISION,)),
+        threading.Thread(target=worker_enqueue, args=(OperationType.STOP,)),
+        threading.Thread(target=worker_enqueue, args=(OperationType.DESTROY,)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results.count(True) == 1  # 恰好一个成功
+    assert results.count(False) == 2
+    with Factory() as db:
+        actives = db.scalars(
+            select(WorkspaceOperation).where(
+                WorkspaceOperation.workspace_id == wid,
+                WorkspaceOperation.status.in_(
+                    [OperationStatus.PENDING.value, OperationStatus.RUNNING.value]
+                ),
+            )
+        ).all()
+        assert len(actives) == 1
