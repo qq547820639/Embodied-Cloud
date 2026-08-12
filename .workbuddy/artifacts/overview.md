@@ -1,46 +1,43 @@
-# EmbodiedCloud v0.3.0 Acceptance Hardening — 交付总结
+# EmbodiedCloud v0.3.1 Security & Integrity Hotfix — 交付总结
 
-> 日期：2026-08-12 · 分支：main · 版本：0.3.0（软件面完成）
-> 数据来源：docs/VALIDATION.json（`make validate` 自动生成，CI freshness 门禁）
+> 日期：2026-08-12 · 版本 0.3.0（软件面 v0.3.1 完成）· 19 commits 待推送
+> 验证数据：docs/VALIDATION.json（make validate，JUnit 稳定计数）
 
 ## 交付概览
+- **TL;DR**：三个最高严重度问题（Deployment checksum bypass / EdgeAgent 租户越权 / warm pool 凭据轮换失败资源泄漏）全部修复并由 regression tests 证明；P0 工程加固（readiness、durable stop/destroy、worker fencing、K8s node truth、DB 级 operation 唯一性）完成。
+- **测试**：226 passed + 1 skipped（k8s_integration）· lint/mypy/compileall/migration(10 级链)/build/smoke/release 全 PASS
+- **新增测试文件**：test_deployment_bypass / test_edge_ownership / test_runtime_readiness / test_durable_ops / test_k8s_node_truth / test_version_consistency
 
-- **TL;DR**：v0.3.0 全部软件 acceptance gate 通过（182 passed + 1 skipped），
-  发布产物 embodiedcloud-0.3.0 已生成并通过 archive 清洁验证。
-- **验证**：`make check` 全绿（lint/type/test 182+1）· migration 8 级链 ·
-  build · smoke（SMOKE_OK）· release 全流程 · OpenAPI/VALIDATION freshness
-- **提交**：本轮 16 个 commit，工作树 CLEAN
+## 修复矩阵（VERIFIED PASS）
+| 严重度 | 问题 | 修复 |
+|---|---|---|
+| P0 | checksum bypass（download 自动 VERIFIED） | 删除无校验 verify()；唯一路径 = edge 上报 → server 比较 |
+| P0 | EdgeAgent 匿名注册 + 无租户隔离 | owner 绑定 + tenant scope + 部署派发校验 |
+| P0 | warm pool rotation 失败泄漏 runtime/GPU | 完整补偿链 + provider 能力标志（Docker 禁用 warm pool） |
+| P0 | billing settings 未接线 | deps 真实注入 |
+| P0 | RUNNING 不含 readiness | wait_ready 契约（Docker TCP/HTTP/healthcheck exec；K8s Pod Ready/endpoints） |
+| P0 | stop/destroy 非 durable | enqueue operation + fast-path tick |
+| P0 | active operation 无 DB 级唯一 | 部分唯一索引 |
+| P0 | worker 外部副作用无 fencing | reservation 注入 operation/fencing → labels；provision adopt 幂等 |
+| P0 | K8s reservation 无 node 真相 | node_name 明确字段 + nodeSelector + reconcile mismatch → FAILED |
 
-## VERIFIED PASS（自动测试证明）
+## 工程流程
+- §14 Pod labels ↔ NetworkPolicy selector 真实命中（假安全配置修复）
+- §15 版本单一来源（pyproject；UI 动态；manifest 0.3.0）
+- §16 VALIDATION JUnit 稳定计数 + 物理 gate NOT_RUN
+- §19/§21 quota monitor + warm pool maintain 接入 worker 周期调度
 
-| § | 内容 |
-|---|---|
-| §2 | K8s offline 隔离：model_factory 注入，offline 测试零 Kubernetes SDK 依赖（blocked-import 证明） |
-| §3 | K8s inventory 真实路径：node nvidia.com/gpu capacity → GpuHost/Gpu（capacity reservation，device 分配归 Device Plugin） |
-| §4 | K8s integration harness 真实全流程（无 NotImplementedError；无集群 SKIP） |
-| §5 | **Operation lease/fencing（P0）**：lease_owner/fencing_token/heartbeat_at；原子 claim；执行期心跳续期；finish 必须 fencing（LeaseLostError）；SQL 层比较 |
-| §6 | Warm pool 真实 launch 路径（POST /api/workspaces → BillingPolicy → claim） |
-| §7 | **Warm pool credential rotation**：三 provider 实现；rotation 失败不得交付（DRAINING + fallback） |
-| §8 | Warm pool 指标 COUNT(*) 真实计数 |
-| §9 | **ArtifactStore 集成**：DeploymentService 走 store 协议（object_key/content_type/store_name） |
-| §10 | **Edge 上报 checksum**：report-checksum 协议，server 比较；防绕过/防 replay |
-| §11 | **Template.current_version_id** 确定性指针；Artifact/Deployment 版本真相 |
-| §12 | **Billing 预授权** + active-runtime quota monitor（透支优雅停止，幂等） |
-| §13 | **凭据生产安全**：生产 provider 必须显式密钥；enc: 解密失败 fail closed |
-| §14 | validate_release.py → VALIDATION.json/.md（CI freshness） |
-| §15 | 版本统一 0.3.0（单一来源） |
-| §16 | release archive 清洁验证（实测通过） |
-
-## PHYSICAL_VALIDATION_PENDING（不假装 PASS）
-
-GPU（G1–G4 脚本就绪）· K8s（pytest -m k8s_integration 正确 skip）· Streaming · Robot · Warm pool SLA
+## PHYSICAL_VALIDATION_PENDING / NOT_RUN
+GPU · K8s · Streaming · Robot（无真实硬件，不假装 PASS）
 
 ## BLOCKED_EXTERNAL_DEPENDENCY
+- PostgreSQL 容器测试（需 docker daemon）：`docker run postgres:16` + pytest postgres 套件
+- S3 凭据：S3CompatibleArtifactStore 生产验证
+- NGC 凭据：镜像 digest 回填
+- 物理机器人 / 真实 K8s GPU 集群
 
-NGC 凭据（镜像 digest 回填）· PostgreSQL 生产验证 · S3 凭据 · lockfile/SBOM（P2）
-
-## NEXT PHYSICAL ACTIONS
-
-1. GPU 主机：`make gpu-preflight && make gpu-test`
-2. K8s 集群：`EMBODIEDCLOUD_K8S_TEST=1 pytest -m k8s_integration`
-3. 生产：`EMBODIEDCLOUD_BILLING_ENFORCE_PREAUTHORIZATION=true` + `EMBODIEDCLOUD_WORKSPACE_CREDENTIAL_KEY=<强密钥>` + PostgreSQL
+## NEXT
+1. `git push`（19 commits）
+2. GPU 主机：make gpu-preflight && make gpu-test
+3. K8s：EMBODIEDCLOUD_K8S_TEST=1 pytest -m k8s_integration
+4. PostgreSQL 容器测试套件（§34）
