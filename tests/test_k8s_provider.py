@@ -7,6 +7,7 @@ from kubernetes import config as kube_config  # 仅用于 monkeypatch 真实 con
 
 from app.config import Settings
 from app.models import Template, Workspace
+from app.services.providers.base import ResourceReservation
 from app.services.providers.k8s import KubernetesProvider
 
 # workspace.id[:12] = "11111111-222" (12 字符)
@@ -130,6 +131,16 @@ def make_provider(**overrides) -> tuple[KubernetesProvider, FakeClientModule]:
     return KubernetesProvider(make_settings(**overrides), _client=fake), fake
 
 
+def make_reservation(gpu_index: int = 2, gpu_id: str = "gpu-k8s-1") -> ResourceReservation:
+    return ResourceReservation(
+        host_id="k8s-node-1",
+        gpu_id=gpu_id,
+        gpu_uuid="GPU-k8s-uuid-1",
+        gpu_index=gpu_index,
+        metadata={"node_selector": {"kubernetes.io/hostname": "gpu-node-01"}},
+    )
+
+
 def running_workspace() -> Workspace:
     ws = make_workspace()
     ws.container_name = DEPLOYMENT_NAME
@@ -177,14 +188,12 @@ def test_provision_requires_eula(tmp_path):
 
 def test_provision_creates_deployment_service_pvc(tmp_path):
     provider, fake = make_provider()
-    result = provider.provision(make_workspace(), make_template(), tmp_path / "ws")
+    result = provider.provision(make_workspace(), make_template(), tmp_path / "ws", make_reservation())
 
-    # ProvisionResult 字段
+    # ProvisionResult 字段（GPU 信息不属于 provision 决策，来自 scheduler reservation）
     assert result.container_name == DEPLOYMENT_NAME
     assert result.password
     assert result.ide_url == "http://10.0.0.8/ide/11111111-222/"
-    assert result.gpu_index == 2
-    assert result.gpu_name == "Fake RTX 4090"
     assert result.ide_port is None
 
     kinds = [c[0] for c in fake.calls]
@@ -202,7 +211,7 @@ def test_provision_creates_deployment_service_pvc(tmp_path):
     assert service.metadata.name == DEPLOYMENT_NAME
     assert service.spec.ports[0].port == 18000
 
-    # Deployment 名称 / 镜像 / env
+    # Deployment 名称 / 镜像 / env / GPU 资源声明
     _, _, dep = next(c for c in fake.calls if c[0] == "create_deployment")
     assert dep.metadata.name == DEPLOYMENT_NAME
     container = dep.spec.template.spec.containers[0]
@@ -214,12 +223,27 @@ def test_provision_creates_deployment_service_pvc(tmp_path):
     assert env["LIVESTREAM"] == "0"
     assert env["PUBLIC_IP"] == "10.0.0.8"
 
+    # GPU 绑定严格来自 reservation：nvidia.com/gpu limit == reservation.gpu_count
+    assert container.resources.limits["nvidia.com/gpu"] == "1"
+    # nodeSelector 来自 reservation.metadata
+    assert dep.spec.template.spec.node_selector == {"kubernetes.io/hostname": "gpu-node-01"}
+
     # 无 privileged / 无 docker.sock (hostPath 挂载) / 无 hostNetwork
     assert container.security_context is None
     assert dep.spec.template.spec.host_network is None
     volumes = dep.spec.template.spec.volumes
     assert all(v.host_path is None for v in volumes)
     assert volumes[0].persistent_volume_claim.claim_name == PVC_NAME
+
+
+def test_provision_without_reservation_no_gpu_limit(tmp_path):
+    """无 reservation（理论上 scheduler 必传）时 nvidia.com/gpu 为 0，且无 nodeSelector。"""
+    provider, fake = make_provider()
+    provider.provision(make_workspace(), make_template(), tmp_path / "ws", None)
+    _, _, dep = next(c for c in fake.calls if c[0] == "create_deployment")
+    container = dep.spec.template.spec.containers[0]
+    assert container.resources.limits["nvidia.com/gpu"] == "0"
+    assert dep.spec.template.spec.node_selector is None
 
 
 def test_provision_streaming_template_sets_livestream(tmp_path):
@@ -275,3 +299,19 @@ def test_inspect_and_logs():
     assert status["conditions"][0]["type"] == "Available"
 
     assert provider.logs(running_workspace()) == "fake pod log"
+
+
+def test_start_scales_replicas_to_one():
+    provider, fake = make_provider()
+
+    provider.start(running_workspace())
+
+    assert len(fake.calls) == 1
+    kind, _, _, body = fake.calls[0]
+    assert kind == "patch_scale"
+    assert body["spec"]["replicas"] == 1
+
+
+def test_reconcile_alive_when_available_replica():
+    provider, _ = make_provider()
+    assert provider.reconcile(running_workspace()) == "alive"

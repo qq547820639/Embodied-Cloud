@@ -4,6 +4,7 @@ import pytest
 
 from app.config import Settings
 from app.models import Template, Workspace
+from app.services.providers.base import ResourceReservation
 from app.services.providers.docker import DockerProvider
 
 
@@ -15,9 +16,6 @@ class FakeDockerProvider(DockerProvider):
     def health(self):
         return True, "fake docker + gpu"
 
-    def _choose_gpu(self):
-        return 0, "Fake RTX"
-
     def _streaming_workspace_running(self):
         return False
 
@@ -26,13 +24,14 @@ class FakeDockerProvider(DockerProvider):
         return CompletedProcess(args=args, returncode=0, stdout="container-id\n", stderr="")
 
 
-def make_template(streaming: bool) -> Template:
+def make_template(streaming: bool, image: str | None = None) -> Template:
     return Template(
         id="test-template",
         name="Test",
         description="test",
         category="test",
         runtime="isaaclab",
+        image=image,
         launch_command="echo ok",
         requires_streaming=streaming,
         recommended_vram_gb=16,
@@ -51,6 +50,15 @@ def make_workspace() -> Workspace:
     )
 
 
+def make_reservation(gpu_index: int = 3, gpu_id: str = "gpu-abc") -> ResourceReservation:
+    return ResourceReservation(
+        host_id="docker-host-0001",
+        gpu_id=gpu_id,
+        gpu_uuid=f"GPU-{gpu_id}-uuid",
+        gpu_index=gpu_index,
+    )
+
+
 def test_streaming_provider_uses_isaac_lab_env_and_fixed_ports(tmp_path, monkeypatch):
     settings = Settings(
         eula_accepted=True,
@@ -63,7 +71,7 @@ def test_streaming_provider_uses_isaac_lab_env_and_fixed_ports(tmp_path, monkeyp
     monkeypatch.setattr("app.services.providers.docker.is_port_free", lambda *a, **kw: True)
     monkeypatch.setattr("app.services.providers.docker.allocate_tcp_port", lambda *a, **kw: 38101)
 
-    result = provider.provision(make_workspace(), make_template(True), tmp_path / "ws")
+    result = provider.provision(make_workspace(), make_template(True), tmp_path / "ws", make_reservation())
 
     assert result.signal_port == 49100
     assert result.media_port == 47998
@@ -81,4 +89,91 @@ def test_eula_is_required(tmp_path):
     settings = Settings(eula_accepted=False, workspace_root=tmp_path)
     provider = FakeDockerProvider(settings)
     with pytest.raises(RuntimeError, match="EULA"):
-        provider.provision(make_workspace(), make_template(False), tmp_path / "ws")
+        provider.provision(make_workspace(), make_template(False), tmp_path / "ws", make_reservation())
+
+
+def test_provision_requires_reservation(tmp_path):
+    """DockerProvider 必须拒绝没有 reservation 的 provision —— 不允许自行选择 GPU。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = FakeDockerProvider(settings)
+    with pytest.raises(RuntimeError, match="ResourceReservation"):
+        provider.provision(make_workspace(), make_template(False), tmp_path / "ws", None)
+
+
+def test_docker_run_gpu_device_matches_reservation(tmp_path, monkeypatch):
+    """--gpus device=N 与 scheduler reservation.gpu_index 完全一致。"""
+    settings = Settings(
+        eula_accepted=True,
+        host_public_ip="10.0.0.8",
+        workspace_root=tmp_path,
+        ide_port_start=38100,
+        ide_port_end=38120,
+    )
+    provider = FakeDockerProvider(settings)
+    monkeypatch.setattr("app.services.providers.docker.is_port_free", lambda *a, **kw: True)
+    monkeypatch.setattr("app.services.providers.docker.allocate_tcp_port", lambda *a, **kw: 38101)
+
+    for index in (0, 2, 5):
+        result = provider.provision(
+            make_workspace(), make_template(False), tmp_path / "ws", make_reservation(gpu_index=index)
+        )
+        assert result is not None
+        run = provider.commands[-1]
+        joined = " ".join(run)
+        assert f"--gpus device={index}" in joined
+        assert f"embodiedcloud.gpu={index}" in joined
+
+
+def test_docker_run_uses_template_image(tmp_path, monkeypatch):
+    """runtime 镜像由 template.image 决定，而不是 settings.workspace_image。"""
+    settings = Settings(
+        eula_accepted=True,
+        workspace_root=tmp_path,
+        ide_port_start=38100,
+        ide_port_end=38120,
+        workspace_image="embodiedcloud/default:fallback",
+    )
+    provider = FakeDockerProvider(settings)
+    monkeypatch.setattr("app.services.providers.docker.is_port_free", lambda *a, **kw: True)
+    monkeypatch.setattr("app.services.providers.docker.allocate_tcp_port", lambda *a, **kw: 38101)
+
+    # Template A 与 Template B 使用不同镜像
+    provider.provision(
+        make_workspace(), make_template(False, image="registry/template-a@sha256:aaaa"), tmp_path / "ws",
+        make_reservation(gpu_index=0),
+    )
+    run_a = provider.commands[-1]
+    assert "registry/template-a@sha256:aaaa" in " ".join(run_a)
+    assert "embodiedcloud/default:fallback" not in " ".join(run_a)
+
+    provider.provision(
+        make_workspace(), make_template(False, image="registry/template-b@sha256:bbbb"), tmp_path / "ws",
+        make_reservation(gpu_index=0),
+    )
+    run_b = provider.commands[-1]
+    assert "registry/template-b@sha256:bbbb" in " ".join(run_b)
+
+    # 两个模板镜像必须不同且正确
+    joined_a, joined_b = " ".join(run_a), " ".join(run_b)
+    assert "template-a" in joined_a and "template-b" in joined_b
+    assert joined_a != joined_b
+
+
+def test_docker_run_fallback_image_when_template_has_none(tmp_path, monkeypatch):
+    """模板未配置镜像时允许 fallback 到平台默认镜像（显式配置的 fallback）。"""
+    settings = Settings(
+        eula_accepted=True,
+        workspace_root=tmp_path,
+        ide_port_start=38100,
+        ide_port_end=38120,
+        workspace_image="embodiedcloud/default-image:0.5.0",
+    )
+    provider = FakeDockerProvider(settings)
+    monkeypatch.setattr("app.services.providers.docker.is_port_free", lambda *a, **kw: True)
+    monkeypatch.setattr("app.services.providers.docker.allocate_tcp_port", lambda *a, **kw: 38101)
+
+    provider.provision(
+        make_workspace(), make_template(False, image=None), tmp_path / "ws", make_reservation(gpu_index=0)
+    )
+    joined = " ".join(provider.commands[-1])
+    assert "embodiedcloud/default-image:0.5.0" in joined

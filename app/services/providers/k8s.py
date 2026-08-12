@@ -14,7 +14,7 @@ from typing import Any
 
 from ...config import Settings
 from ...models import Template, Workspace
-from .base import ProvisionResult
+from .base import ProvisionResult, ResourceReservation, RuntimeState
 
 
 class KubernetesProvider:
@@ -106,7 +106,13 @@ class KubernetesProvider:
             return False, f"无法连接 Kubernetes API: {exc}"
         return True, "kubernetes ready"
 
-    def provision(self, workspace: Workspace, template: Template, workspace_dir: Path) -> ProvisionResult:
+    def provision(
+        self,
+        workspace: Workspace,
+        template: Template,
+        workspace_dir: Path,
+        reservation: ResourceReservation | None = None,
+    ) -> ProvisionResult:
         if not self.settings.eula_accepted:
             raise RuntimeError("Set EMBODIEDCLOUD_EULA_ACCEPTED=true before launching NVIDIA Isaac containers.")
 
@@ -118,10 +124,18 @@ class KubernetesProvider:
         ns = self.settings.k8s_namespace
         deployment_name = self._deployment_name(workspace)
         pvc_name = self._pvc_name(workspace)
-        # 镜像优先级：workspace.image（预留字段）→ template.image → settings.workspace_image
-        image = getattr(workspace, "image", None) or template.image or self.settings.workspace_image
+        # 镜像优先级：template.image → settings.workspace_image（模板镜像为真实来源，禁止 latest）
+        image = template.image or self.settings.workspace_image
         password = secrets.token_urlsafe(16)
         labels = {"app": deployment_name, "embodiedcloud.workspace": workspace.id}
+
+        # GPU 资源声明：完全来自 scheduler 的 reservation（唯一决策入口）。
+        # Kubernetes 侧由 NVIDIA Device Plugin 负责具体 device 分配；
+        # nodeSelector/affinity 由 reservation.metadata 携带（scheduler 已选 host/node）。
+        gpu_count = str(reservation.gpu_count) if reservation else "0"
+        node_selector: dict[str, str] = {}
+        if reservation is not None:
+            node_selector = dict(reservation.metadata.get("node_selector", {}))
 
         # 1) PVC：挂载到 /workspace/project，不指定 StorageClass（使用集群默认）
         pvc = client.V1PersistentVolumeClaim(
@@ -158,6 +172,7 @@ class KubernetesProvider:
                 template=client.V1PodTemplateSpec(
                     metadata=client.V1ObjectMeta(labels={"app": deployment_name}),
                     spec=client.V1PodSpec(
+                        node_selector=node_selector or None,
                         containers=[
                             client.V1Container(
                                 name="workspace",
@@ -174,7 +189,12 @@ class KubernetesProvider:
                                 ],
                                 resources=client.V1ResourceRequirements(
                                     requests={"cpu": self.CPU, "memory": self.MEMORY},
-                                    limits={"cpu": self.CPU, "memory": self.MEMORY},
+                                    limits={
+                                        "cpu": self.CPU,
+                                        "memory": self.MEMORY,
+                                        # GPU 绑定严格来自 scheduler reservation
+                                        "nvidia.com/gpu": gpu_count,
+                                    },
                                 ),
                                 volume_mounts=[
                                     client.V1VolumeMount(name="project", mount_path="/workspace/project")
@@ -199,8 +219,6 @@ class KubernetesProvider:
             raise RuntimeError(f"创建 Deployment {deployment_name} 失败: {self._describe(exc)}") from exc
 
         return ProvisionResult(
-            gpu_index=workspace.gpu_index,
-            gpu_name=workspace.gpu_name,
             # K8s 下由 Service/Ingress 暴露端口，host 端口字段无需占用
             ide_port=None,
             signal_port=None,
@@ -209,6 +227,20 @@ class KubernetesProvider:
             password=password,
             container_name=deployment_name,
         )
+
+    def start(self, workspace: Workspace) -> None:
+        """把 Deployment 副本扩回 1（从 STOPPED 恢复）。"""
+        if not workspace.container_name:
+            return
+        api = self._require_client()
+        try:
+            api.AppsV1Api().patch_namespaced_deployment_scale(
+                name=workspace.container_name,
+                namespace=self.settings.k8s_namespace,
+                body={"spec": {"replicas": 1}},
+            )
+        except Exception as exc:
+            raise RuntimeError(f"启动 deployment {workspace.container_name} 失败: {self._describe(exc)}") from exc
 
     def stop(self, workspace: Workspace) -> None:
         """把 Deployment 副本缩到 0 (保留资源定义, 便于再次启动)."""
@@ -293,3 +325,20 @@ class KubernetesProvider:
             )
         except Exception:
             return ""
+
+    def reconcile(self, workspace: Workspace) -> RuntimeState:
+        """判定 Deployment runtime 存活：available_replicas>=1 → ALIVE；404/0 副本 → MISSING；其他 → UNKNOWN。"""
+        deployment_name = workspace.container_name or self._deployment_name(workspace)
+        try:
+            api = self._require_client()
+            status = api.AppsV1Api().read_namespaced_deployment_status(
+                name=deployment_name, namespace=self.settings.k8s_namespace
+            ).status
+        except Exception as exc:
+            if getattr(exc, "status", None) == 404:
+                return RuntimeState.MISSING
+            return RuntimeState.UNKNOWN
+        available = getattr(status, "available_replicas", None) or 0
+        if int(available) >= 1:
+            return RuntimeState.ALIVE
+        return RuntimeState.MISSING

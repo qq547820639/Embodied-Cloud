@@ -1,4 +1,3 @@
-import contextlib
 import os
 import secrets
 import shutil
@@ -9,11 +8,15 @@ from pathlib import Path
 from ...config import Settings
 from ...models import Template, Workspace
 from ..ports import allocate_tcp_port, is_port_free
-from .base import ProvisionResult
+from .base import ProvisionResult, ResourceReservation, RuntimeState
 
 
 class DockerProvider:
     """Single-host NVIDIA GPU runtime for the first sellable EmbodiedCloud release.
+
+    GPU authority: GpuScheduler 是唯一决策入口，provision 必须收到
+    ResourceReservation 并严格按其 gpu_index 绑定（--gpus device=N）。
+    本类不包含任何 GPU allocator（禁止自行选择 GPU）。
 
     Policy decisions are deliberately conservative:
     - one running workspace per physical GPU;
@@ -50,43 +53,23 @@ class DockerProvider:
             return False, f"docker ready but NVIDIA GPU unavailable: {exc}"
         return True, f"docker {docker.stdout.strip()} / GPU {gpu_line}"
 
-    def _list_gpus(self) -> list[tuple[int, str]]:
-        out = self._run(["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader,nounits"]).stdout
-        result: list[tuple[int, str]] = []
-        for line in out.splitlines():
-            if not line.strip():
-                continue
-            idx, name = line.split(",", 1)
-            result.append((int(idx.strip()), name.strip()))
-        return result
+    def _container_exists(self, workspace: Workspace) -> bool:
+        if not workspace.container_name:
+            return False
+        result = self._run(
+            ["docker", "ps", "-a", "--filter", f"name=^{workspace.container_name}$", "--format", "{{.Names}}"],
+            check=False,
+        )
+        return workspace.container_name in result.stdout.splitlines()
 
-    def _running_workspace_labels(self) -> list[str]:
+    def _streaming_workspace_running(self) -> bool:
         if shutil.which("docker") is None:
-            return []
+            return False
         result = self._run(
             ["docker", "ps", "--filter", "label=embodiedcloud.workspace=1", "--format", "{{.Labels}}"],
             check=False,
         )
-        return [line for line in result.stdout.splitlines() if line.strip()]
-
-    def _occupied_gpus(self) -> set[int]:
-        occupied: set[int] = set()
-        for labels in self._running_workspace_labels():
-            for part in labels.split(","):
-                if part.startswith("embodiedcloud.gpu="):
-                    with contextlib.suppress(ValueError):
-                        occupied.add(int(part.split("=", 1)[1]))
-        return occupied
-
-    def _streaming_workspace_running(self) -> bool:
-        return any("embodiedcloud.streaming=1" in labels for labels in self._running_workspace_labels())
-
-    def _choose_gpu(self) -> tuple[int, str]:
-        occupied = self._occupied_gpus()
-        for idx, name in self._list_gpus():
-            if idx not in occupied:
-                return idx, name
-        raise RuntimeError("No free GPU. v0.1 policy is one running workspace per physical GPU.")
+        return any("embodiedcloud.streaming=1" in labels for labels in result.stdout.splitlines())
 
     def _assert_streaming_slot_available(self) -> None:
         if self._streaming_workspace_running():
@@ -99,7 +82,16 @@ class DockerProvider:
         if not is_port_free(self.WEBRTC_MEDIA_PORT, sock_type=socket.SOCK_DGRAM):
             raise RuntimeError(f"WebRTC media port {self.WEBRTC_MEDIA_PORT}/UDP is already in use.")
 
-    def provision(self, workspace: Workspace, template: Template, workspace_dir: Path) -> ProvisionResult:
+    def provision(
+        self,
+        workspace: Workspace,
+        template: Template,
+        workspace_dir: Path,
+        reservation: ResourceReservation | None = None,
+    ) -> ProvisionResult:
+        # 单一 GPU 权威：没有 reservation 就不允许启动真实容器
+        if reservation is None:
+            raise RuntimeError("DockerProvider requires a ResourceReservation from GpuScheduler")
         if not self.settings.eula_accepted:
             raise RuntimeError("Set EMBODIEDCLOUD_EULA_ACCEPTED=true before launching NVIDIA Isaac containers.")
 
@@ -136,7 +128,8 @@ class DockerProvider:
         )
         os.chmod(readme_path, 0o666)  # noqa: S103
 
-        gpu_index, gpu_name = self._choose_gpu()
+        # GPU 绑定完全来自 reservation（scheduler 唯一决策），不再自行选择
+        gpu_index = reservation.gpu_index
         ide_port = allocate_tcp_port(self.settings.ide_port_start, self.settings.ide_port_end)
         signal_port = self.WEBRTC_SIGNAL_PORT if template.requires_streaming else None
         media_port = self.WEBRTC_MEDIA_PORT if template.requires_streaming else None
@@ -152,6 +145,10 @@ class DockerProvider:
             "-e", f"PUBLIC_IP={self.settings.host_public_ip}",
         ]
 
+        # runtime 镜像：TemplateVersion/Template.image 决定（禁止 latest）；
+        # 仅当 template 未配置镜像时才允许 fallback 到平台默认镜像。
+        image = template.image or self.settings.workspace_image
+
         args = [
             "docker", "run", "-d", "--rm",
             "--name", container_name,
@@ -160,10 +157,11 @@ class DockerProvider:
             "--label", "embodiedcloud.workspace=1",
             "--label", f"embodiedcloud.workspace_id={workspace.id}",
             "--label", f"embodiedcloud.gpu={gpu_index}",
+            "--label", f"embodiedcloud.gpu_id={reservation.gpu_id}",
             "--label", f"embodiedcloud.streaming={1 if template.requires_streaming else 0}",
             *env,
             "-v", f"{workspace_dir}:/workspace/project:rw",
-            self.settings.workspace_image,
+            image,
         ]
         result = self._run(args, check=False)
         if result.returncode != 0:
@@ -178,8 +176,6 @@ class DockerProvider:
                 "or place an authenticated/TLS gateway in front of any public access."
             )
         return ProvisionResult(
-            gpu_index=gpu_index,
-            gpu_name=gpu_name,
             ide_port=ide_port,
             signal_port=signal_port,
             media_port=media_port,
@@ -189,6 +185,11 @@ class DockerProvider:
             container_name=container_name,
         )
 
+    def start(self, workspace: Workspace) -> None:
+        """从 STOPPED 恢复：docker start 已有容器（容器由 scheduler reservation 绑定）。"""
+        if workspace.container_name:
+            self._run(["docker", "start", workspace.container_name], check=False)
+
     def stop(self, workspace: Workspace) -> None:
         if workspace.container_name:
             self._run(["docker", "stop", "-t", "20", workspace.container_name], check=False)
@@ -196,3 +197,53 @@ class DockerProvider:
     def destroy(self, workspace: Workspace) -> None:
         if workspace.container_name:
             self._run(["docker", "rm", "-f", workspace.container_name], check=False)
+
+    def inspect(self, workspace: Workspace) -> dict:
+        """读取容器实况：running/restarting/exited/absent。"""
+        if not workspace.container_name:
+            return {"state": "absent", "container_name": None}
+        result = self._run(
+            ["docker", "inspect", "--format", "{{json .State}}", workspace.container_name],
+            check=False,
+        )
+        if result.returncode != 0:
+            return {"state": "absent", "container_name": workspace.container_name}
+        import json
+
+        try:
+            state = json.loads(result.stdout.strip())
+        except ValueError:
+            return {"state": "unknown", "container_name": workspace.container_name}
+        return {
+            "state": state.get("Status", "unknown"),
+            "running": bool(state.get("Running")),
+            "exit_code": state.get("ExitCode"),
+            "container_name": workspace.container_name,
+        }
+
+    def logs(self, workspace: Workspace, tail: int = 200) -> str:
+        if not workspace.container_name:
+            return ""
+        result = self._run(
+            ["docker", "logs", "--tail", str(tail), workspace.container_name],
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout
+
+    def reconcile(self, workspace: Workspace) -> RuntimeState:
+        """判定 runtime 存活：容器 running → ALIVE；不存在 → MISSING；docker 不可用 → UNKNOWN。"""
+        if shutil.which("docker") is None:
+            return RuntimeState.UNKNOWN
+        if not workspace.container_name:
+            return RuntimeState.MISSING
+        try:
+            inspect = self.inspect(workspace)
+        except Exception:
+            return RuntimeState.UNKNOWN
+        if inspect.get("state") == "absent":
+            return RuntimeState.MISSING
+        if inspect.get("running"):
+            return RuntimeState.ALIVE
+        return RuntimeState.MISSING
