@@ -339,7 +339,7 @@ def test_pool_metrics_uses_real_counts():
         assert metrics["cartpole"][WarmPoolState.PREWARMING.value] == 0
         assert metrics["cartpole"][WarmPoolState.FAILED.value] == 2  # 池不足：2 个预热失败
         # 手动再加 1 个 READY（直接置状态）→ 计数为 2（COUNT 语义）
-        ws = db.scalars(select(Workspace)).first()
+        db.scalars(select(Workspace)).first()
         ws2 = Workspace(
             id="ws-extra",
             name="warm-extra",
