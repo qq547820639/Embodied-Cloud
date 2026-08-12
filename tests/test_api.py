@@ -93,3 +93,29 @@ def test_metrics_endpoint():
             "stream_session_total",
         ]:
             assert metric in body
+
+
+def test_standalone_user_usage_balance_matches_ledger():
+    """Regression: 无 organization 的 standalone user 有 CreditLedger 记录时，
+    GET /api/usage 必须返回真实 balance，而不是 0。"""
+    with TestClient(app) as client:
+        token = _register(client, "standalone@example.com", "standalone-user")
+        headers = _auth(token)
+
+        # 充值前 balance == 0
+        usage0 = client.get("/api/usage", headers=headers)
+        assert usage0.status_code == 200
+        assert usage0.json()["credits_balance"] == 0
+
+        # 充值 500 credits
+        resp = client.post("/api/ledger/recharge", json={"amount": 500}, headers=headers)
+        assert resp.status_code == 200, resp.text
+
+        # GET /api/usage → credits_balance == ledger balance == 500
+        usage1 = client.get("/api/usage", headers=headers)
+        assert usage1.status_code == 200
+        assert usage1.json()["credits_balance"] == 500
+
+        # 与 /api/ledger 聚合结果一致
+        entries = client.get("/api/ledger", headers=headers).json()
+        assert sum(e["amount"] for e in entries) == 500

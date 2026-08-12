@@ -40,7 +40,9 @@ def usage(db: DB, user: CurrentUser):
         (seconds_by_workspace[w.id] / 3600.0) * template_rates.get(w.template_id, 0.0)
         for w in workspaces
     )
-    balance = ledger.balance(db, user.id) if user.organization_id or user.role == Role.ADMIN.value else 0
+    # 任何用户（含 standalone / 无 organization）都必须返回其个人 ledger balance；
+    # CreditLedger 按 user_id 聚合，与 org 归属无关。
+    balance = ledger.balance(db, user.id)
     return UsageOut(
         running_workspaces=len(running),
         total_workspaces=len(workspaces),
