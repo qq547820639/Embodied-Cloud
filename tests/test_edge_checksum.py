@@ -147,7 +147,9 @@ def test_report_without_download_rejected(tmp_path):
         svc, owner, ws, _ = _setup(db, tmp_path)
         artifact = svc.create_artifact(db, owner, ws, "model.pt")
         d = svc.deploy(db, owner, ws, artifact, "franka")  # 未 download
-        with pytest.raises(Exception):
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException):
             svc.report_checksum(db, d, d.checksum)  # 即使值正确也被拒绝
         db.refresh(d)
         assert d.status == DeploymentStatus.PENDING.value
