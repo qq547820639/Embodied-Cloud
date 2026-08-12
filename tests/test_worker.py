@@ -91,7 +91,7 @@ def _seed(db) -> None:
 
 def _make_orchestrator(provider=None) -> tuple[WorkspaceOrchestrator, ControllableMockProvider]:
     provider = provider or ControllableMockProvider()
-    orchestrator = WorkspaceOrchestrator(Factory, provider, Path("/tmp/test-worker-ws"))
+    orchestrator = WorkspaceOrchestrator(Factory, provider, Path("/tmp/test-worker-ws"))  # noqa: S108
     return orchestrator, provider
 
 
