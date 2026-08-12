@@ -17,6 +17,7 @@ from ..models import (
 from .ledger import CreditLedgerService
 from .providers.base import ResourceReservation, RuntimeState, WorkspaceProvider
 from .scheduler import GpuScheduler, recover_stuck_gpu_allocations
+from .streaming import StreamingSessionService
 from .worker import enqueue_operation
 
 
@@ -32,12 +33,14 @@ class WorkspaceOrchestrator:
         workspace_root: Path,
         scheduler: GpuScheduler | None = None,
         ledger: CreditLedgerService | None = None,
+        streaming: StreamingSessionService | None = None,
     ):
         self.session_factory = session_factory
         self.provider = provider
         self.workspace_root = workspace_root
         self.scheduler = scheduler or GpuScheduler(session_factory)
         self.ledger = ledger or CreditLedgerService(session_factory)
+        self.streaming = streaming or StreamingSessionService(session_factory)
 
     # ------------------------------------------------------------------
     # create
@@ -171,12 +174,24 @@ class WorkspaceOrchestrator:
     # stop / destroy（同步 API 语义）
     # ------------------------------------------------------------------
     def stop(self, db: Session, workspace: Workspace) -> Workspace:
+        """STOP 生命周期：streaming.stop → runtime.stop → billing settle → GPU release。
+
+        全部步骤幂等；中途失败置 FAILED，重试（再次 stop）可继续完成 cleanup。
+        """
         if workspace.status in {WorkspaceStatus.STOPPED.value, WorkspaceStatus.FAILED.value}:
+            # 幂等收尾：若上次 stop 失败残留未完成清理（流会话/端口/GPU），补做
+            self._finalize_stop(db, workspace)
+            db.commit()
+            db.refresh(workspace)
             return workspace
         workspace.status = WorkspaceStatus.STOPPING.value
         db.commit()
         try:
+            # 1) 先终结流媒体会话并释放流端口
+            self.streaming.terminate_for_workspace(db, workspace.id)
+            # 2) runtime stop
             self.provider.stop(workspace)
+            # 3) 结算 + 释放 GPU
             self._finalize_stop(db, workspace)
         except Exception as exc:
             workspace.status = WorkspaceStatus.FAILED.value
@@ -220,6 +235,15 @@ class WorkspaceOrchestrator:
             db.commit()
 
     def destroy(self, db: Session, workspace: Workspace) -> None:
+        """DESTROY 生命周期：streaming.stop → runtime.destroy → billing settle → GPU release。
+
+        全部步骤幂等；destroy 失败时 GPU 绑定与流会话由 reconcile/重试清理。
+        """
+        try:
+            # 1) 先终结流媒体会话（幂等）
+            self.streaming.terminate_for_workspace(db, workspace.id)
+        except Exception:
+            db.rollback()
         try:
             self._settle_running_segment(db, workspace)
         except Exception:

@@ -102,7 +102,18 @@ class StreamingSessionService:
 
         返回受影响 (被置为 failed) 的会话数量。
         """
-        workspace = self._get_owned_workspace(db, workspace_id, user)
+        self._get_owned_workspace(db, workspace_id, user)
+        return self.terminate_for_workspace(db, workspace_id)
+
+    def terminate_for_workspace(self, db: Session, workspace_id: str) -> int:
+        """内部调用（orchestrator 生命周期集成）：终结该 workspace 全部活动会话。
+
+        幂等：无活动会话时返回 0 且不报错；重复调用结果一致。
+        会话置 FAILED + 释放会话与 workspace 的 stream 端口（端口可复用）。
+        """
+        workspace = db.get(Workspace, workspace_id)
+        if workspace is None:
+            return 0
         sessions = db.scalars(
             select(StreamingSession).where(
                 StreamingSession.workspace_id == workspace.id,
@@ -115,7 +126,7 @@ class StreamingSessionService:
             session.signal_port = None
             session.media_port = None
             affected += 1
-        # workspace 自身端口一并释放
+        # workspace 自身端口一并释放（streaming 端口可复用）
         workspace.signal_port = None
         workspace.media_port = None
         if affected > 0:
