@@ -158,7 +158,6 @@ def test_api_download_endpoint_does_not_verify(tmp_path):
         from app.models import Artifact, DeploymentRecord
 
         with SessionFactory() as db2:
-            ws2 = db2.get(Workspace, wid)
             art = Artifact(
                 id="art-api-1",
                 workspace_id=wid,
