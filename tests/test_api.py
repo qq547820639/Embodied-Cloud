@@ -115,6 +115,38 @@ def test_workspace_delete_is_soft_tombstone():
         assert usage["total_workspaces"] == 0
 
 
+def test_workspace_logs_endpoint_owner_isolated():
+    """GET /api/workspaces/{id}/logs：owner 可读，越权 404。"""
+    with TestClient(app) as client:
+        token = _register(client, "logs@example.com", "logs-user")
+        headers = _auth(token)
+        created = client.post(
+            "/api/workspaces", json={"template_id": "cartpole", "auto_start": True}, headers=headers
+        )
+        assert created.status_code == 201
+        workspace_id = created.json()["id"]
+
+        # 等待终态
+        state = None
+        for _ in range(40):
+            state = client.get(f"/api/workspaces/{workspace_id}", headers=headers).json()
+            if state["status"] in {"running", "failed"}:
+                break
+            import time
+
+            time.sleep(0.05)
+
+        resp = client.get(f"/api/workspaces/{workspace_id}/logs", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["workspace_id"] == workspace_id
+        assert "logs" in resp.json()
+
+        # 越权用户 404
+        token2 = _register(client, "logs2@example.com", "logs2-user")
+        headers2 = _auth(token2)
+        assert client.get(f"/api/workspaces/{workspace_id}/logs", headers=headers2).status_code == 404
+
+
 def test_metrics_endpoint():
     with TestClient(app) as client:
         resp = client.get("/metrics")

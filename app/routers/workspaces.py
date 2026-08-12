@@ -104,6 +104,15 @@ def stop_workspace(workspace_id: str, db: DB, user: CurrentUser):
     return orchestrator.stop(db, workspace)
 
 
+@router.get("/{workspace_id}/logs", response_model=dict)
+def workspace_logs(workspace_id: str, db: DB, user: CurrentUser, tail: int = 200):
+    """runtime 日志（owner 隔离；provider.logs，无 runtime 时返回空）。"""
+    workspace = _get_owned(db, workspace_id, user)
+    tail = max(1, min(tail, 2000))
+    logs = orchestrator.provider.logs(workspace, tail=tail)
+    return {"workspace_id": workspace.id, "logs": logs or ""}
+
+
 @router.delete("/{workspace_id}", status_code=204)
 def delete_workspace(workspace_id: str, db: DB, user: CurrentUser):
     workspace = _get_owned(db, workspace_id, user)
