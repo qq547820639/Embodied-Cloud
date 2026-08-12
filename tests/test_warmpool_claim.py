@@ -319,3 +319,36 @@ def test_api_launch_prefers_warm_pool_claim():
                     w = db.get(W, wid)
                     if w is not None:
                         orch.destroy(db, w)
+
+
+def test_pool_metrics_uses_real_counts():
+    """§8：pool_metrics 返回 COUNT(*)，非存在性 0/1。"""
+    provider = MockProvider("http://127.0.0.1:8000")
+    orchestrator = WorkspaceOrchestrator(
+        Factory, provider, Path("/tmp/test-warm-claim4")  # noqa: S108
+    )
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=3)
+    manager = WarmPoolManager(Factory, orchestrator, settings)
+    with Factory() as db:
+        _make_template(db)
+        _seed_gpu(db)
+        manager.maintain(db)
+        # 只 1 张 GPU → 恰好 1 个 READY
+        metrics = manager.pool_metrics(db)
+        assert metrics["cartpole"][WarmPoolState.READY.value] == 1  # 1 张 GPU → 1 个 READY
+        assert metrics["cartpole"][WarmPoolState.PREWARMING.value] == 0
+        assert metrics["cartpole"][WarmPoolState.FAILED.value] == 2  # 池不足：2 个预热失败
+        # 手动再加 1 个 READY（直接置状态）→ 计数为 2（COUNT 语义）
+        ws = db.scalars(select(Workspace)).first()
+        ws2 = Workspace(
+            id="ws-extra",
+            name="warm-extra",
+            template_id="cartpole",
+            provider="mock",
+            status=WorkspaceStatus.RUNNING.value,
+            warm_pool_state=WarmPoolState.READY.value,
+        )
+        db.add(ws2)
+        db.commit()
+        metrics2 = manager.pool_metrics(db)
+        assert metrics2["cartpole"][WarmPoolState.READY.value] == 2

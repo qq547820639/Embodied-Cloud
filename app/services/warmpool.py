@@ -203,16 +203,27 @@ class WarmPoolManager:
         workspace.warm_pool_state = WarmPoolState.FAILED.value
         db.commit()
 
-    def pool_metrics(self, db: Session) -> dict[str, int]:
-        """warm_pool_ready：READY 数量（按模板聚合）。"""
-        counts: dict[str, int] = {}
-        for state in _WARM_STATES:
-            n = db.scalar(
-                select(Workspace.id)
-                .where(Workspace.warm_pool_state == state, Workspace.deleted_at.is_(None))
+    def pool_metrics(self, db: Session) -> dict[str, dict[str, int]]:
+        """warm pool 真实数量：按 template × state 聚合（COUNT(*)，非存在性标志）。"""
+        from sqlalchemy import func
+
+        result: dict[str, dict[str, int]] = {}
+        templates = list(db.scalars(select(Template).where(Template.enabled.is_(True))))
+        for template in templates:
+            rows = db.execute(
+                select(Workspace.warm_pool_state, func.count(Workspace.id))
+                .where(
+                    Workspace.template_id == template.id,
+                    Workspace.deleted_at.is_(None),
+                )
+                .group_by(Workspace.warm_pool_state)
             )
-            counts[state] = 1 if n is not None else 0
-        return counts
+            counts = {state: 0 for state in _WARM_STATES}
+            for state, count in rows:
+                if state is not None and state in counts:
+                    counts[state] = int(count)
+            result[template.id] = counts
+        return result
 
     # ------------------------------------------------------------------
     # 兼容接口（早期版本）
