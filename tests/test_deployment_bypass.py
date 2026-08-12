@@ -140,7 +140,6 @@ def test_api_download_endpoint_does_not_verify(tmp_path):
         d = _deploy_downloading(db, svc, owner, ws)
         d.status = DeploymentStatus.PENDING.value
         db.commit()
-        deployment_id = d.id
 
     with TestClient(fastapi_app) as client:
         resp = client.post(
