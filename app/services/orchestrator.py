@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import Template, Workspace, WorkspaceStatus
 from .ledger import CreditLedgerService
-from .providers.base import WorkspaceProvider
+from .providers.base import ResourceReservation, WorkspaceProvider
 from .scheduler import GpuScheduler, recover_stuck_gpu_allocations, recover_stuck_workspaces
 
 
@@ -75,7 +75,7 @@ class WorkspaceOrchestrator:
             workspace.error_message = None
             db.commit()
             try:
-                # 1) 原子分配 GPU
+                # 1) 原子分配 GPU（GpuScheduler 是唯一 GPU reservation 决策入口）
                 gpu = self.scheduler.allocate(
                     db, workspace.id, gpu_requirement_gb=template.gpu_requirement_gb
                 )
@@ -83,14 +83,20 @@ class WorkspaceOrchestrator:
                 workspace.gpu_index = gpu.gpu_index
                 workspace.gpu_name = gpu.model
                 db.commit()
-                # 2) provider 实际拉起容器/资源
+                reservation = ResourceReservation(
+                    host_id=gpu.host_id,
+                    gpu_id=gpu.id,
+                    gpu_uuid=gpu.gpu_uuid,
+                    gpu_index=gpu.gpu_index or 0,
+                    memory_mb=gpu.memory_total,
+                )
+                # 2) provider 严格按 reservation 绑定资源，禁止二次决策
                 result = self.provider.provision(
                     workspace,
                     template,
                     self.workspace_root / workspace.id,
+                    reservation,
                 )
-                workspace.gpu_index = result.gpu_index if result.gpu_index is not None else workspace.gpu_index
-                workspace.gpu_name = result.gpu_name or workspace.gpu_name
                 workspace.ide_port = result.ide_port
                 workspace.signal_port = result.signal_port
                 workspace.media_port = result.media_port
