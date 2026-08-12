@@ -58,8 +58,8 @@ def test_s3_store_traversal_rejected_before_client_call(tmp_path):
     store = S3CompatibleArtifactStore(
         bucket="ec-artifacts",
         endpoint_url="http://minio:9000",
-        access_key="ak",
-        secret_key="sk",
+        access_key="ak",  # noqa: S106 测试数据
+        secret_key="sk",  # noqa: S106 测试数据
     )
     with pytest.raises(ArtifactStoreError):
         store.put("../escape", b"x")
