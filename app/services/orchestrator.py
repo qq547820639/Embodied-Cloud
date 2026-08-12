@@ -16,6 +16,7 @@ from ..models import (
     WorkspaceOperation,
     WorkspaceStatus,
 )
+from .billing import BillingPolicy
 from .ledger import CreditLedgerService
 from .providers.base import ResourceReservation, RuntimeState, WorkspaceProvider
 from .scheduler import GpuScheduler, recover_stuck_gpu_allocations

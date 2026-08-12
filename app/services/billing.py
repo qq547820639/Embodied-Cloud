@@ -6,7 +6,7 @@
 - 结算本身保持 append-only CreditLedger + 幂等 key（restart-safe、无双重扣费）
 """
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import Lab, Role, Template, User, Workspace, WorkspaceStatus
