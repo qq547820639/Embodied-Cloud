@@ -186,6 +186,12 @@ def test_operation_failure_retries_then_failed():
     # 逐个 tick，观察状态流转：RUNNING → RETRYING → … → FAILED
     statuses = []
     for _ in range(OperationWorker.MAX_ATTEMPTS + 2):
+        # 确定性：显式把 RETRYING backoff lease 置为过期（不依赖真实时钟推进）
+        with Factory() as db:
+            db_op = db.get(WorkspaceOperation, op.id)
+            if db_op is not None and db_op.status == OperationStatus.RETRYING.value:
+                db_op.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+                db.commit()
         worker.tick_once()
         with Factory() as db:
             statuses.append(db.get(WorkspaceOperation, op.id).status)
