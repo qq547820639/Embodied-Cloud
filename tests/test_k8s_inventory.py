@@ -143,7 +143,6 @@ def test_k8s_scheduler_reservation_host_flows_to_provider():
     """reservation.host_id/gpu 来自 K8s inventory，provider 只执行绑定。"""
 
     scheduler = _sync_inventory([_node("gpu-node-1", 1)])
-    fake = SimpleNamespace()
     with Factory() as db:
         ws = Workspace(id="ws-2", name="w", template_id="cartpole", provider="k8s", status="queued")
         db.add(ws)
