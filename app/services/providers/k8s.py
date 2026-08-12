@@ -401,7 +401,7 @@ class KubernetesProvider:
                     _time.sleep(2)
                     continue
                 pod = pods.items[0]
-                if not (getattr(pod.status, "phase", "") == "Running"):
+                if getattr(pod.status, "phase", "") != "Running":
                     _time.sleep(2)
                     continue
                 conditions = {c.type: c.status for c in (getattr(pod.status, "conditions", None) or [])}
