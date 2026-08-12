@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import time
 import uuid
 from datetime import UTC, datetime
@@ -8,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import (
+    Gpu,
+    GpuHost,
     Lab,
     OperationStatus,
     OperationType,
@@ -24,6 +27,8 @@ from .providers.base import ResourceReservation, RuntimeState, WorkspaceProvider
 from .scheduler import GpuScheduler, recover_stuck_gpu_allocations
 from .streaming import StreamingSessionService
 from .worker import enqueue_operation
+
+logger = logging.getLogger("embodiedcloud.orchestrator")
 
 
 def utcnow() -> datetime:
@@ -185,12 +190,15 @@ class WorkspaceOrchestrator:
                     "operation_id": operation.id,
                     "fencing_token": operation.fencing_token or "",
                 }
+            # §10：node identity 明确字段（K8s nodeSelector/affinity 依据）
+            host = db.get(GpuHost, gpu.host_id)
             reservation = ResourceReservation(
                 host_id=gpu.host_id,
                 gpu_id=gpu.id,
                 gpu_uuid=gpu.gpu_uuid,
                 gpu_index=gpu.gpu_index or 0,
                 memory_mb=gpu.memory_total,
+                node_name=host.name if host is not None else gpu.host_id,
                 metadata=op_meta,
             )
             # 2) provider 严格按 reservation 绑定资源，禁止二次决策；
@@ -373,8 +381,43 @@ class WorkspaceOrchestrator:
                 if w.status in {WorkspaceStatus.STOPPED.value, WorkspaceStatus.FAILED.value}:
                     continue
                 state = self.provider.reconcile(w)
+                # §10：K8s 路径校验 Pod 实际 nodeName == reservation.node_name
+                node_mismatch = False
+                if (
+                    w.status == WorkspaceStatus.RUNNING.value
+                    and w.provider in {"k8s", "kubernetes"}
+                    and w.gpu_id is not None
+                ):
+                    gpu = db.get(Gpu, w.gpu_id)
+                    host = db.get(GpuHost, gpu.host_id) if gpu is not None else None
+                    reserved_node = host.name if host is not None else None
+                    if reserved_node:
+                        try:
+                            runtime = self.provider.inspect(w)
+                        except Exception:
+                            runtime = {}
+                        actual_node = (
+                            runtime.get("node_name") or runtime.get("node")
+                        )
+                        if actual_node and actual_node != reserved_node:
+                            node_mismatch = True
+                            logger.warning(
+                                "workspace %s: pod on node %r but reserved %r",
+                                w.id[:8], actual_node, reserved_node,
+                            )
                 if w.status == WorkspaceStatus.RUNNING.value:
-                    if state == RuntimeState.ALIVE:
+                    if node_mismatch:
+                        # 分配节点与实际运行节点不一致 → 不得保持 RUNNING
+                        self._settle_running_segment(db, w)
+                        self.scheduler.release(db, w.id)
+                        w.status = WorkspaceStatus.FAILED.value
+                        w.error_message = (
+                            f"reconciled: pod node mismatch (actual={actual_node}, reserved={reserved_node})"
+                        )
+                        w.stopped_at = utcnow()
+                        w.started_at = None
+                        stats["failed"] += 1
+                    elif state == RuntimeState.ALIVE:
                         stats["kept"] += 1  # adopt：继续运行
                     elif state == RuntimeState.MISSING:
                         self._settle_running_segment(db, w)

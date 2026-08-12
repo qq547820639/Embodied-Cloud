@@ -24,6 +24,8 @@ class ResourceReservation:
     """GpuScheduler 产出的唯一资源 reservation —— ONE RESOURCE = ONE SOURCE OF TRUTH。
 
     Provider 只执行 reservation 描述的绑定，禁止自行选择 GPU（禁止自带 allocator）。
+    node_name（§10）：K8s 路径的明确 node identity（不依赖隐藏字符串解析
+    host_id 约定）；Docker 单机为 host 名。
     """
 
     host_id: str
@@ -32,6 +34,7 @@ class ResourceReservation:
     gpu_index: int
     gpu_count: int = 1
     memory_mb: int = 0
+    node_name: str = ""
     metadata: dict = field(default_factory=dict)
 
 

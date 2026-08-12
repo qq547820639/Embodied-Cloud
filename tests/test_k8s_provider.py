@@ -247,19 +247,9 @@ def test_provision_creates_deployment_service_pvc(tmp_path):
     assert volumes[0].persistent_volume_claim.claim_name == PVC_NAME
 
 
-def test_provision_without_reservation_no_gpu_limit(tmp_path):
-    """无 reservation（理论上 scheduler 必传）时 nvidia.com/gpu 为 0，且无 nodeSelector。"""
-    provider, fake = make_provider()
-    provider.provision(make_workspace(), make_template(), tmp_path / "ws", None)
-    _, _, dep = next(c for c in fake.calls if c[0] == "create_deployment")
-    container = dep.spec.template.spec.containers[0]
-    assert container.resources.limits["nvidia.com/gpu"] == "0"
-    assert dep.spec.template.spec.node_selector is None
-
-
 def test_provision_streaming_template_sets_livestream(tmp_path):
     provider, fake = make_provider()
-    provider.provision(make_workspace(), make_template(streaming=True), tmp_path / "ws")
+    provider.provision(make_workspace(), make_template(streaming=True), tmp_path / "ws", make_reservation())
     _, _, dep = next(c for c in fake.calls if c[0] == "create_deployment")
     env = {e.name: e.value for e in dep.spec.template.spec.containers[0].env}
     assert env["LIVESTREAM"] == "1"

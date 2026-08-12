@@ -155,6 +155,9 @@ class KubernetesProvider:
     ) -> ProvisionResult:
         if not self.settings.eula_accepted:
             raise RuntimeError("Set EMBODIEDCLOUD_EULA_ACCEPTED=true before launching NVIDIA Isaac containers.")
+        # §10：真实模式禁止 reservation=None（scheduler 必须完成 node/capacity 决策）
+        if reservation is None:
+            raise RuntimeError("KubernetesProvider requires a ResourceReservation from GpuScheduler")
 
         client = self._models()  # offline 测试注入 fake model layer；真实路径懒加载 kubernetes.client
 
@@ -172,11 +175,12 @@ class KubernetesProvider:
 
         # GPU 资源声明：完全来自 scheduler 的 reservation（唯一决策入口）。
         # Kubernetes 侧由 NVIDIA Device Plugin 负责具体 device 分配；
-        # nodeSelector/affinity 由 reservation.metadata 携带（scheduler 已选 host/node）。
-        gpu_count = str(reservation.gpu_count) if reservation else "0"
+        # nodeSelector 来自 reservation.node_name（§10 明确字段，非字符串解析）
+        gpu_count = str(reservation.gpu_count)
         node_selector: dict[str, str] = {}
-        if reservation is not None:
-            node_selector = dict(reservation.metadata.get("node_selector", {}))
+        if reservation.node_name:
+            node_selector = {"kubernetes.io/hostname": reservation.node_name}
+        node_selector.update(dict(reservation.metadata.get("node_selector", {})))
 
         # 1) PVC：挂载到 /workspace/project，不指定 StorageClass（使用集群默认）
         pvc = client.V1PersistentVolumeClaim(
