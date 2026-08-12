@@ -137,6 +137,6 @@ class WorkspaceCredentialCipher:
 def _derive_key(secret: str) -> bytes:
     if not secret:
         # 开发默认密钥（仅 mock/本地）；生产必须配置 EMBODIEDCLOUD_CREDENTIAL_KEY
-        secret = "dev-only-credential-key-change-me"
+        secret = "dev-only-credential-key-change-me"  # noqa: S105 开发默认值，生产必须显式配置
     digest = hashlib.sha256(("ec:cred:" + secret).encode()).digest()
     return base64.urlsafe_b64encode(digest)
