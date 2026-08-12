@@ -15,7 +15,11 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.main import app
 from app.models import Template, Workspace, WorkspaceStatus
-from app.security import WorkspaceCredentialCipher
+from app.security import (
+    CredentialDecryptError,
+    WorkspaceCredentialCipher,
+    validate_credential_configuration,
+)
 from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
@@ -126,7 +130,7 @@ def test_access_endpoint_returns_plaintext_password():
 
 
 def test_legacy_plaintext_password_still_readable():
-    """兼容迁移期：DB 中的旧明文密码仍可读取（解密失败回退明文）。"""
+    """兼容迁移期：DB 中的旧明文密码仍可读取（resolve 原样返回）。"""
     cipher = WorkspaceCredentialCipher(KEY)
     with Factory() as db:
         _seed(db)
@@ -141,6 +145,30 @@ def test_legacy_plaintext_password_still_readable():
         )
         db.add(ws)
         db.commit()
-        stored = ws.password
-        # 迁移期回退：decrypt 返回 None，调用方按明文处理
-        assert cipher.decrypt(stored) is None
+        # 非 enc: 前缀 = 迁移期旧明文 → resolve 原样返回（兼容读取）
+        assert cipher.resolve(ws.password) == "legacy-plaintext-password"
+
+
+def test_ciphertext_decrypt_failure_fails_closed():
+    """§13 fail closed：enc: 密文解密失败必须抛错，禁止当明文返回。"""
+    cipher = WorkspaceCredentialCipher(KEY)
+    # 用另一个密钥加密 → 当前 cipher 无法解密
+    other = WorkspaceCredentialCipher("different-key-0002")
+    stored = other.encrypt("secret-password")
+    assert stored.startswith("enc:")
+    with pytest.raises(CredentialDecryptError):
+        cipher.decrypt(stored)
+    with pytest.raises(CredentialDecryptError):
+        cipher.resolve(stored)
+
+
+def test_production_provider_requires_explicit_credential_key():
+    """§13：provider != mock 且未显式配置密钥 → 拒绝启动（禁止开发默认密钥）。"""
+    with pytest.raises(RuntimeError, match="WORKSPACE_CREDENTIAL_KEY"):
+        validate_credential_configuration(provider="docker", credential_key="")
+    with pytest.raises(RuntimeError, match="WORKSPACE_CREDENTIAL_KEY"):
+        validate_credential_configuration(provider="k8s", credential_key="")
+    # mock 允许（开发/演示）
+    validate_credential_configuration(provider="mock", credential_key="")
+    # 生产 + 显式密钥 → 允许
+    validate_credential_configuration(provider="docker", credential_key="explicit-key")

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .config import Settings
 from .db import make_engine, make_session_factory, session_dependency
 from .models import User
-from .security import WorkspaceCredentialCipher, make_session_dependency
+from .security import WorkspaceCredentialCipher, make_session_dependency, validate_credential_configuration
 from .seed import seed_templates
 from .services.billing import BillingPolicy
 from .services.ledger import CreditLedgerService
@@ -27,6 +27,8 @@ from .services.worker import OperationWorker
 
 settings = Settings()
 settings.ensure_dirs()
+# §13：生产（非 mock provider）必须显式配置凭据密钥，否则拒绝启动
+validate_credential_configuration(settings.provider, settings.workspace_credential_key)
 engine = make_engine(settings)
 SessionFactory: sessionmaker[Session] = make_session_factory(engine)
 get_db = session_dependency(SessionFactory)

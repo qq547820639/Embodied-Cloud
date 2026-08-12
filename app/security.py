@@ -108,13 +108,19 @@ def require_admin(user: User) -> User:
 
 
 # ---------------------------------------------------------------------------
-# Workspace 凭据保护：控制面不长期保存可直接登录的明文密码（§20）
+# Workspace 凭据保护：控制面不长期保存可直接登录的明文密码（§20/§13）
 # ---------------------------------------------------------------------------
 # code-server runtime 需要把密码放进容器 env，因此 runtime 侧必须有一份明文
 # 副本；但控制面 DB 只保存 Fernet 加密后的密文。access endpoint 解密后返回给
-# 合法 owner（短生命周期凭据的过渡设计，未来可替换为 gateway auth）。
+# 合法 owner。
+# §13 fail-closed：enc: 前缀的密文解密失败 = 密钥变更/数据损坏 → 抛异常，
+# **禁止把密文当明文密码返回**；非 enc: 前缀 = 迁移期旧明文（兼容读取）。
 
 _PREFIX = "enc:"
+
+
+class CredentialDecryptError(RuntimeError):
+    """密文无法解密（fail closed）：不得回退为明文读取。"""
 
 
 class WorkspaceCredentialCipher:
@@ -125,18 +131,49 @@ class WorkspaceCredentialCipher:
         return _PREFIX + self._fernet.encrypt(plaintext.encode()).decode()
 
     def decrypt(self, stored: str) -> str | None:
-        """解密失败（旧明文数据/密钥变更）返回 None，由调用方按明文兼容。"""
+        """解密 enc: 密文；非密文（迁移期明文）返回 None。
+
+        密文解密失败 → 抛 CredentialDecryptError（fail closed）。
+        """
         if not stored.startswith(_PREFIX):
-            return None
+            return None  # 旧明文（encrypt 引入前写入）
         try:
             return self._fernet.decrypt(stored[len(_PREFIX):].encode()).decode()
-        except Exception:
+        except Exception as exc:
+            raise CredentialDecryptError(
+                "stored credential ciphertext cannot be decrypted "
+                "(key rotation or corruption); refusing to return it as plaintext"
+            ) from exc
+
+    def resolve(self, stored: str | None) -> str | None:
+        """access 路径统一解析：密文→明文；旧明文→原样；None→None。
+
+        fail closed：密文解密失败抛 CredentialDecryptError。
+        """
+        if stored is None:
             return None
+        if stored.startswith(_PREFIX):
+            return self.decrypt(stored)
+        return stored  # 迁移期旧明文
 
 
 def _derive_key(secret: str) -> bytes:
     if not secret:
-        # 开发默认密钥（仅 mock/本地）；生产必须配置 EMBODIEDCLOUD_CREDENTIAL_KEY
+        # 开发默认密钥（仅 mock/本地）；生产必须配置
+        # EMBODIEDCLOUD_WORKSPACE_CREDENTIAL_KEY（deps 启动校验拒绝生产使用）
         secret = "dev-only-credential-key-change-me"  # noqa: S105 开发默认值，生产必须显式配置
     digest = hashlib.sha256(("ec:cred:" + secret).encode()).digest()
     return base64.urlsafe_b64encode(digest)
+
+
+def validate_credential_configuration(provider: str, credential_key: str) -> None:
+    """§13 生产安全：provider != mock 且未显式配置凭据密钥 → 拒绝启动。
+
+    禁止生产使用开发默认密钥（加密形同虚设）。
+    """
+    if provider.lower() not in {"mock"} and not credential_key:
+        raise RuntimeError(
+            "EMBODIEDCLOUD_WORKSPACE_CREDENTIAL_KEY must be explicitly configured "
+            f"when provider={provider!r} (refusing to run production with the "
+            "dev fallback key)"
+        )

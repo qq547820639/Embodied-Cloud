@@ -75,11 +75,14 @@ def get_workspace(workspace_id: str, db: DB, user: CurrentUser):
 @router.get("/{workspace_id}/access", response_model=WorkspaceAccessOut)
 def get_workspace_access(workspace_id: str, db: DB, user: CurrentUser):
     workspace = _get_owned(db, workspace_id, user)
-    # §20：DB 存加密凭据；此处解密后仅返回给合法 owner（明文不落日志）
-    password = workspace.password
-    if password:
-        decrypted = credential_cipher.decrypt(password)
-        password = decrypted if decrypted is not None else password  # 兼容旧明文
+    # §13：DB 存加密凭据；此处解密后仅返回给合法 owner（明文不落日志）。
+    # fail closed：enc: 密文解密失败 → 500，绝不把密文当密码返回。
+    from ..security import CredentialDecryptError
+
+    try:
+        password = credential_cipher.resolve(workspace.password)
+    except CredentialDecryptError as exc:
+        raise HTTPException(500, str(exc)) from exc
     return WorkspaceAccessOut(
         workspace_id=workspace.id,
         status=workspace.status,
