@@ -14,7 +14,7 @@ router = APIRouter(tags=["usage"])
 
 
 def _user_workspaces(db, user) -> list[Workspace]:
-    stmt = select(Workspace)
+    stmt = select(Workspace).where(Workspace.deleted_at.is_(None))
     if user.role != Role.ADMIN.value:
         stmt = stmt.where(Workspace.user_id == user.id)
     return list(db.scalars(stmt))

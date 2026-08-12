@@ -220,6 +220,8 @@ class Workspace(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # soft delete tombstone：destroy 后行保留（billing/audit/deployment history/安全调查）
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     accumulated_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 

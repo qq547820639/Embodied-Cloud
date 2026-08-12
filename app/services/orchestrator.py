@@ -235,10 +235,14 @@ class WorkspaceOrchestrator:
             db.commit()
 
     def destroy(self, db: Session, workspace: Workspace) -> None:
-        """DESTROY 生命周期：streaming.stop → runtime.destroy → billing settle → GPU release。
+        """DESTROY 生命周期（soft delete / tombstone 语义）：
+        streaming.stop → runtime.destroy → billing settle → GPU release → DELETED。
 
-        全部步骤幂等；destroy 失败时 GPU 绑定与流会话由 reconcile/重试清理。
+        workspace 行保留（deleted_at tombstone）用于 billing/audit/deployment
+        history/安全调查；API 默认不返回 deleted workspace。全部步骤幂等。
         """
+        if workspace.deleted_at is not None:
+            return  # 已 tombstone，幂等
         try:
             # 1) 先终结流媒体会话（幂等）
             self.streaming.terminate_for_workspace(db, workspace.id)
@@ -255,7 +259,10 @@ class WorkspaceOrchestrator:
                 self.scheduler.release(db, workspace.id)
             except Exception:
                 db.rollback()
-            db.delete(workspace)
+            # tombstone：状态 DELETED + deleted_at，行保留
+            workspace.status = WorkspaceStatus.DELETED.value
+            workspace.deleted_at = utcnow()
+            workspace.started_at = None
             db.commit()
 
     # ------------------------------------------------------------------
@@ -276,6 +283,8 @@ class WorkspaceOrchestrator:
         stats = {"adopted": 0, "failed": 0, "stopped": 0, "requeued": 0, "kept": 0}
         with self.session_factory() as db:
             for w in db.scalars(select(Workspace).order_by(Workspace.created_at)):
+                if w.deleted_at is not None:
+                    continue  # tombstone：不参与 reconcile
                 if w.status in {WorkspaceStatus.STOPPED.value, WorkspaceStatus.FAILED.value}:
                     continue
                 state = self.provider.reconcile(w)

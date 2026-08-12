@@ -78,6 +78,43 @@ def test_end_to_end_workspace_lifecycle():
         assert client.get(f"/api/workspaces/{workspace_id}", headers=headers).status_code == 404
 
 
+def test_workspace_delete_is_soft_tombstone():
+    """删除语义：soft delete / tombstone —— 行保留（billing/audit），API 默认不返回。"""
+    with TestClient(app) as client:
+        token = _register(client, "softdel@example.com", "softdel-user")
+        headers = _auth(token)
+
+        created = client.post(
+            "/api/workspaces", json={"template_id": "cartpole", "auto_start": False}, headers=headers
+        )
+        assert created.status_code == 201
+        workspace_id = created.json()["id"]
+
+        # 删除 → 204；行保留为 tombstone（DB 层验证）
+        assert client.delete(f"/api/workspaces/{workspace_id}", headers=headers).status_code == 204
+
+        # API 默认不返回 deleted workspace：list 不含、GET 404
+        assert client.get("/api/workspaces", headers=headers).json() == []
+        assert client.get(f"/api/workspaces/{workspace_id}", headers=headers).status_code == 404
+
+        # 重复删除幂等（tombstone 后对普通 API 不可见 → 404，与 GET 语义一致）
+        assert client.delete(f"/api/workspaces/{workspace_id}", headers=headers).status_code == 404
+
+        # DB 层：行保留（DELETED + deleted_at）
+        from app.deps import SessionFactory
+        from app.models import Workspace, WorkspaceStatus
+
+        with SessionFactory() as db:
+            ws = db.get(Workspace, workspace_id)
+            assert ws is not None  # 行未被物理删除
+            assert ws.status == WorkspaceStatus.DELETED.value
+            assert ws.deleted_at is not None
+
+        # usage 不统计 tombstone
+        usage = client.get("/api/usage", headers=headers).json()
+        assert usage["total_workspaces"] == 0
+
+
 def test_metrics_endpoint():
     with TestClient(app) as client:
         resp = client.get("/metrics")

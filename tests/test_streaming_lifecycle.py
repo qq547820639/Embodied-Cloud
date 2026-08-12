@@ -152,7 +152,7 @@ def test_stop_terminates_streaming_and_releases_everything():
 
 
 def test_destroy_terminates_streaming_and_releases_everything():
-    """DESTROY：流会话关闭 + 端口释放 + runtime destroy + GPU release + 行删除。"""
+    """DESTROY：流会话关闭 + 端口释放 + runtime destroy + GPU release + tombstone。"""
     orchestrator, wid, sid = _running_workspace_with_stream()
 
     with Factory() as db:
@@ -160,7 +160,11 @@ def test_destroy_terminates_streaming_and_releases_everything():
         orchestrator.destroy(db, ws)
 
     with Factory() as db:
-        assert db.get(Workspace, wid) is None
+        ws = db.get(Workspace, wid)
+        # soft delete：行保留为 tombstone
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.DELETED.value
+        assert ws.deleted_at is not None
         assert _active_sessions(db, wid) == []
         session = db.get(StreamingSession, sid)
         assert session.status == StreamingStatus.FAILED.value

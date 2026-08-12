@@ -18,6 +18,9 @@ def _get_owned(db, workspace_id: str, user) -> Workspace:
     workspace = db.get(Workspace, workspace_id)
     if workspace is None:
         raise HTTPException(404, "workspace not found")
+    if workspace.deleted_at is not None:
+        # soft delete：普通 API 一律 404（管理员审计走 /admin/all）
+        raise HTTPException(404, "workspace not found")
     if user.role != Role.ADMIN.value and workspace.user_id != user.id:
         raise HTTPException(404, "workspace not found")
     return workspace
@@ -25,7 +28,11 @@ def _get_owned(db, workspace_id: str, user) -> Workspace:
 
 @router.get("", response_model=list[WorkspaceOut])
 def list_workspaces(db: DB, user: CurrentUser):
-    stmt = select(Workspace).order_by(Workspace.created_at.desc())
+    stmt = (
+        select(Workspace)
+        .where(Workspace.deleted_at.is_(None))
+        .order_by(Workspace.created_at.desc())
+    )
     if user.role != Role.ADMIN.value:
         stmt = stmt.where(Workspace.user_id == user.id)
     return list(db.scalars(stmt))
@@ -99,6 +106,7 @@ def delete_workspace(workspace_id: str, db: DB, user: CurrentUser):
 
 @router.get("/admin/all", response_model=list[WorkspaceOut], include_in_schema=False)
 def list_all_workspaces(db: DB, user: CurrentUser):
+    """管理员审计：包含 deleted（tombstone）workspace。"""
     if user.role != Role.ADMIN.value:
         raise HTTPException(403, "admin role required")
     return list(db.scalars(select(Workspace).order_by(Workspace.created_at.desc())))
