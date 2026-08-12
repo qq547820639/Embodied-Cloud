@@ -1,24 +1,30 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import __version__
 from .config import Settings
 from .db import Base, make_engine, make_session_factory, session_dependency
 from .models import Template, Workspace, WorkspaceStatus
-from .schemas import HealthOut, TemplateOut, UsageOut, WorkspaceAccessOut, WorkspaceCreate, WorkspaceOut
+from .schemas import (
+    HealthOut,
+    TemplateOut,
+    UsageOut,
+    WorkspaceAccessOut,
+    WorkspaceCreate,
+    WorkspaceOut,
+)
 from .seed import seed_templates
 from .services.orchestrator import WorkspaceOrchestrator
 from .services.providers.docker import DockerProvider
 from .services.providers.mock import MockProvider
-
 
 settings = Settings()
 settings.ensure_dirs()
@@ -76,7 +82,12 @@ def health():
 
 @app.get("/api/templates", response_model=list[TemplateOut])
 def list_templates(db: DB):
-    return list(db.scalars(select(Template).where(Template.enabled.is_(True)).order_by(Template.category, Template.name)))
+    stmt = (
+        select(Template)
+        .where(Template.enabled.is_(True))
+        .order_by(Template.category, Template.name)
+    )
+    return list(db.scalars(stmt))
 
 
 @app.get("/api/workspaces", response_model=list[WorkspaceOut])
@@ -148,21 +159,20 @@ def delete_workspace(workspace_id: str, db: DB):
     if workspace is None:
         raise HTTPException(404, "workspace not found")
     orchestrator.destroy(db, workspace)
-    return None
 
 
 @app.get("/api/usage", response_model=UsageOut)
 def usage(db: DB):
     workspaces = list(db.scalars(select(Workspace)))
     running = [w for w in workspaces if w.status == WorkspaceStatus.RUNNING.value]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     seconds_by_workspace: dict[str, int] = {}
     for w in workspaces:
         live_seconds = 0
         if w.status == WorkspaceStatus.RUNNING.value and w.started_at:
             started = w.started_at
             if started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
+                started = started.replace(tzinfo=UTC)
             live_seconds = max(0, int((now - started).total_seconds()))
         seconds_by_workspace[w.id] = w.accumulated_seconds + live_seconds
     seconds = sum(seconds_by_workspace.values())
@@ -191,7 +201,9 @@ def demo_workspace(workspace_id: str, db: DB, view: str | None = None):
     header{{padding:14px 20px;background:#111a2e;border-bottom:1px solid #273455}}
     .grid{{display:grid;grid-template-columns:240px 1fr;height:calc(100vh - 55px)}}
     aside{{padding:16px;border-right:1px solid #273455;color:#93a4c7}}
-    main{{padding:24px}} code,pre{{background:#050913;border:1px solid #273455;border-radius:10px;padding:16px;display:block;white-space:pre-wrap}}
+    main{{padding:24px}}
+    code,pre{{background:#050913;border:1px solid #273455;border-radius:10px;padding:16px;display:block}}
+    code,pre{{white-space:pre-wrap}}
     .ok{{color:#5be49b}} .muted{{color:#7e90b8}}
     </style></head><body><header>EmbodiedCloud / {mode} · <span class='ok'>RUNNING</span></header>
     <div class='grid'><aside>Explorer<br><br>project/<br>├── README.md<br>└── experiments/</aside><main>

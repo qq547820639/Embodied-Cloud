@@ -1,7 +1,8 @@
 import socket
 
 
-def is_port_free(port: int, host: str = "0.0.0.0", sock_type: int = socket.SOCK_STREAM) -> bool:
+def is_port_free(port: int, host: str = "0.0.0.0", sock_type: int = socket.SOCK_STREAM) -> bool:  # noqa: S104
+    # S104: 绑定 0.0.0.0 探测是端口可用性检查的有意行为（需覆盖所有接口）。
     sock = socket.socket(socket.AF_INET, sock_type)
     try:
         sock.bind((host, port))

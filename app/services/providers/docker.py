@@ -1,3 +1,4 @@
+import contextlib
 import os
 import secrets
 import shutil
@@ -5,10 +6,10 @@ import socket
 import subprocess
 from pathlib import Path
 
-from .base import ProvisionResult
-from ..ports import allocate_tcp_port, is_port_free
 from ...config import Settings
 from ...models import Template, Workspace
+from ..ports import allocate_tcp_port, is_port_free
+from .base import ProvisionResult
 
 
 class DockerProvider:
@@ -30,7 +31,8 @@ class DockerProvider:
         self.settings = settings
 
     def _run(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(args, text=True, capture_output=True, check=check)
+        # S603: 仅执行受控常量参数（docker CLI），不包含用户输入。
+        return subprocess.run(args, text=True, capture_output=True, check=check)  # noqa: S603
 
     def health(self) -> tuple[bool, str]:
         if shutil.which("docker") is None:
@@ -72,10 +74,8 @@ class DockerProvider:
         for labels in self._running_workspace_labels():
             for part in labels.split(","):
                 if part.startswith("embodiedcloud.gpu="):
-                    try:
+                    with contextlib.suppress(ValueError):
                         occupied.add(int(part.split("=", 1)[1]))
-                    except ValueError:
-                        pass
         return occupied
 
     def _streaming_workspace_running(self) -> bool:
@@ -116,7 +116,9 @@ class DockerProvider:
         # read-only to the workspace. v0.1 is explicitly trusted single-host
         # mode, so grant workspace-local write access here; Kubernetes/PVC mode
         # replaces this with fsGroup/volume ownership policy.
-        os.chmod(workspace_dir, 0o777)
+        # Isaac Sim 6 容器默认 uid/gid 1234。单机可信模式（ADR 0003）在此授予
+        # workspace 本地写权限；K8s/PVC 模式用 fsGroup 策略替代，不适用此处。
+        os.chmod(workspace_dir, 0o777)  # noqa: S103
         streaming_note = ""
         if template.requires_streaming:
             streaming_note = (
@@ -132,7 +134,7 @@ class DockerProvider:
             f"{streaming_note}",
             encoding="utf-8",
         )
-        os.chmod(readme_path, 0o666)
+        os.chmod(readme_path, 0o666)  # noqa: S103
 
         gpu_index, gpu_name = self._choose_gpu()
         ide_port = allocate_tcp_port(self.settings.ide_port_start, self.settings.ide_port_end)

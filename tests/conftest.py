@@ -3,7 +3,7 @@ from pathlib import Path
 
 os.environ["EMBODIEDCLOUD_PROVIDER"] = "mock"
 os.environ["EMBODIEDCLOUD_DATABASE_URL"] = "sqlite:///./test-embodiedcloud.db"
-os.environ["EMBODIEDCLOUD_WORKSPACE_ROOT"] = "/tmp/test-embodiedcloud-workspaces"
+os.environ["EMBODIEDCLOUD_WORKSPACE_ROOT"] = "/tmp/test-embodiedcloud-workspaces"  # noqa: S108 测试隔离目录
 
 
 def pytest_sessionfinish(session, exitstatus):

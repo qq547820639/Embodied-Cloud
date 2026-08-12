@@ -1,0 +1,16 @@
+fastapi<1,>=0.115
+uvicorn[standard]<1,>=0.30
+sqlalchemy<3,>=2.0
+pydantic-settings<3,>=2.5
+alembic<2,>=1.13
+prometheus-client<1,>=0.20
+kubernetes<32,>=28
+pyyaml<7,>=6
+
+[dev]
+pytest<10,>=8
+httpx<1,>=0.27
+pytest-asyncio<1,>=0.23
+ruff<1,>=0.6
+mypy<2,>=1.10
+build<2,>=1.2

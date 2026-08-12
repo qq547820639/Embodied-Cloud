@@ -1,8 +1,8 @@
 import secrets
 from pathlib import Path
 
-from .base import ProvisionResult
 from ...models import Template, Workspace
+from .base import ProvisionResult
 
 
 class MockProvider:

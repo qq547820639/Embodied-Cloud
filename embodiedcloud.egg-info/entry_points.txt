@@ -1,0 +1,2 @@
+[console_scripts]
+embodiedcloud = app.main:run

@@ -12,7 +12,19 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
-      - run: python -m compileall -q app
-      - run: pytest
-      - run: |
-          for f in scripts/*.sh runtime/workspace-entrypoint.sh; do bash -n "$f"; done
+      - name: Lint
+        run: make lint
+      - name: Type check
+        run: make typecheck
+      - name: Unit + integration tests
+        run: make test
+      - name: Build artifact
+        run: make build
+      - name: Smoke (mock mode)
+        run: make smoke
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: embodiedcloud-wheel
+          path: dist/*.whl
+          if-no-files-found: error

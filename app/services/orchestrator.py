@@ -1,8 +1,8 @@
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from sqlalchemy import select
+
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import Template, Workspace, WorkspaceStatus
@@ -10,7 +10,7 @@ from .providers.base import WorkspaceProvider
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class WorkspaceOrchestrator:
@@ -87,7 +87,7 @@ class WorkspaceOrchestrator:
             if workspace.started_at:
                 started = workspace.started_at
                 if started.tzinfo is None:
-                    started = started.replace(tzinfo=timezone.utc)
+                    started = started.replace(tzinfo=UTC)
                 workspace.accumulated_seconds += max(0, int((now - started).total_seconds()))
             workspace.status = WorkspaceStatus.STOPPED.value
             workspace.stopped_at = now

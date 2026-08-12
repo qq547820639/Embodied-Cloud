@@ -1,0 +1,23 @@
+# Checklist
+
+- [ ] 治理文档齐全（PRODUCT_SPEC/ARCHITECTURE/MASTER_PLAN/ACCEPTANCE_GATES/SECURITY/RUNBOOK/OPERATIONS/RELEASE_PROCESS/ADR/CURRENT_STATE）
+- [ ] make install/dev/lint/typecheck/build/smoke/clean 可运行且全绿
+- [ ] CI 包含 lint/type/unit/integration/build/artifact
+- [ ] Alembic 迁移体系可用（SQLite 本地 / PostgreSQL 生产），seed 幂等
+- [ ] Workspace 状态含 CREATED/DELETED，crash recovery 恢复悬置 PROVISIONING 并归还 GPU
+- [ ] Auth（session + OIDC-ready）生效；user/admin 角色
+- [ ] 隔离测试通过：User A 不能读/改/删 User B workspace
+- [ ] GPU Scheduler 原子分配、并发不重复、unhealthy 不调度、stop/delete 释放
+- [ ] Provider 接口含 inspect/logs/health；K8sWorkspaceProvider 实现并可离线单测
+- [ ] Credit Ledger 不可变、幂等、auditable；同一 usage 不重复扣款
+- [ ] GET /api/usage 基于 ledger
+- [ ] Template Registry 含 slug/version/image/gpu_requirement/entrypoints/outputs/streaming/healthcheck/metadata；5 个首批模板 version locked；无 latest
+- [ ] Streaming 状态机 starting/ready/connected/disconnected/failed + start/connect/disconnect/reconnect/stop/port cleanup 测试
+- [ ] Warm Pool pool manager + metrics + benchmark harness 存在并单测通过
+- [ ] /metrics 暴露指定指标；结构化日志含 request_id/user_id/workspace_id/template_id/host_id/gpu_id 且无 secret
+- [ ] Course/Lab/Assignment/Submission 教师/学生流程 API 可测
+- [ ] Edge Agent 接口齐全 + RobotDriver interface + MockRobotDriver；Deployment 记录含 model/template/robot/checksum/status
+- [ ] G1–G4 脚本存在、bash -n 通过、显式标记 PHYSICAL_GPU_VALIDATION_PENDING（不标 PASS）
+- [ ] Release 产物含 CHANGELOG/checksum/migration notes/分级验证矩阵
+- [ ] 最终 acceptance matrix 严格区分 VERIFIED PASS / IMPLEMENTED BUT NOT PHYSICALLY VERIFIED / FAILED / BLOCKED_EXTERNAL_DEPENDENCY
+- [ ] 全部变更提交并推送 origin/main

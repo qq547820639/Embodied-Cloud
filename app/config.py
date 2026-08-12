@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,10 +14,11 @@ class Settings(BaseSettings):
     provider: str = "mock"
     database_url: str = "sqlite:///./embodiedcloud.db"
     public_base_url: str = "http://127.0.0.1:8000"
-    bind_host: str = "0.0.0.0"
+    bind_host: str = "0.0.0.0"  # noqa: S104 服务默认监听所有接口，生产经 TLS 网关收敛
     bind_port: int = 8000
 
-    workspace_root: Path = Path("/tmp/embodiedcloud-workspaces")
+    # S108: /tmp 为本地开发默认值；生产必须显式配置 EMBODIEDCLOUD_WORKSPACE_ROOT。
+    workspace_root: Path = Path("/tmp/embodiedcloud-workspaces")  # noqa: S108
     workspace_image: str = "embodiedcloud/isaaclab-workspace:0.1.0"
     host_public_ip: str = "127.0.0.1"
 

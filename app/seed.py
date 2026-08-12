@@ -3,7 +3,6 @@ from sqlalchemy.orm import Session
 
 from .models import Template
 
-
 DEPRECATED_BUILTIN_TEMPLATE_IDS = {"franka-reach-play"}
 
 
@@ -14,7 +13,10 @@ SEED_TEMPLATES = [
         "description": "最小验证模板：验证 Isaac Lab 3.0 与 Newton/MuJoCo-Warp 后端是否可用。",
         "category": "入门 / RL",
         "runtime": "isaaclab",
-        "launch_command": "isaaclab train --rl_library rsl_rl --task Isaac-Cartpole-Direct --num_envs 16 presets=newton_mjwarp --max_iterations 5",
+        "launch_command": (
+            "isaaclab train --rl_library rsl_rl --task Isaac-Cartpole-Direct "
+            "--num_envs 16 presets=newton_mjwarp --max_iterations 5"
+        ),
         "requires_streaming": False,
         "recommended_vram_gb": 8,
         "estimated_hourly_cost_cny": 3.0,
