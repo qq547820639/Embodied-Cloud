@@ -7,9 +7,10 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
-from ..deps import DB, CurrentUser, orchestrator
+from ..deps import DB, CurrentUser, billing, orchestrator
 from ..models import Role, Template, Workspace, WorkspaceStatus
 from ..schemas import WorkspaceAccessOut, WorkspaceCreate, WorkspaceOut
+from ..services.billing import BillingError
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -43,6 +44,11 @@ def create_workspace(payload: WorkspaceCreate, db: DB, user: CurrentUser):
     template = db.get(Template, payload.template_id)
     if template is None or not template.enabled:
         raise HTTPException(404, "template not found")
+    # BillingPolicy：launch 前额度/配额门禁（402 明确拒绝，不给 FAILED workspace）
+    try:
+        billing.check_launch_eligible(db, user, template)
+    except BillingError as exc:
+        raise HTTPException(402, str(exc)) from exc
     workspace = orchestrator.create(
         db,
         template,

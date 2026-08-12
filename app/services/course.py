@@ -23,6 +23,7 @@ from ..models import (
     Workspace,
 )
 from ..schemas import AssignmentCreate, CourseCreate, LabCreate
+from .billing import BillingError, BillingPolicy
 from .orchestrator import WorkspaceOrchestrator
 
 TEACHER_MEMBER_ROLES = (Role.INSTRUCTOR.value, Role.ORG_ADMIN.value)
@@ -294,11 +295,21 @@ def join_course(db: Session, course: Course, user: User) -> CourseMember:
 
 
 def launch_lab(
-    db: Session, orchestrator: WorkspaceOrchestrator, lab: Lab, user: User
+    db: Session,
+    orchestrator: WorkspaceOrchestrator,
+    lab: Lab,
+    user: User,
+    billing: BillingPolicy | None = None,
 ) -> Workspace:
     template = db.get(Template, lab.template_id)
     if template is None or not template.enabled:
         raise HTTPException(404, "template not found")
+    # BillingPolicy：launch 前额度/配额门禁（course quota_seconds 真实执行）
+    if billing is not None:
+        try:
+            billing.check_launch_eligible(db, user, template, lab=lab)
+        except BillingError as exc:
+            raise HTTPException(402, str(exc)) from exc
     workspace = orchestrator.create(
         db,
         template,

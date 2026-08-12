@@ -14,6 +14,7 @@ from .db import make_engine, make_session_factory, session_dependency
 from .models import User
 from .security import make_session_dependency
 from .seed import seed_templates
+from .services.billing import BillingPolicy
 from .services.ledger import CreditLedgerService
 from .services.orchestrator import WorkspaceOrchestrator
 from .services.providers.base import WorkspaceProvider
@@ -35,6 +36,7 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 
 scheduler = GpuScheduler(SessionFactory)
 ledger = CreditLedgerService(SessionFactory)
+billing = BillingPolicy(SessionFactory, ledger)
 
 
 def make_provider() -> WorkspaceProvider:
@@ -46,7 +48,9 @@ def make_provider() -> WorkspaceProvider:
 
 
 provider = make_provider()
-orchestrator = WorkspaceOrchestrator(SessionFactory, provider, settings.workspace_root, scheduler, ledger)
+orchestrator = WorkspaceOrchestrator(
+    SessionFactory, provider, settings.workspace_root, scheduler, ledger, billing=billing
+)
 worker = OperationWorker(SessionFactory, orchestrator)
 
 

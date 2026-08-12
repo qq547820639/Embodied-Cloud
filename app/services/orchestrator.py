@@ -11,6 +11,7 @@ from ..models import (
     OperationType,
     Template,
     TemplateVersion,
+    User,
     Workspace,
     WorkspaceOperation,
     WorkspaceStatus,
@@ -35,6 +36,7 @@ class WorkspaceOrchestrator:
         scheduler: GpuScheduler | None = None,
         ledger: CreditLedgerService | None = None,
         streaming: StreamingSessionService | None = None,
+        billing: "BillingPolicy | None" = None,
     ):
         self.session_factory = session_factory
         self.provider = provider
@@ -42,6 +44,7 @@ class WorkspaceOrchestrator:
         self.scheduler = scheduler or GpuScheduler(session_factory)
         self.ledger = ledger or CreditLedgerService(session_factory)
         self.streaming = streaming or StreamingSessionService(session_factory)
+        self.billing = billing
 
     # ------------------------------------------------------------------
     # create
@@ -124,6 +127,11 @@ class WorkspaceOrchestrator:
         template = db.get(Template, workspace.template_id)
         if template is None or not template.enabled:
             raise RuntimeError("Template not found or disabled")
+        # BillingPolicy 兜底门禁（API 层已检查；直接调用/重试路径再确认一次）
+        if self.billing is not None and workspace.user_id is not None:
+            user = db.get(User, workspace.user_id)
+            if user is not None:
+                self.billing.check_launch_eligible(db, user, template)
         # 失败重试前将状态置回 QUEUED（上次失败已置 FAILED）
         workspace.status = WorkspaceStatus.QUEUED.value
         workspace.error_message = None

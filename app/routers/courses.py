@@ -7,7 +7,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from ..deps import DB, CurrentUser, orchestrator
+from ..deps import DB, CurrentUser, billing, orchestrator
 from ..models import Role
 from ..schemas import (
     AssignmentCreate,
@@ -110,7 +110,7 @@ def list_assignments(lab_id: str, db: DB, user: CurrentUser):
 @router.post("/labs/{lab_id}/launch", response_model=WorkspaceOut, status_code=201)
 def launch_lab(lab_id: str, db: DB, user: CurrentUser):
     lab = course_service.get_lab_or_404(db, lab_id, user)
-    return course_service.launch_lab(db, orchestrator, lab, user)
+    return course_service.launch_lab(db, orchestrator, lab, user, billing=billing)
 
 
 @router.post("/assignments/{assignment_id}/submit", response_model=SubmissionOut)
