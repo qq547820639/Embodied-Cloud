@@ -6,7 +6,6 @@
 - agent token 不能访问其他 agent 的资源（heartbeat/telemetry 自指校验）
 """
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -136,7 +135,7 @@ def test_agent_token_cannot_access_other_agent_deployment():
 
         # agent A token 对 agent B 的 id 操作 → 404（自指校验）
         resp = client.post(
-            f"/api/edge/agents/other-agent-id/heartbeat",
+            "/api/edge/agents/other-agent-id/heartbeat",
             json={},
             headers={"X-Agent-Token": token_a},
         )
