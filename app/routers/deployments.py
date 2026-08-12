@@ -102,3 +102,20 @@ def verify_deployment(deployment_id: str, db: DB, user: CurrentUser):
     """幂等校验: artifact 当前 checksum 与记录一致 → verified, 否则 failed+error."""
     deployment = _get_owned_deployment(db, user, deployment_id)
     return deployment_service.verify_checksum(db, deployment)
+
+
+class EdgeChecksumIn(BaseModel):
+    actual_sha256: str
+
+
+@router.post("/{deployment_id}/report-checksum", response_model=DeploymentOut)
+def report_edge_checksum(
+    deployment_id: str, payload: EdgeChecksumIn, db: DB, user: CurrentUser
+):
+    """§10：Edge 上报本地计算的 actual_sha256 —— **唯一** edge→server 校验路径。
+
+    server 比较 actual == expected（deployment.checksum）：
+    MATCH → VERIFIED；MISMATCH → FAILED。客户端**不能**直接提交 status=VERIFIED。
+    """
+    deployment = _get_owned_deployment(db, user, deployment_id)
+    return deployment_service.report_checksum(db, deployment, payload.actual_sha256)

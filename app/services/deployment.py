@@ -198,6 +198,38 @@ class DeploymentService:
         db.commit()
         return deployment
 
+    def report_checksum(
+        self, db: Session, deployment: DeploymentRecord, actual_sha256: str
+    ) -> DeploymentRecord:
+        """§10：Edge 上报本地计算的 sha256 → server 比较 → VERIFIED / FAILED。
+
+        - 必须先 download（DOWNLOADING 才能上报；PENDING 直接上报 = 绕过，拒绝）
+        - actual == expected(deployment.checksum) → VERIFIED
+        - actual != expected → FAILED（tampered download / wrong checksum / 跨部署）
+        - 终态幂等：VERIFIED/RUNNING/SUCCESS 重复上报不再改变；
+          FAILED 后再上报正确值**不得复活**（防 replay）
+        """
+        if deployment.status in {
+            DeploymentStatus.VERIFIED.value,
+            DeploymentStatus.RUNNING.value,
+            DeploymentStatus.SUCCESS.value,
+        }:
+            return deployment
+        if deployment.status == DeploymentStatus.FAILED.value:
+            return deployment  # 终态防复活（replay 不改变结果）
+        if deployment.status != DeploymentStatus.DOWNLOADING.value:
+            raise self._bad_transition(deployment, "verified")
+        if actual_sha256 == deployment.checksum:
+            deployment.status = DeploymentStatus.VERIFIED.value
+            deployment.error_message = None
+        else:
+            deployment.status = DeploymentStatus.FAILED.value
+            deployment.error_message = (
+                f"checksum mismatch (edge reported): expected {deployment.checksum}, got {actual_sha256}"
+            )
+        db.commit()
+        return deployment
+
     def run_policy(self, db: Session, deployment: DeploymentRecord, agent=None) -> DeploymentRecord:
         """verified → running; 绑定执行 agent (可选)."""
         if deployment.status == DeploymentStatus.RUNNING.value:
