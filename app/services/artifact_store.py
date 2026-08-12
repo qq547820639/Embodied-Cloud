@@ -6,7 +6,6 @@
 - 生产逻辑不得依赖控制面直接读取每个 Workspace PVC（对象存储解耦）
 """
 
-import shutil
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
