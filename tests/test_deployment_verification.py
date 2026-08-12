@@ -14,7 +14,6 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models import (
-    DeploymentRecord,
     DeploymentStatus,
     Role,
     Template,
