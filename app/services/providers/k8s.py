@@ -372,6 +372,11 @@ class KubernetesProvider:
         except Exception:
             return ""
 
+    @property
+    def supports_credential_rotation(self) -> bool:
+        # K8s 通过 patch Deployment env → 滚动重启实现轮换
+        return True
+
     def rotate_credentials(self, workspace: Workspace, credentials: dict) -> bool:
         """轮换 runtime 凭据：patch Deployment 的 WORKSPACE_PASSWORD env → 滚动重启。
 

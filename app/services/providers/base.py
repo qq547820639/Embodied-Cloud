@@ -77,3 +77,8 @@ class WorkspaceProvider(Protocol):
         - 返回 False：不支持/失败 —— 调用方**不得**把 workspace 交付用户，
           应 DRAINING/FAILED 并 fallback 正常 provision
         """
+
+    @property
+    def supports_credential_rotation(self) -> bool:
+        """§7：warm pool 能力检测 —— 不支持运行时凭据轮换的 provider
+        （如 Docker env 不可变）默认禁用 warm pool。"""

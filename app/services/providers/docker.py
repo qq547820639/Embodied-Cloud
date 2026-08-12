@@ -234,6 +234,11 @@ class DockerProvider:
             return ""
         return result.stdout
 
+    @property
+    def supports_credential_rotation(self) -> bool:
+        # 运行中容器 env 不可变 → 不支持运行时轮换 → Docker Warm Pool 默认禁用
+        return False
+
     def rotate_credentials(self, workspace: Workspace, credentials: dict) -> bool:
         """运行中容器的 WORKSPACE_PASSWORD env 不可变；不支持运行时轮换。
 

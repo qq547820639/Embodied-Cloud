@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import Gpu, GpuHost, Template, User, WarmPoolState, Workspace, WorkspaceStatus
+from app.models import Gpu, GpuHost, GpuStatus, Template, User, WarmPoolState, Workspace, WorkspaceStatus
 from app.security import WorkspaceCredentialCipher
 from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
@@ -352,3 +352,96 @@ def test_pool_metrics_uses_real_counts():
         db.commit()
         metrics2 = manager.pool_metrics(db)
         assert metrics2["cartpole"][WarmPoolState.READY.value] == 2
+
+
+class CleanupTrackingProvider(MockProvider):
+    """跟踪 destroy 调用（验证 rotation 失败补偿清理 runtime）。"""
+
+    def __init__(self):
+        super().__init__("http://127.0.0.1:8000")
+        self.destroy_calls = 0
+
+    def rotate_credentials(self, workspace, credentials):
+        return False
+
+    def destroy(self, workspace):
+        self.destroy_calls += 1
+
+
+def test_warm_pool_rotation_failure_cleans_runtime():
+    """§7（P0）：rotation 失败必须销毁 runtime（0 orphan container/pod）。"""
+    provider = CleanupTrackingProvider()
+    orchestrator = WorkspaceOrchestrator(
+        Factory, provider, Path("/tmp/test-warm-leak1")  # noqa: S108
+    )
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1)
+    manager = WarmPoolManager(Factory, orchestrator, settings)
+    with Factory() as db:
+        _make_template(db)
+        _seed_gpu(db)
+        _make_user(db, "user-1")
+        manager.maintain(db)
+        ws = db.scalars(select(Workspace)).one()
+        result = manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER)
+        assert result is None
+        # provider.destroy 被调用（runtime 已清理）
+        assert provider.destroy_calls >= 1
+        db.refresh(ws)
+        assert ws.container_name is None  # 容器引用清除
+        assert ws.status == WorkspaceStatus.FAILED.value
+
+
+def test_warm_pool_rotation_failure_releases_gpu():
+    """§7（P0）：rotation 失败必须释放 GPU（0 orphan GPU allocation）。"""
+    from app.models import GpuAllocation as GA
+
+    provider = CleanupTrackingProvider()
+    orchestrator = WorkspaceOrchestrator(
+        Factory, provider, Path("/tmp/test-warm-leak2")  # noqa: S108
+    )
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1)
+    manager = WarmPoolManager(Factory, orchestrator, settings)
+    with Factory() as db:
+        _make_template(db)
+        _seed_gpu(db)
+        _make_user(db, "user-1")
+        manager.maintain(db)
+        ws = db.scalars(select(Workspace)).one()
+        manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER)
+        # GPU 释放：无 allocation、GPU 回 AVAILABLE
+        assert db.scalar(select(GA).where(GA.workspace_id == ws.id)) is None
+        gpu = db.scalar(select(Gpu))
+        assert gpu.status == GpuStatus.AVAILABLE.value
+        assert gpu.workspace_id is None
+
+
+def test_failed_claim_can_not_be_reclaimed():
+    """§7（P0）：DRAINING/FAILED 的 warm workspace 不能再次被 claim。"""
+    provider = CleanupTrackingProvider()
+    orchestrator = WorkspaceOrchestrator(
+        Factory, provider, Path("/tmp/test-warm-leak3")  # noqa: S108
+    )
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1)
+    manager = WarmPoolManager(Factory, orchestrator, settings)
+    with Factory() as db:
+        _make_template(db)
+        _seed_gpu(db)
+        _make_user(db, "user-1")
+        manager.maintain(db)
+        ws = db.scalars(select(Workspace)).one()
+        assert manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER) is None
+        # 再次 claim：不命中 DRAINING/FAILED 的 workspace → None（无 READY）
+        assert manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER) is None
+        db.refresh(ws)
+        assert ws.warm_pool_state == WarmPoolState.DRAINING.value
+
+
+def test_docker_provider_reports_no_rotation_support():
+    """Docker provider 必须声明不支持凭据轮换（warm pool 因此默认禁用）。"""
+    from app.config import Settings as S
+
+    from app.services.providers.docker import DockerProvider
+
+    provider = DockerProvider(S(workspace_root=Path("/tmp/test-docker-rot")))  # noqa: S108
+    assert provider.supports_credential_rotation is False
+    assert provider.rotate_credentials(None, {"password": "x"}) is False

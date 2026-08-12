@@ -162,17 +162,36 @@ class WarmPoolManager:
             )
         if not rotated:
             # 轮换失败：不得把 workspace 交给用户（旧密码仍可登录 = 不能发布）。
-            # → DRAINING + 释放，调用方 fallback 正常 provision。
+            # §7（P0）完整补偿，保证 0 orphan：
+            #   streaming terminate → provider.destroy(runtime) → GPU release →
+            #   清凭据/owner/端口 → DRAINING/FAILED。调用方 fallback 正常 provision。
             WARM_POOL_CLAIM_FAILED.inc()
+            try:
+                self.orchestrator.streaming.terminate_for_workspace(db, workspace.id)
+            except Exception:
+                db.rollback()
+            try:
+                self.orchestrator.provider.destroy(workspace)  # runtime 容器/Pod（幂等）
+            except Exception as exc:
+                logger.error("warm pool claim cleanup: runtime destroy failed: %s", exc)
+            try:
+                self.orchestrator.scheduler.release(db, workspace.id)  # GPU（幂等）
+            except Exception:
+                db.rollback()
             workspace.warm_pool_state = WarmPoolState.DRAINING.value
             workspace.user_id = None
             workspace.organization_id = None
             workspace.password = None
+            workspace.ide_url = None
+            workspace.container_name = None
+            workspace.ide_port = None
+            workspace.signal_port = None
+            workspace.media_port = None
             workspace.status = WorkspaceStatus.FAILED.value
             workspace.error_message = "warm pool claim failed: credential rotation not supported"
             db.commit()
             logger.warning(
-                "warm pool claim aborted for %s: credential rotation failed",
+                "warm pool claim aborted for %s: credential rotation failed (runtime+GPU released)",
                 claimed_id[:8],
             )
             return None

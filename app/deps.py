@@ -63,6 +63,15 @@ orchestrator = WorkspaceOrchestrator(
     credential_cipher=credential_cipher,
 )
 worker = OperationWorker(SessionFactory, orchestrator)
+# §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用
+if settings.warm_pool_enabled and not provider.supports_credential_rotation:
+    import logging
+
+    logging.getLogger("embodiedcloud").warning(
+        "warm pool disabled: provider %r does not support credential rotation "
+        "(would leak old credentials on claim)", provider.name,
+    )
+    settings.warm_pool_enabled = False
 warm_pool = WarmPoolManager(SessionFactory, orchestrator, settings)
 edge_service = EdgeService(SessionFactory)
 
