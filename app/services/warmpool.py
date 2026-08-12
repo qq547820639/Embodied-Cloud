@@ -218,7 +218,7 @@ class WarmPoolManager:
                 )
                 .group_by(Workspace.warm_pool_state)
             )
-            counts = {state: 0 for state in _WARM_STATES}
+            counts = dict.fromkeys(_WARM_STATES, 0)
             for state, count in rows:
                 if state is not None and state in counts:
                     counts[state] = int(count)

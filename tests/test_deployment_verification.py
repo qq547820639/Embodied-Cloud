@@ -138,3 +138,70 @@ def test_verify_checksum_only_path_to_verified(tmp_path):
         # 已 VERIFIED 的记录保持（幂等），不重复计算
         again = svc.verify_checksum(db, d)
         assert again.status == DeploymentStatus.VERIFIED.value
+
+
+class MemoryStore:
+    """内存 ArtifactStore（Protocol 实现）：验证 DeploymentService 走 store 而非直读路径。"""
+
+    name = "memory"
+
+    def __init__(self):
+        self.objects: dict[str, bytes] = {}
+
+    def put(self, object_key, data, content_type="application/octet-stream"):
+        self.objects[object_key] = data
+
+    def get(self, object_key):
+        if object_key not in self.objects:
+            raise FileNotFoundError(f"object not found: {object_key}")
+        return self.objects[object_key]
+
+    def exists(self, object_key):
+        return object_key in self.objects
+
+    def delete(self, object_key):
+        self.objects.pop(object_key, None)
+
+
+def test_deployment_service_uses_artifact_store(tmp_path):
+    """§9：create → put 到 store；verify 从 store 读（篡改源文件不影响 store 对象）。"""
+    store = MemoryStore()
+    root = tmp_path / "root"
+    svc = DeploymentService(Factory, root, store=store)
+    (root / "ws-1").mkdir(parents=True)
+    (root / "ws-1" / "checkpoint.pt").write_bytes(b"model-bytes-v2")
+    with Factory() as db:
+        owner = User(id="u1", email="u1@example.com", username="u1", password_hash="x")  # noqa: S106
+        db.add(owner)
+        t = Template(
+            id="cartpole", slug="cartpole", name="t", description="d", category="c",
+            runtime="mock", launch_command="", enabled=True, version="0.1.0",
+            recommended_vram_gb=16, estimated_hourly_cost_cny=1.0,
+        )
+        db.add(t)
+        ws = Workspace(
+            id="ws-1", name="w", template_id="cartpole", provider="mock",
+            user_id="u1", status=WorkspaceStatus.RUNNING.value,
+        )
+        db.add(ws)
+        db.commit()
+        artifact = svc.create_artifact(db, owner, ws, "checkpoint.pt")
+        # object_key 记录 + store 中对象存在
+        assert artifact.object_key == "ws-1/checkpoint.pt"
+        assert artifact.store_name == "memory"
+        assert store.exists("ws-1/checkpoint.pt")
+
+        d = svc.deploy(db, owner, ws, artifact, "franka")
+        svc.download(db, d)
+        # 篡改源文件（workspace 目录）—— store 对象不受影响 → verify 仍 VERIFIED
+        (root / "ws-1" / "checkpoint.pt").write_bytes(b"TAMPERED-SOURCE")
+        result = svc.verify_checksum(db, d)
+        assert result.status == DeploymentStatus.VERIFIED.value
+
+        # 篡改 store 对象 → verify FAILED（对象存储是事实来源）
+        store.objects["ws-1/checkpoint.pt"] = b"TAMPERED-STORE"
+        d2 = svc.deploy(db, owner, ws, artifact, "franka-2")
+        svc.download(db, d2)
+        result2 = svc.verify_checksum(db, d2)
+        assert result2.status == DeploymentStatus.FAILED.value
+        assert "checksum mismatch" in result2.error_message

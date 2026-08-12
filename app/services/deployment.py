@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import Artifact, DeploymentRecord, DeploymentStatus, Role, Template, Workspace
+from .artifact_store import ArtifactStore, LocalArtifactStore
 
 
 def _sha256_file(path: Path) -> str:
@@ -25,9 +26,18 @@ def _sha256_file(path: Path) -> str:
 
 
 class DeploymentService:
-    def __init__(self, session_factory: sessionmaker[Session], workspace_root: Path) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        workspace_root: Path,
+        store: "ArtifactStore | None" = None,
+    ) -> None:
         self.session_factory = session_factory
         self.workspace_root = workspace_root
+        # §9：对象存储协议。默认 LocalArtifactStore(workspace_root)（开发/本地，
+        # object_key 即 workspace 目录文件，零行为变化）；生产注入
+        # S3CompatibleArtifactStore —— 控制面不直接 mount Workspace PVC。
+        self.store = store or LocalArtifactStore(workspace_root)
 
     # ------------------------------------------------------------------
     # 资源访问（owner 隔离；越权一律 404）
@@ -42,9 +52,13 @@ class DeploymentService:
         template = db.get(Template, workspace.template_id)
         return template.version if template is not None else "0.1.0"
 
+    @staticmethod
+    def _object_key(workspace: Workspace, path: str) -> str:
+        return f"{workspace.id}/{path}"
+
     # ------------------------------------------------------------------
     def create_artifact(self, db: Session, user, workspace: Workspace, path: str) -> Artifact:
-        """把 workspace 目录下的文件登记为 Artifact (sha256 + size_bytes).
+        """把 Workspace 产出登记为 Artifact：读文件 → ArtifactStore.put → DB 记录。
 
         path 相对于 workspace_root/{workspace.id}/; 文件必须存在, 且不得逃逸出该目录.
         """
@@ -55,11 +69,18 @@ class DeploymentService:
             raise HTTPException(400, "artifact path escapes workspace directory")
         if not full.is_file():
             raise HTTPException(404, f"artifact file not found: {path}")
+        object_key = self._object_key(workspace, path)
+        # 写入对象存储（生产 S3；开发 Local）。Local 下 object_key 即原文件，
+        # 写入内容与原文件一致（幂等覆盖）。
+        self.store.put(object_key, full.read_bytes())
         artifact = Artifact(
             id=str(uuid.uuid4()),
             workspace_id=workspace.id,
             name=Path(path).name,
             path=path,
+            object_key=object_key,
+            content_type="application/octet-stream",
+            store_name=self.store.name,
             checksum=_sha256_file(full),
             size_bytes=full.stat().st_size,
             model_version=self._template_version(db, workspace),
@@ -135,7 +156,7 @@ class DeploymentService:
         return deployment
 
     def verify_checksum(self, db: Session, deployment: DeploymentRecord) -> DeploymentRecord:
-        """幂等校验: artifact 当前 checksum 与记录一致 → verified, 否则 failed+error.
+        """幂等校验: ArtifactStore 中的对象 checksum 与记录一致 → verified, 否则 failed+error.
 
         防绕过（§23）：必须先 download（PENDING 直接调校验视为绕过，拒绝）；
         终态（verified/running/success/failed）幂等返回。
@@ -152,10 +173,20 @@ class DeploymentService:
         artifact = db.get(Artifact, deployment.artifact_id) if deployment.artifact_id else None
         if artifact is None:
             return self._fail(db, deployment, "artifact missing")
-        full = self.workspace_root / deployment.workspace_id / artifact.path
-        if not full.is_file():
-            return self._fail(db, deployment, f"artifact file missing: {artifact.path}")
-        current = _sha256_file(full)
+        # §9：从对象存储获取（不直接读 Workspace PVC / 控制面文件系统）；
+        # object_key 为 None = 旧数据（登记于 store 引入前）→ 兼容读原路径
+        object_key = artifact.object_key
+        if object_key is None:
+            legacy = self.workspace_root / deployment.workspace_id / artifact.path
+            if not legacy.is_file():
+                return self._fail(db, deployment, f"artifact file missing: {artifact.path}")
+            current = _sha256_file(legacy)
+        else:
+            try:
+                data = self.store.get(object_key)
+            except Exception as exc:
+                return self._fail(db, deployment, f"artifact object missing: {exc}")
+            current = hashlib.sha256(data).hexdigest()
         if current == deployment.checksum:
             deployment.status = DeploymentStatus.VERIFIED.value
             deployment.error_message = None

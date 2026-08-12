@@ -503,6 +503,11 @@ class Artifact(Base):
     workspace_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     path: Mapped[str] = mapped_column(Text, nullable=False)
+    # §9：对象存储 key（ArtifactStore）；None = 旧语义直接读 workspace 目录
+    object_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    content_type: Mapped[str] = mapped_column(String(128), nullable=False, default="application/octet-stream")
+    # 存储后端标识（local / s3）
+    store_name: Mapped[str] = mapped_column(String(32), nullable=False, default="local")
     checksum: Mapped[str] = mapped_column(String(128), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     model_version: Mapped[str] = mapped_column(String(32), nullable=False, default="0.1.0")
