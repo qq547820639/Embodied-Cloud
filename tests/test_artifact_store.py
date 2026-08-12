@@ -1,6 +1,5 @@
 """ArtifactStore 测试（§21）：Local 读写 + path traversal 防护 + S3 BLOCKED 语义。"""
 
-from pathlib import Path
 
 import pytest
 
@@ -38,9 +37,9 @@ def test_local_store_missing_object_raises(tmp_path):
 )
 def test_path_traversal_rejected(tmp_path, bad_key):
     store = LocalArtifactStore(tmp_path / "store")
-    with pytest.raises(ArtifactStoreError, match="invalid object key|escapes"):
+    with pytest.raises(ArtifactStoreError, match=r"invalid object key|escapes"):
         store.put(bad_key, b"x")
-    with pytest.raises(ArtifactStoreError, match="invalid object key|escapes"):
+    with pytest.raises(ArtifactStoreError, match=r"invalid object key|escapes"):
         store.get(bad_key)
 
 
