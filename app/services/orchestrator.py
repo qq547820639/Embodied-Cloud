@@ -111,7 +111,7 @@ class WorkspaceOrchestrator:
         if workspace is None:
             raise RuntimeError(f"workspace {op.workspace_id[:8]} not found for operation")
         if op.operation_type in {OperationType.PROVISION.value, OperationType.START.value}:
-            self._execute_provision(db, workspace)
+            self._execute_provision(db, workspace, operation=op)
         elif op.operation_type == OperationType.STOP.value:
             # §12：durable STOP —— 幂等（重复 stop 不重复结算/释放）
             self.stop(db, workspace)
@@ -140,7 +140,9 @@ class WorkspaceOrchestrator:
     # ------------------------------------------------------------------
     # provision（同步核心；由 operation 驱动）
     # ------------------------------------------------------------------
-    def _execute_provision(self, db: Session, workspace: Workspace) -> None:
+    def _execute_provision(
+        self, db: Session, workspace: Workspace, operation: "WorkspaceOperation | None" = None
+    ) -> None:
         """将 workspace 带到 RUNNING；幂等（已 RUNNING/PROVISIONING 直接返回）。"""
         if workspace.status in {WorkspaceStatus.RUNNING.value, WorkspaceStatus.PROVISIONING.value}:
             return
@@ -175,12 +177,21 @@ class WorkspaceOrchestrator:
             workspace.gpu_name = gpu.model
             workspace.status = WorkspaceStatus.PROVISIONING.value
             db.commit()
+            # §11：operation/fencing 上下文注入 reservation →
+            # provider 外部资源打 label/annotation（worker 外部副作用可审计/可 adopt）
+            op_meta: dict = {}
+            if operation is not None:
+                op_meta = {
+                    "operation_id": operation.id,
+                    "fencing_token": operation.fencing_token or "",
+                }
             reservation = ResourceReservation(
                 host_id=gpu.host_id,
                 gpu_id=gpu.id,
                 gpu_uuid=gpu.gpu_uuid,
                 gpu_index=gpu.gpu_index or 0,
                 memory_mb=gpu.memory_total,
+                metadata=op_meta,
             )
             # 2) provider 严格按 reservation 绑定资源，禁止二次决策；
             #    §9 readiness gate 也在同一补偿域内（未就绪 → destroy + release）

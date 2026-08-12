@@ -26,6 +26,7 @@ from app.models import (
     WorkspaceOperation,
 )
 from app.services.orchestrator import WorkspaceOrchestrator
+from app.services.providers.docker import DockerProvider
 from app.services.providers.mock import MockProvider
 from app.services.worker import LeaseLostError, OperationWorker
 
@@ -264,3 +265,120 @@ def test_concurrent_enqueue_db_constraint():
             )
         ).all()
         assert len(actives) == 1
+
+
+class OperationFencingDockerProvider(MockProvider):
+    """记录 provision 收到的 reservation.metadata（验证 operation/fencing 注入）。"""
+
+    def __init__(self):
+        super().__init__("http://127.0.0.1:8000")
+        self.last_meta: dict = {}
+
+    def provision(self, workspace, template, workspace_dir, reservation=None):
+        self.last_meta = dict(reservation.metadata) if reservation else {}
+        return super().provision(workspace, template, workspace_dir, reservation)
+
+
+def test_provision_receives_operation_fencing_context():
+    """§11：worker 执行 provision 时 reservation.metadata 携带 operation_id/fencing_token。"""
+    provider = OperationFencingDockerProvider()
+    orchestrator = WorkspaceOrchestrator(Factory, provider, Path("/tmp/test-fenc1"))  # noqa: S108
+    with Factory() as db:
+        _seed(db)
+        wid = _make_ws(db)
+    worker = OperationWorker(Factory, orchestrator)
+    op = worker.enqueue(wid, OperationType.PROVISION)
+    assert op is not None
+    worker.tick_once()
+    with Factory() as db:
+        op_db = db.get(WorkspaceOperation, op.id)
+        assert op_db.status == OperationStatus.SUCCEEDED.value
+        assert provider.last_meta.get("operation_id") == op.id
+        assert provider.last_meta.get("fencing_token") == op_db.fencing_token
+
+
+def test_lost_lease_aborts_old_executor():
+    """§11：heartbeat 失败（lease 失效）→ 旧 worker 停止业务步骤（LeaseLostError 传播）。"""
+    worker_a = OperationWorker(Factory, object())
+    with Factory() as db:
+        _seed(db)
+        wid = _make_ws(db)
+        op = worker_a.enqueue(wid, OperationType.PROVISION)
+        op_id = op.id
+    # A claim 后 lease 立即失效（模拟被 B reclaim）
+    with Factory() as db:
+        db_op = db.get(WorkspaceOperation, op_id)
+        assert worker_a._try_claim(db, db_op, datetime.now(UTC)) is True
+        db_op = db.get(WorkspaceOperation, op_id)
+        db_op.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+    worker_b = OperationWorker(Factory, object())
+    with Factory() as db:
+        db_op = db.get(WorkspaceOperation, op_id)
+        assert worker_b._try_claim(db, db_op, datetime.now(UTC)) is True
+        # A 尝试 finish（旧 token）→ LeaseLostError
+        from app.services.worker import LeaseLostError as LLE
+
+        stale = WorkspaceOperation(
+            id=op_id, workspace_id="ws-x", operation_type="provision",
+            status=OperationStatus.RUNNING.value, fencing_token=db_op.fencing_token,
+        )
+        stale.fencing_token = "old-token-a"
+        with pytest.raises(LLE):
+            worker_a.finish_success(db, stale)
+
+
+class AdoptDockerProvider(DockerProvider):
+    """容器已存在（adopt）的 fake docker provider。"""
+
+    def __init__(self, settings):
+        super().__init__(settings)
+        self.runs = 0
+        self.container_present = False
+        self.containers = set()
+
+    def health(self):
+        return True, "fake"
+
+    def wait_ready(self, workspace, template, timeout_seconds=120):
+        return True
+
+    def _container_exists(self, workspace):
+        name = workspace.container_name or f"ec-{workspace.id[:12]}"
+        return name in self.containers
+
+    def _streaming_workspace_running(self):
+        return False
+
+    def _run(self, args, *, check=True):
+        if args[1] == "run":
+            self.runs += 1
+            idx = args.index("--name")
+            self.containers.add(args[idx + 1])
+            return type("R", (), {"returncode": 0, "stdout": "c\n", "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+
+def test_same_operation_provision_is_idempotent(monkeypatch, tmp_path):
+    """§11：同一 workspace 重试 provision → adopt 已有容器，不创建第二份。"""
+    from app.config import Settings
+
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    monkeypatch.setattr("app.services.providers.docker.allocate_tcp_port", lambda *a, **kw: 38101)
+    provider = AdoptDockerProvider(settings)
+    orchestrator = WorkspaceOrchestrator(Factory, provider, tmp_path)
+    with Factory() as db:
+        _seed(db)
+        wid = _make_ws(db)
+    # 第一次 provision（容器不存在 → run）
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        orchestrator._start(wid)
+    assert provider.runs == 1
+    # 第二次（容器已存在 → adopt，不 run）
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        ws.status = "queued"
+        db.commit()
+        orchestrator._start(wid)
+    assert provider.runs == 1  # 未创建第二份

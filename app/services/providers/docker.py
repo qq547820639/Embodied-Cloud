@@ -128,6 +128,19 @@ class DockerProvider:
         )
         os.chmod(readme_path, 0o666)  # noqa: S103
 
+        # §11 provision 幂等：同 workspace 容器已存在（重试/adopt）→ 复用，不创建第二份
+        existing = self._container_exists(workspace)
+        if existing:
+            return ProvisionResult(
+                ide_port=workspace.ide_port,
+                signal_port=workspace.signal_port,
+                media_port=workspace.media_port,
+                ide_url=workspace.ide_url,
+                stream_hint=workspace.stream_hint,
+                password=None,
+                container_name=workspace.container_name or f"ec-{workspace.id[:12]}",
+            )
+
         # GPU 绑定完全来自 reservation（scheduler 唯一决策），不再自行选择
         gpu_index = reservation.gpu_index
         ide_port = allocate_tcp_port(self.settings.ide_port_start, self.settings.ide_port_end)
@@ -159,6 +172,8 @@ class DockerProvider:
             "--label", f"embodiedcloud.gpu={gpu_index}",
             "--label", f"embodiedcloud.gpu_id={reservation.gpu_id}",
             "--label", f"embodiedcloud.streaming={1 if template.requires_streaming else 0}",
+            "--label", f"embodiedcloud.operation={reservation.metadata.get('operation_id', '')}",
+            "--label", f"embodiedcloud.fencing={reservation.metadata.get('fencing_token', '')}",
             *env,
             "-v", f"{workspace_dir}:/workspace/project:rw",
             image,
