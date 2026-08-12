@@ -109,7 +109,7 @@ def _settle_usage(db, user_id: str, seconds: int, workspace_id: str, started_iso
 
 
 def test_negative_balance_policy_rejects_launch():
-    orchestrator, billing = _orchestrator_with_billing()
+    _, billing = _orchestrator_with_billing()
     with Factory() as db:
         _seed_gpu_template(db)
         user = _make_user(db)
@@ -171,11 +171,11 @@ def test_api_rejects_workspace_create_with_negative_balance():
 
 
 def test_course_quota_enforced():
-    orchestrator, billing = _orchestrator_with_billing()
+    _, billing = _orchestrator_with_billing()
     with Factory() as db:
         template = _seed_gpu_template(db)
         user = _make_user(db, user_id="student-1", role=Role.STUDENT.value)
-        teacher = _make_user(db, user_id="teacher-1", role=Role.INSTRUCTOR.value)
+        _make_user(db, user_id="teacher-1", role=Role.INSTRUCTOR.value)  # course owner
         course = Course(id="c1", owner_id="teacher-1", name="course", slug="course-1")
         db.add(course)
         db.flush()
