@@ -382,3 +382,64 @@ def test_runtime_quota_monitor_idempotent():
             select(CreditLedger).where(CreditLedger.workspace_id == wid)
         ).all()
         assert len([e for e in usage if e.type == LedgerType.USAGE.value]) == 1  # 只结算一次
+
+
+def _policy_from_settings(minutes: int, enforce: bool) -> BillingPolicy:
+    """模拟 deps 接线：从 Settings 构造 BillingPolicy（§8 回归）。"""
+    from app.config import Settings
+
+    settings = Settings(
+        billing_minimum_launch_minutes=minutes,
+        billing_enforce_preauthorization=enforce,
+    )
+    ledger = CreditLedgerService(Factory)
+    return BillingPolicy(
+        Factory,
+        ledger,
+        minimum_launch_minutes=settings.billing_minimum_launch_minutes,
+        enforce_preauthorization=settings.billing_enforce_preauthorization,
+    )
+
+
+def test_env_preauthorization_true_is_enforced():
+    """§8：billing_enforce_preauthorization=true → 0 余额用户被拒（402 语义）。"""
+    policy = _policy_from_settings(minutes=5, enforce=True)
+    ledger = CreditLedgerService(Factory)
+    with Factory() as db:
+        _seed_gpu_template(db)
+        user = _make_user(db)
+        with pytest.raises(Exception) as exc_info:
+            policy.check_launch_eligible(db, user, db.get(Template, "cartpole"))
+        assert "preauthorization" in str(exc_info.value)
+        # 充值刚好 300（5min×60）→ 放行
+        ledger.record(db, type=LedgerType.RECHARGE, amount=300, user_id=user.id, idempotency_key="w1")
+        policy.check_launch_eligible(db, user, db.get(Template, "cartpole"))
+
+
+def test_env_minimum_minutes_changes_required_credit():
+    """§8：minimum_launch_minutes 改变所需预授权额度。"""
+    policy = _policy_from_settings(minutes=10, enforce=True)  # 需 600 credits
+    ledger = CreditLedgerService(Factory)
+    with Factory() as db:
+        _seed_gpu_template(db)
+        user = _make_user(db)
+        # 300 < 600 → 拒绝
+        ledger.record(db, type=LedgerType.RECHARGE, amount=300, user_id=user.id, idempotency_key="w2")
+        with pytest.raises(Exception) as exc_info:
+            policy.check_launch_eligible(db, user, db.get(Template, "cartpole"))
+        assert "preauthorization" in str(exc_info.value)
+        # 600 → 放行
+        ledger.record(db, type=LedgerType.RECHARGE, amount=300, user_id=user.id, idempotency_key="w3")
+        policy.check_launch_eligible(db, user, db.get(Template, "cartpole"))
+
+
+def test_zero_credit_user_denied_when_enforcement_enabled():
+    """§8：enforce 开启时 0 credits 用户被拒（此前 balance=0 可启动并欠费）。"""
+    policy = _policy_from_settings(minutes=5, enforce=True)
+    with Factory() as db:
+        _seed_gpu_template(db)
+        user = _make_user(db)
+        assert CreditLedgerService(Factory).balance(db, user.id) == 0
+        with pytest.raises(Exception) as exc_info:
+            policy.check_launch_eligible(db, user, db.get(Template, "cartpole"))
+        assert "preauthorization" in str(exc_info.value)

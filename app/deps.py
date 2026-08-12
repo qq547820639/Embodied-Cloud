@@ -40,7 +40,13 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 
 scheduler = GpuScheduler(SessionFactory)
 ledger = CreditLedgerService(SessionFactory)
-billing = BillingPolicy(SessionFactory, ledger)
+# §8：真实注入 Settings（禁止配置字段存在但对象用 constructor default）
+billing = BillingPolicy(
+    SessionFactory,
+    ledger,
+    minimum_launch_minutes=settings.billing_minimum_launch_minutes,
+    enforce_preauthorization=settings.billing_enforce_preauthorization,
+)
 credential_cipher = WorkspaceCredentialCipher(settings.workspace_credential_key)
 
 
