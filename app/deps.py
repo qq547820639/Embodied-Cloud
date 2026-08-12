@@ -97,6 +97,67 @@ def bootstrap_gpu_inventory(db: Session) -> None:
         )
     elif provider_name == "docker":
         _sync_docker_gpus(db)
+    elif provider_name in {"k8s", "kubernetes"}:
+        _sync_k8s_gpus(db)
+
+
+def _sync_k8s_gpus(db: Session) -> None:
+    """K8s inventory：按 node 的 nvidia.com/gpu capacity 同步 GpuHost/Gpu。
+
+    平台 Scheduler v1 只做 cluster + node + capacity reservation；
+    Pod 最终 device assignment 由 NVIDIA Device Plugin 负责
+    （不虚构通过普通 resource request 指定 GPU UUID）。
+    node 可用（集群可达）时同步；不可达静默跳过（health() 汇报）。
+    """
+    from .services.providers.k8s import KubernetesProvider
+    from .services.scheduler import GpuInfo
+
+    try:
+        k8s = KubernetesProvider(settings)
+    except Exception:
+        return
+    ok, _ = k8s.health()
+    if not ok:
+        return
+    try:
+        api = k8s._require_client()
+        nodes = api.CoreV1Api().list_node()
+    except Exception:
+        return
+    for node in nodes.items:
+        metadata = getattr(node, "metadata", None)
+        status = getattr(node, "status", None)
+        if metadata is None or status is None:
+            continue
+        node_name = getattr(metadata, "name", "node") or "node"
+        capacity = dict(getattr(status, "allocatable", None) or getattr(status, "capacity", None) or {})
+        gpu_count = 0
+        for key, value in capacity.items():
+            if getattr(key, "key", key) == "nvidia.com/gpu":
+                gpu_count = int(getattr(value, "value", value) or 0)
+        if gpu_count <= 0:
+            continue
+        address = ""
+        for addr in getattr(status, "addresses", None) or []:
+            if getattr(addr, "type", "") in ("InternalIP", "Hostname"):
+                address = getattr(addr, "address", "") or address
+        gpus = [
+            GpuInfo(
+                gpu_uuid=f"{node_name}:gpu-{i}",
+                model=f"K8s GPU ({node_name})",
+                memory_total=settings.k8s_gpu_memory_mb,  # capacity reservation 粒度；精确显存由 device plugin 上报
+                index=i,
+            )
+            for i in range(gpu_count)
+        ]
+        scheduler.sync_host(
+            db,
+            host_id=f"k8s-node-{node_name}",
+            name=node_name,
+            address=address,
+            provider="k8s",
+            gpus=gpus,
+        )
 
 
 def _sync_docker_gpus(db: Session) -> None:

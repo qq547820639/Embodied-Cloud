@@ -379,7 +379,13 @@ class WorkspaceOperation(Base):
         String(32), nullable=False, default=OperationStatus.PENDING.value, index=True
     )
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    # lease：RUNNING 操作的心跳/租约截止时间；过期后其他 worker 可重新 claim
+    # lease/fencing（§5）：claim 时写入 lease_owner（worker id）+ fencing_token；
+    # 执行期间周期 heartbeat（heartbeat_at/lease_expires_at 续期）。
+    # 只有持有有效 token 的 worker 才能写终态（防止过期 worker 被 reclaim 后
+    # 再 mark SUCCEEDED/FAILED —— 双重执行/双终态）。
+    lease_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fencing_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

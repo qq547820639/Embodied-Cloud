@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # --- k8s provider ---
     k8s_namespace: str = "embodiedcloud"
     k8s_in_cluster: bool = False  # 默认使用 kubeconfig
+    # K8s capacity reservation 的 GPU 显存粒度（MB）。K8s 不暴露 per-device
+    # memory 给普通 resource request；精确显存由 NVIDIA Device Plugin 负责。
+    k8s_gpu_memory_mb: int = 24576
 
     def ensure_dirs(self) -> None:
         self.workspace_root.mkdir(parents=True, exist_ok=True)

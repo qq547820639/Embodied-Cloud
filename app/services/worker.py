@@ -1,18 +1,23 @@
 """DB-backed Workspace Operation worker（替代裸 threading.Thread 异步启动）。
 
-设计（第一阶段允许 DB-backed，不要求 Redis/Celery）：
-- claim：PENDING → RUNNING（记录 lease_expires_at）；RUNNING lease 过期可重新 claim
+设计（§5 lease/fencing 正确性）：
+- claim 原子：UPDATE ... WHERE id=? AND status=<读到状态> AND lease 可执行；
+  rowcount==1 才算 claim 成功（并发下至多一个 worker 持有）
+- lease：claim 写入 lease_owner + fencing_token + heartbeat_at + lease_expires_at
+- heartbeat：执行期间周期 renew（UPDATE ... WHERE id AND fencing_token AND lease 未过期）
+- fencing：finish_success/finish_failure 必须通过带 token 的原子 UPDATE 才能写终态；
+  token 失效（被其他 worker reclaim）→ LeaseLostError，禁止写终态
 - 串行：同一 workspace 同一时刻至多一个 active（PENDING/RUNNING/RETRYING）operation
-- 重试：失败 attempts < MAX_ATTEMPTS → 回到 PENDING（带 backoff）；否则 FAILED
 - durable：operation 落在 DB；控制面重启后 PENDING/RETRYING 可被新 worker 继续执行
 """
 
 import logging
+import secrets
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import OperationStatus, OperationType, WorkspaceOperation
@@ -24,15 +29,16 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class LeaseLostError(RuntimeError):
+    """fencing 失效：本 worker 的 lease 已被其他 worker reclaim，禁止写终态。"""
+
+
 def enqueue_operation(
     session_factory: sessionmaker[Session] | Session,
     workspace_id: str,
     operation_type: OperationType,
 ) -> WorkspaceOperation | None:
-    """创建 PENDING operation；同 workspace 已有 active operation 时拒绝（串行）。
-
-    session_factory 可为 sessionmaker，也可为已打开的 Session（reconcile 复用事务）。
-    """
+    """创建 PENDING operation；同 workspace 已有 active operation 时拒绝（串行）。"""
     if isinstance(session_factory, Session):
         db = session_factory
         owns = False
@@ -57,7 +63,7 @@ def enqueue_operation(
         op = WorkspaceOperation(
             id=str(uuid.uuid4()),
             workspace_id=workspace_id,
-            operation_type=operation_type.value,
+            operation_type=getattr(operation_type, "value", operation_type),
             status=OperationStatus.PENDING.value,
             attempts=0,
         )
@@ -72,6 +78,8 @@ def enqueue_operation(
 
 class OperationWorker:
     LEASE_SECONDS = 60
+    # 心跳间隔：lease 的 1/4（60s lease → 15s heartbeat）
+    HEARTBEAT_INTERVAL = LEASE_SECONDS / 4
     MAX_ATTEMPTS = 3
     TICK_INTERVAL = 1.0
     # 失败重试的指数 backoff（秒）：attempt 1 → 1s, 2 → 2s ...
@@ -81,12 +89,18 @@ class OperationWorker:
         """executor: 拥有 execute_operation(db, op) 方法的对象（WorkspaceOrchestrator）。"""
         self.session_factory = session_factory
         self.executor = executor
+        # 唯一 worker id：lease_owner 标识（多实例/重启后可区分）
+        self.worker_id = f"worker-{uuid.uuid4().hex[:8]}"
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
+    def enqueue(self, workspace_id: str, operation_type: OperationType) -> WorkspaceOperation | None:
+        """创建 PENDING operation；同 workspace 已有 active operation 时拒绝（串行）。"""
+        return enqueue_operation(self.session_factory, workspace_id, operation_type)
+
     def start(self) -> None:
         if self._thread is not None:
             return
@@ -94,7 +108,10 @@ class OperationWorker:
         self._stop.clear()
         self._thread = threading.Thread(target=self._run_forever, name="operation-worker", daemon=True)
         self._thread.start()
-        logger.info("operation worker started (lease=%ss max_attempts=%d)", self.LEASE_SECONDS, self.MAX_ATTEMPTS)
+        logger.info(
+            "operation worker %s started (lease=%ss heartbeat=%.1fs max_attempts=%d)",
+            self.worker_id, self.LEASE_SECONDS, self.HEARTBEAT_INTERVAL, self.MAX_ATTEMPTS,
+        )
 
     def stop(self) -> None:
         self._stop.set()
@@ -117,14 +134,7 @@ class OperationWorker:
                 self._stop.wait(self.TICK_INTERVAL)
 
     # ------------------------------------------------------------------
-    # queue
-    # ------------------------------------------------------------------
-    def enqueue(self, workspace_id: str, operation_type: OperationType) -> WorkspaceOperation | None:
-        """创建 PENDING operation；同 workspace 已有 active operation 时拒绝（串行）。"""
-        return enqueue_operation(self.session_factory, workspace_id, operation_type)
-
-    # ------------------------------------------------------------------
-    # tick / claim / execute
+    # tick / claim / heartbeat / finish（全部原子 + fencing）
     # ------------------------------------------------------------------
     def tick_once(self) -> int:
         """处理一轮：claim + 执行一个可执行 operation。返回处理数（0/1）。"""
@@ -132,17 +142,40 @@ class OperationWorker:
             op = self._claim_next(db)
             if op is None:
                 return 0
+            # 执行期间周期 heartbeat（renew lease）；被 reclaim 时停止
+            stop_heartbeat = threading.Event()
+
+            def _heartbeat_loop():
+                while not stop_heartbeat.is_set() and not self._stop.is_set():
+                    with self.session_factory() as hb_db:
+                        try:
+                            self.renew_lease(hb_db, op.id, op.fencing_token or "")
+                        except Exception as exc:
+                            logger.warning("heartbeat failed: %s", exc)
+                    stop_heartbeat.wait(self.HEARTBEAT_INTERVAL)
+
+            hb_thread = threading.Thread(target=_heartbeat_loop, name=f"hb-{op.id[:8]}", daemon=True)
+            hb_thread.start()
             try:
-                self.executor.execute_operation(db, op)
-            except Exception as exc:  # 操作失败：按 attempts 决定 RETRYING / FAILED
-                self.finish_failure(db, op, str(exc))
-            else:
-                self.finish_success(db, op)
+                try:
+                    self.executor.execute_operation(db, op)
+                except Exception as exc:
+                    self.finish_failure(db, op, str(exc))
+                else:
+                    self.finish_success(db, op)
+            except LeaseLostError:
+                logger.warning(
+                    "lease lost for operation %s(%s): 被其他 worker reclaim，放弃写终态",
+                    op.operation_type, op.workspace_id[:8],
+                )
+            finally:
+                stop_heartbeat.set()
+                hb_thread.join(timeout=2)
             db.commit()
             return 1
 
     def _claim_next(self, db: Session) -> WorkspaceOperation | None:
-        """按序 claim：先 RUNNING 过期（lease 已到期），再 PENDING/RETRYING 到期的。"""
+        """按序原子 claim：先过期 RUNNING，再 PENDING/到期 RETRYING。"""
         now = utcnow()
         # 1) 可 reclaim 的过期 RUNNING（崩溃/断线残留）
         stale = db.scalar(
@@ -154,10 +187,10 @@ class OperationWorker:
             )
             .order_by(WorkspaceOperation.created_at)
         )
-        if stale is not None:
-            return self._do_claim(db, stale, now)
+        if stale is not None and self._try_claim(db, stale, now):
+            return stale
 
-        # 2) 可执行的 PENDING / 到期 RETRYING
+        # 2) 可执行的 PENDING / 到期 RETRYING（同 workspace 已有 RUNNING 则跳过）
         candidates = db.scalars(
             select(WorkspaceOperation)
             .where(
@@ -169,49 +202,142 @@ class OperationWorker:
             )
             .order_by(WorkspaceOperation.created_at)
         ).all()
-        active_workspaces = set(
+        running_workspaces = set(
             db.scalars(
                 select(WorkspaceOperation.workspace_id).where(
-                    WorkspaceOperation.status.in_(
-                        [OperationStatus.RUNNING.value]
-                    )
+                    WorkspaceOperation.status == OperationStatus.RUNNING.value
                 )
             )
         )
         for op in candidates:
-            if op.workspace_id in active_workspaces:
+            if op.workspace_id in running_workspaces:
                 continue  # 同 workspace 已有 RUNNING → 串行等待
-            return self._do_claim(db, op, now)
+            if self._try_claim(db, op, now):
+                return op
         return None
 
-    def _do_claim(self, db: Session, op: WorkspaceOperation, now: datetime) -> WorkspaceOperation:
+    def _try_claim(self, db: Session, op: WorkspaceOperation, now: datetime) -> bool:
+        """原子 claim：仅当状态仍匹配（未被并发修改）时生效。
+
+        UPDATE ... WHERE id AND status=<读到的状态>（+ lease 条件）→ rowcount==1。
+        PostgreSQL/SQLite 下并发事务至多一个成功（行锁/单写者）。
+        """
+        from typing import Any, cast
+
+        from sqlalchemy.engine import CursorResult
+
+        token = secrets.token_hex(16)
+        conditions = [
+            WorkspaceOperation.id == op.id,
+            WorkspaceOperation.status == op.status,
+        ]
+        if op.status == OperationStatus.RUNNING.value:
+            conditions.append(WorkspaceOperation.lease_expires_at < now)
+        elif op.status == OperationStatus.RETRYING.value:
+            conditions.append(
+                (WorkspaceOperation.lease_expires_at.is_(None))
+                | (WorkspaceOperation.lease_expires_at <= now)
+            )
+        result = db.execute(
+            update(WorkspaceOperation)
+            .where(*conditions)
+            .values(
+                status=OperationStatus.RUNNING.value,
+                attempts=op.attempts + 1,
+                started_at=now,
+                lease_owner=self.worker_id,
+                fencing_token=token,
+                heartbeat_at=now,
+                lease_expires_at=now + timedelta(seconds=self.LEASE_SECONDS),
+                last_error=None,
+            )
+            # SQL 层比较（SQLite 读回为 naive/字符串，避免 ORM in-Python evaluator 的
+            # naive-vs-aware TypeError；PostgreSQL 原生 timestamp 语义不受影响）
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        rowcount = cast("CursorResult[Any]", result).rowcount
+        if rowcount is None or int(rowcount) != 1:
+            return False
         op.status = OperationStatus.RUNNING.value
         op.attempts += 1
-        op.started_at = now
+        op.lease_owner = self.worker_id
+        op.fencing_token = token
+        op.heartbeat_at = now
         op.lease_expires_at = now + timedelta(seconds=self.LEASE_SECONDS)
-        op.last_error = None
+        return True
+
+    def renew_lease(self, db: Session, op_id: str, token: str) -> bool:
+        """heartbeat：原子 renew（必须 token 匹配且 lease 未过期）。返回是否成功。"""
+        from typing import Any, cast
+
+        from sqlalchemy.engine import CursorResult
+
+        now = utcnow()
+        result = db.execute(
+            update(WorkspaceOperation)
+            .where(
+                WorkspaceOperation.id == op_id,
+                WorkspaceOperation.fencing_token == token,
+                WorkspaceOperation.lease_expires_at > now,
+            )
+            .values(
+                heartbeat_at=now,
+                lease_expires_at=now + timedelta(seconds=self.LEASE_SECONDS),
+            )
+            .execution_options(synchronize_session=False)
+        )
         db.commit()
-        return op
+        rowcount = cast("CursorResult[Any]", result).rowcount
+        return rowcount is not None and int(rowcount) == 1
+
+    def _fenced_update(self, db: Session, op: WorkspaceOperation, values: dict) -> bool:
+        """带 fencing 的原子终态写入：token 匹配 + lease 未过期才生效。"""
+        from typing import Any, cast
+
+        from sqlalchemy.engine import CursorResult
+
+        result = db.execute(
+            update(WorkspaceOperation)
+            .where(
+                WorkspaceOperation.id == op.id,
+                WorkspaceOperation.fencing_token == op.fencing_token,
+                WorkspaceOperation.lease_expires_at > utcnow(),
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        rowcount = cast("CursorResult[Any]", result).rowcount
+        return rowcount is not None and int(rowcount) == 1
 
     def finish_success(self, db: Session, op: WorkspaceOperation) -> None:
-        op.status = OperationStatus.SUCCEEDED.value
-        op.completed_at = utcnow()
-        op.lease_expires_at = None
-        db.commit()
+        if not self._fenced_update(
+            db, op, {"status": OperationStatus.SUCCEEDED.value, "completed_at": utcnow(), "lease_expires_at": None}
+        ):
+            raise LeaseLostError(f"operation {op.id[:8]} lease lost")
 
     def finish_failure(self, db: Session, op: WorkspaceOperation, error: str) -> None:
         """失败：attempts 未达上限 → RETRYING（backoff 后自动回到可执行）；否则 FAILED。"""
-        op.last_error = error
         if op.attempts >= self.MAX_ATTEMPTS:
-            op.status = OperationStatus.FAILED.value
-            op.completed_at = utcnow()
-            op.lease_expires_at = None
+            values = {
+                "status": OperationStatus.FAILED.value,
+                "completed_at": utcnow(),
+                "lease_expires_at": None,
+                "last_error": error,
+            }
+            if not self._fenced_update(db, op, values):
+                raise LeaseLostError(f"operation {op.id[:8]} lease lost")
             logger.error("operation %s(%s) failed permanently: %s",
                          op.operation_type, op.workspace_id[:8], error)
         else:
-            op.status = OperationStatus.RETRYING.value
             delay = self.RETRY_BASE_DELAY * (2 ** (op.attempts - 1))
-            op.lease_expires_at = utcnow() + timedelta(seconds=delay)
+            values = {
+                "status": OperationStatus.RETRYING.value,
+                "lease_expires_at": utcnow() + timedelta(seconds=delay),
+                "last_error": error,
+            }
+            if not self._fenced_update(db, op, values):
+                raise LeaseLostError(f"operation {op.id[:8]} lease lost")
             logger.warning("operation %s(%s) failed, retrying in %.1fs: %s",
                            op.operation_type, op.workspace_id[:8], delay, error)
-        db.commit()

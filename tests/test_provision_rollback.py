@@ -13,6 +13,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 
 import pytest
+from k8s_fakes import make_fake_models
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -189,7 +190,8 @@ class FailingK8sClient:
 
 class RecordingK8sProvider(KubernetesProvider):
     def __init__(self, settings, fake):
-        super().__init__(settings, _client=fake)
+        # offline 测试注入 fake model layer（零 Kubernetes SDK 依赖）
+        super().__init__(settings, _client=fake, model_factory=make_fake_models)
         self.destroy_calls = 0
 
     def destroy(self, workspace):

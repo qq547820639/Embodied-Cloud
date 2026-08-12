@@ -3,7 +3,13 @@
 from types import SimpleNamespace
 
 import pytest
-from kubernetes import config as kube_config  # 仅用于 monkeypatch 真实 config 加载 (不触碰集群)
+
+try:  # 仅用于 monkeypatch 真实 config 加载；无 SDK 环境相关测试自动 skip
+    from kubernetes import config as kube_config
+except ImportError:  # pragma: no cover - offline 环境无 SDK
+    kube_config = None
+
+from k8s_fakes import make_fake_models
 
 from app.config import Settings
 from app.models import Template, Workspace
@@ -128,7 +134,11 @@ def make_settings(**overrides) -> Settings:
 
 def make_provider(**overrides) -> tuple[KubernetesProvider, FakeClientModule]:
     fake = FakeClientModule()
-    return KubernetesProvider(make_settings(**overrides), _client=fake), fake
+    # offline 测试必须注入 fake model layer（不依赖真实 Kubernetes SDK 模型类）
+    return (
+        KubernetesProvider(make_settings(**overrides), _client=fake, model_factory=make_fake_models),
+        fake,
+    )
 
 
 def make_reservation(gpu_index: int = 2, gpu_id: str = "gpu-k8s-1") -> ResourceReservation:
@@ -152,6 +162,7 @@ def running_workspace() -> Workspace:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(kube_config is None, reason="kubernetes SDK not installed")
 def test_health_false_without_kubeconfig(monkeypatch):
     """无 kubeconfig 时 health 返回 (False, 原因) 且不抛异常."""
 
@@ -315,3 +326,20 @@ def test_start_scales_replicas_to_one():
 def test_reconcile_alive_when_available_replica():
     provider, _ = make_provider()
     assert provider.reconcile(running_workspace()) == "alive"
+
+
+def test_offline_provision_never_imports_kubernetes_sdk(tmp_path, monkeypatch):
+    """隔离语义证明：offline + fake models 的 provision 全程不得 import kubernetes SDK。"""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "kubernetes" or name.startswith("kubernetes."):
+            raise ImportError("kubernetes SDK imported in offline test path")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    provider, fake = make_provider()
+    result = provider.provision(make_workspace(), make_template(), tmp_path / "ws", make_reservation())
+    assert result.container_name == DEPLOYMENT_NAME

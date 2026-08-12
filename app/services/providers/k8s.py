@@ -31,16 +31,23 @@ class KubernetesProvider:
         settings: Settings,
         client_factory: Callable[[], Any] | None = None,
         _client: Any = None,
+        model_factory: Callable[[], Any] | None = None,
     ) -> None:
         """初始化 provider.
 
         client_factory / _client 用于离线单测注入 fake kubernetes client:
         - 任一提供即视为离线模式, 跳过 kubeconfig 加载, health() 直接 OK;
         - 否则懒加载真实 kubernetes 客户端, 配置失败仅缓存错误状态 (health() 汇报, 不抛异常).
+
+        model_factory: V1* 模型类命名空间的工厂（默认懒加载真实
+        `kubernetes.client`）。离线/单测环境必须注入 fake model layer，
+        **不允许 offline 测试隐式依赖真实 Kubernetes SDK 的模型类**——
+        否则"看似 offline 实则需要安装 kubernetes 包"。
         """
         self.settings = settings
         self._client: Any = _client
         self._client_factory = client_factory
+        self._model_factory = model_factory
         self._offline = _client is not None or client_factory is not None
         self._config_error = ""
         if self._offline:
@@ -52,6 +59,18 @@ class KubernetesProvider:
     # ------------------------------------------------------------------
     # 内部工具
     # ------------------------------------------------------------------
+
+    def _models(self) -> Any:
+        """返回 V1* 模型类命名空间。
+
+        - 注入 model_factory（离线测试）→ 使用 fake model layer，零 SDK 依赖
+        - 默认 → 懒加载真实 kubernetes.client（真实集群路径）
+        """
+        if self._model_factory is not None:
+            return self._model_factory()
+        from kubernetes import client  # 懒加载：仅真实集群路径才需要 SDK
+
+        return client
 
     def _load_client(self) -> None:
         """加载 kubeconfig / in-cluster 配置并实例化 client (方法内 import, 懒加载)."""
@@ -134,7 +153,7 @@ class KubernetesProvider:
         if not self.settings.eula_accepted:
             raise RuntimeError("Set EMBODIEDCLOUD_EULA_ACCEPTED=true before launching NVIDIA Isaac containers.")
 
-        from kubernetes import client  # 懒加载：仅使用 V1* 模型类构造对象
+        client = self._models()  # offline 测试注入 fake model layer；真实路径懒加载 kubernetes.client
 
         api = self._require_client()
         core = api.CoreV1Api()
