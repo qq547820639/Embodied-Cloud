@@ -192,6 +192,9 @@ class Template(Base):
     recommended_vram_gb: Mapped[int] = mapped_column(Integer, default=16, nullable=False)
     estimated_hourly_cost_cny: Mapped[float] = mapped_column(Float, default=6.0, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # §11：确定性 active-version 指针（发布策略决定，不用 created_at 猜 latest）。
+    # seed/发布流程设置；Workspace 创建时按此绑定 TemplateVersion。
+    current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False

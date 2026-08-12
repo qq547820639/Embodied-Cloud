@@ -169,20 +169,24 @@ def seed_templates(db: Session) -> None:
             )
         )
         if existing_version is None:
-            db.add(
-                TemplateVersion(
-                    id=f"tv-{spec['id']}-{version.replace('.', '-')}",
-                    template_id=spec["id"],
-                    version=version,
-                    image=spec.get("image"),
-                    entrypoint=spec.get("entrypoint", ""),
-                    gpu_requirement_gb=spec.get("gpu_requirement_gb", 16),
-                    requires_streaming=spec.get("requires_streaming", False),
-                    outputs=spec.get("outputs", []),
-                    healthcheck=spec.get("healthcheck"),
-                    metadata_json=spec.get("metadata_json", {}),
-                    source_revision=None,
-                    released=True,
-                )
+            version_row = TemplateVersion(
+                id=f"tv-{spec['id']}-{version.replace('.', '-')}",
+                template_id=spec["id"],
+                version=version,
+                image=spec.get("image"),
+                entrypoint=spec.get("entrypoint", ""),
+                gpu_requirement_gb=spec.get("gpu_requirement_gb", 16),
+                requires_streaming=spec.get("requires_streaming", False),
+                outputs=spec.get("outputs", []),
+                healthcheck=spec.get("healthcheck"),
+                metadata_json=spec.get("metadata_json", {}),
+                source_revision=None,
+                released=True,
             )
+            db.add(version_row)
+            db.flush()
+            existing_version = version_row
+        # §11：确定性 active-version 指针（发布策略决定，不用 created_at 猜 latest）
+        if existing is not None and existing.current_version_id is None:
+            existing.current_version_id = existing_version.id
     db.commit()

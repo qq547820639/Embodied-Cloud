@@ -249,3 +249,69 @@ def test_docker_run_uses_workspace_version_snapshot(monkeypatch, tmp_path):
     joined = " ".join(provider.runs[0])
     assert "registry/version-image:0.1.0" in joined
     assert "registry/old-template-image:0.1.0" not in joined
+
+
+def test_seed_sets_current_version_id():
+    """§11：seed 设置确定性 current_version_id（发布策略，非 created_at 猜测）。"""
+    with Factory() as db:
+        _seed(db)
+        for spec in SEED_TEMPLATES:
+            template = db.get(Template, spec["id"])
+            assert template.current_version_id is not None
+            version = db.get(TemplateVersion, template.current_version_id)
+            assert version is not None
+            assert version.template_id == spec["id"]
+            assert version.released is True
+
+
+def test_workspace_binds_current_version_not_created_at():
+    """§11：Workspace 绑定 current_version_id 指向的版本，即使它不是最新创建行。"""
+    with Factory() as db:
+        _seed(db)
+        template = db.get(Template, "cartpole")
+        # 手动创建一个更晚的 released 版本，但 current_version_id 仍指向发布版本
+        later = TemplateVersion(
+            id="tv-cartpole-later",
+            template_id="cartpole",
+            version="9.9.9",
+            image="registry/cartpole:9.9.9",
+            entrypoint="",
+            released=True,
+        )
+        db.add(later)
+        db.commit()
+
+        orchestrator = WorkspaceOrchestrator(Factory, MockProvider("http://127.0.0.1:8000"), Path("/tmp/tv-test3"))  # noqa: S108
+        ws = orchestrator.create(db, template, user_id="u1")
+        # 绑定发布指针版本（0.1.0），而不是 created_at 最新的 9.9.9
+        assert ws.template_version_id == template.current_version_id
+        version = db.get(TemplateVersion, ws.template_version_id)
+        assert version.version == "0.1.0"
+        assert ws.image == "embodiedcloud/isaaclab-workspace:0.1.0"
+
+
+def test_deployment_uses_workspace_template_version():
+    """§11：Artifact/Deployment 的 model_version 来自 Workspace.template_version_id。"""
+    from app.models import User
+    from app.services.deployment import DeploymentService
+
+    with Factory() as db:
+        _seed(db)
+        user = User(id="u1", email="u1@example.com", username="u1", password_hash="x")  # noqa: S106
+        db.add(user)
+        db.commit()
+        template = db.get(Template, "cartpole")
+        # 旧版本指针：指向 0.1.0，但 Template.version 被改（模拟模板升级）
+        template.version = "5.0.0"
+        db.commit()
+        orchestrator = WorkspaceOrchestrator(Factory, MockProvider("http://127.0.0.1:8000"), Path("/tmp/tv-test4"))  # noqa: S108
+        ws = orchestrator.create(db, template, user_id="u1")
+        assert db.get(TemplateVersion, ws.template_version_id).version == "0.1.0"
+
+        root = Path("/tmp/tv-test4-root")  # noqa: S108
+        (root / ws.id).mkdir(parents=True, exist_ok=True)
+        (root / ws.id / "out.pt").write_bytes(b"v1")
+        svc = DeploymentService(Factory, root)
+        artifact = svc.create_artifact(db, user, ws, "out.pt")
+        # 版本来自 Workspace 引用的 TemplateVersion（0.1.0），不是 Template.version(5.0.0)
+        assert artifact.model_version == "0.1.0"

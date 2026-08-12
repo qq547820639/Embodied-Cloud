@@ -13,7 +13,15 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..models import Artifact, DeploymentRecord, DeploymentStatus, Role, Template, Workspace
+from ..models import (
+    Artifact,
+    DeploymentRecord,
+    DeploymentStatus,
+    Role,
+    Template,
+    TemplateVersion,
+    Workspace,
+)
 from .artifact_store import ArtifactStore, LocalArtifactStore
 
 
@@ -49,6 +57,14 @@ class DeploymentService:
 
     @staticmethod
     def _template_version(db: Session, workspace: Workspace) -> str:
+        """§11：从 Workspace 引用的 TemplateVersion 取版本号（不用 Template.version 猜）。
+
+        旧数据（template_version_id 为空）→ 按 Template.version 兜底。
+        """
+        if workspace.template_version_id is not None:
+            version = db.get(TemplateVersion, workspace.template_version_id)
+            if version is not None:
+                return version.version
         template = db.get(Template, workspace.template_id)
         return template.version if template is not None else "0.1.0"
 

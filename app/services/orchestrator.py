@@ -62,15 +62,21 @@ class WorkspaceOrchestrator:
         user_id: str | None = None,
         organization_id: str | None = None,
     ) -> Workspace:
-        # 绑定具体不可变 TemplateVersion（runtime image 的单一事实来源）
-        template_version = db.scalar(
-            select(TemplateVersion)
-            .where(
-                TemplateVersion.template_id == template.id,
-                TemplateVersion.released.is_(True),
+        # §11：绑定具体不可变 TemplateVersion（runtime image 的单一事实来源）。
+        # 确定性 active-version 指针（template.current_version_id，发布策略决定）；
+        # 旧数据无指针时按 released + created_at 兜底（迁移期）。
+        template_version = None
+        if template.current_version_id is not None:
+            template_version = db.get(TemplateVersion, template.current_version_id)
+        if template_version is None:
+            template_version = db.scalar(
+                select(TemplateVersion)
+                .where(
+                    TemplateVersion.template_id == template.id,
+                    TemplateVersion.released.is_(True),
+                )
+                .order_by(TemplateVersion.created_at.desc())
             )
-            .order_by(TemplateVersion.created_at.desc())
-        )
         workspace_id = str(uuid.uuid4())
         workspace = Workspace(
             id=workspace_id,
