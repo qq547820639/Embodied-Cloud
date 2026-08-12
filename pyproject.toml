@@ -33,6 +33,11 @@ embodiedcloud = "app.main:run"
 testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["."]
+markers = [
+    "k8s_integration: requires real Kubernetes cluster + NVIDIA Device Plugin",
+    "gpu_physical: requires physical NVIDIA GPU host",
+    "streaming_physical: requires Isaac Sim streaming environment",
+]
 
 [build-system]
 requires = ["setuptools>=75"]

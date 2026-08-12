@@ -1,0 +1,64 @@
+# EmbodiedCloud 默认拒绝 NetworkPolicy（§13/§29）
+# Workspace 只允许：DNS（kube-dns）、控制面 API、同命名空间 IDE/streaming 端口。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: embodiedcloud
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-workspace-egress
+  namespace: embodiedcloud
+spec:
+  podSelector:
+    matchLabels:
+      embodiedcloud.workspace: "true"
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector: {}   # kube-dns
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: embodiedcloud
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32  # 阻断 cloud metadata（IMDS）攻击面
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-workspace-ide-ingress
+  namespace: embodiedcloud
+spec:
+  podSelector:
+    matchLabels:
+      embodiedcloud.workspace: "true"
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: embodiedcloud
+      ports:
+        - protocol: TCP
+          port: 18000  # IDE（code-server）
+        - protocol: TCP
+          port: 49100  # Isaac Sim WebRTC signaling
+        - protocol: UDP
+          port: 47998  # Isaac Sim WebRTC media

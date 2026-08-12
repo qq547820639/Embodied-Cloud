@@ -1,0 +1,32 @@
+# EmbodiedCloud Workspace RBAC（§13/§28）
+# Workspace Pod 最小权限：可读 Pod/PVC/Service 状态用于 inspect/health，
+# 无集群级权限、无 docker.sock、无 host root。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: embodiedcloud-workspace
+  namespace: embodiedcloud
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: embodiedcloud-workspace-reader
+  namespace: embodiedcloud
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: embodiedcloud-workspace-reader
+  namespace: embodiedcloud
+subjects:
+  - kind: ServiceAccount
+    name: embodiedcloud-workspace
+    namespace: embodiedcloud
+roleRef:
+  kind: Role
+  name: embodiedcloud-workspace-reader
+  apiGroup: rbac.authorization.k8s.io
