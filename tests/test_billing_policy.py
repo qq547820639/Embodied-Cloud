@@ -248,7 +248,7 @@ def test_billing_restart_idempotency():
 
 def test_duplicate_stop_no_double_charge():
     """同一 workspace 重复 stop：结算只发生一次，不双重扣费。"""
-    orchestrator, billing = _orchestrator_with_billing()
+    orchestrator, _ = _orchestrator_with_billing()
     with Factory() as db:
         _seed_gpu_template(db)
         user = _make_user(db)
