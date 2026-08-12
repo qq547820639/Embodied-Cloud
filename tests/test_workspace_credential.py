@@ -137,7 +137,7 @@ def test_legacy_plaintext_password_still_readable():
             provider="mock",
             user_id="u1",
             status=WorkspaceStatus.RUNNING.value,
-            password="legacy-plaintext-password",  # 旧数据明文
+            password="legacy-plaintext-password",  # noqa: S106 旧数据明文（测试）
         )
         db.add(ws)
         db.commit()
