@@ -71,10 +71,13 @@ def get_deployment(deployment_id: str, db: DB, user: CurrentUser):
 
 @router.post("/{deployment_id}/download", response_model=DeploymentOut)
 def download_deployment(deployment_id: str, db: DB, user: CurrentUser):
-    """edge 流程模拟: download → verify."""
+    """download 只进入 DOWNLOADING（§5，P0）。
+
+    绝不自动进入 VERIFIED：唯一 VERIFIED 路径 = Edge 下载真实 bytes →
+    本地 SHA256 → POST /report-checksum 上报 → server 比较 expected。
+    """
     deployment = _get_owned_deployment(db, user, deployment_id)
     deployment_service.download(db, deployment)
-    deployment_service.verify(db, deployment)
     return deployment
 
 

@@ -144,14 +144,18 @@ def test_deploy_different_robot_type_creates_new(db, tmp_path):
 
 
 def test_deployment_state_machine(db, tmp_path):
-    svc, owner, ws, _ = _setup(db, tmp_path)
+    svc, owner, ws, artifact_file = _setup(db, tmp_path)
     artifact = svc.create_artifact(db, owner, ws, "checkpoint.pt")
     deployment = svc.deploy(db, owner, ws, artifact, "franka")
 
     svc.download(db, deployment)
     assert deployment.status == "downloading"
 
-    svc.verify(db, deployment)
+    # §5：唯一 VERIFIED 路径 = edge 上报 checksum（server 比较）
+    import hashlib
+
+    actual = hashlib.sha256(artifact_file.read_bytes()).hexdigest()
+    svc.report_checksum(db, deployment, actual)
     assert deployment.status == "verified"
 
     edge_svc = EdgeService(None)
@@ -166,11 +170,14 @@ def test_deployment_state_machine(db, tmp_path):
 
 
 def test_complete_failure_records_error(db, tmp_path):
-    svc, owner, ws, _ = _setup(db, tmp_path)
+    svc, owner, ws, artifact_file = _setup(db, tmp_path)
     artifact = svc.create_artifact(db, owner, ws, "checkpoint.pt")
     d = svc.deploy(db, owner, ws, artifact, "franka")
     svc.download(db, d)
-    svc.verify(db, d)
+    import hashlib
+
+    actual = hashlib.sha256(artifact_file.read_bytes()).hexdigest()
+    svc.report_checksum(db, d, actual)
     svc.run_policy(db, d, None)
     svc.complete(db, d, success=False, error="motor fault")
     assert d.status == "failed"

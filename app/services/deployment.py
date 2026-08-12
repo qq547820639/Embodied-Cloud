@@ -161,16 +161,6 @@ class DeploymentService:
         db.commit()
         return deployment
 
-    def verify(self, db: Session, deployment: DeploymentRecord) -> DeploymentRecord:
-        """downloading → verified (checksum 由 edge 端校验, 控制面只记录状态)."""
-        if deployment.status == DeploymentStatus.VERIFIED.value:
-            return deployment
-        if deployment.status != DeploymentStatus.DOWNLOADING.value:
-            raise self._bad_transition(deployment, "verified")
-        deployment.status = DeploymentStatus.VERIFIED.value
-        db.commit()
-        return deployment
-
     def verify_checksum(self, db: Session, deployment: DeploymentRecord) -> DeploymentRecord:
         """幂等校验: ArtifactStore 中的对象 checksum 与记录一致 → verified, 否则 failed+error.
 
