@@ -7,7 +7,8 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
-from ..deps import DB, CurrentUser, billing, credential_cipher, orchestrator, warm_pool
+from ..deps import DB, CurrentUser, billing, credential_cipher, orchestrator, warm_pool, worker
+from ..models import OperationType
 from ..models import Role, Template, Workspace, WorkspaceStatus
 from ..schemas import WorkspaceAccessOut, WorkspaceCreate, WorkspaceOut
 from ..services.billing import BillingError
@@ -109,8 +110,14 @@ def start_workspace(workspace_id: str, db: DB, user: CurrentUser):
 
 @router.post("/{workspace_id}/stop", response_model=WorkspaceOut)
 def stop_workspace(workspace_id: str, db: DB, user: CurrentUser):
+    """§12：durable STOP —— enqueue STOP operation；worker 执行（fast-path 同步
+    处理，任务持久化：控制面重启后 cleanup 不丢失）。"""
     workspace = _get_owned(db, workspace_id, user)
-    return orchestrator.stop(db, workspace)
+    op = worker.enqueue(workspace.id, OperationType.STOP)
+    if op is not None:
+        worker.tick_once()  # fast-path：立即执行（operation 已持久化）
+    db.refresh(workspace)
+    return workspace
 
 
 @router.get("/{workspace_id}/logs", response_model=dict)
@@ -124,8 +131,12 @@ def workspace_logs(workspace_id: str, db: DB, user: CurrentUser, tail: int = 200
 
 @router.delete("/{workspace_id}", status_code=204)
 def delete_workspace(workspace_id: str, db: DB, user: CurrentUser):
+    """§12：durable DESTROY —— enqueue DESTROY operation；worker 执行
+    （幂等 tombstone；重启不丢清理）。"""
     workspace = _get_owned(db, workspace_id, user)
-    orchestrator.destroy(db, workspace)
+    op = worker.enqueue(workspace.id, OperationType.DESTROY)
+    if op is not None:
+        worker.tick_once()  # fast-path：立即执行（operation 已持久化）
 
 
 # ---------------------------------------------------------------------------

@@ -112,6 +112,12 @@ class WorkspaceOrchestrator:
             raise RuntimeError(f"workspace {op.workspace_id[:8]} not found for operation")
         if op.operation_type in {OperationType.PROVISION.value, OperationType.START.value}:
             self._execute_provision(db, workspace)
+        elif op.operation_type == OperationType.STOP.value:
+            # §12：durable STOP —— 幂等（重复 stop 不重复结算/释放）
+            self.stop(db, workspace)
+        elif op.operation_type == OperationType.DESTROY.value:
+            # §12：durable DESTROY —— 幂等 tombstone；控制面重启不丢清理
+            self.destroy(db, workspace)
         elif op.operation_type == OperationType.RECONCILE.value:
             self.reconcile_all()
         else:
