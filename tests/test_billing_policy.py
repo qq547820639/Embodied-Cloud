@@ -72,7 +72,7 @@ def _seed_gpu_template(db) -> Template:
 
 
 def _make_user(db, user_id: str = "u1", role: str = Role.USER.value) -> User:
-    user = User(id=user_id, email=f"{user_id}@example.com", username=user_id, password_hash="x", role=role)
+    user = User(id=user_id, email=f"{user_id}@example.com", username=user_id, password_hash="x", role=role)  # noqa: S106 测试数据)
     db.add(user)
     db.commit()
     return user
