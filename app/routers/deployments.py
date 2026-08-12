@@ -83,12 +83,18 @@ def download_deployment(deployment_id: str, db: DB, user: CurrentUser):
 
 @router.post("/{deployment_id}/run", response_model=DeploymentOut)
 def run_deployment(deployment_id: str, payload: DeploymentRunIn, db: DB, user: CurrentUser):
-    """verify → running; body 可选 edge_agent_id 绑定执行 agent."""
+    """verify → running; body 可选 edge_agent_id 绑定执行 agent。
+
+    §6（P0）租户校验：只能绑定**自己的** agent（admin 例外）；不能把
+    deployment 派发给其他 tenant 的 agent。
+    """
     deployment = _get_owned_deployment(db, user, deployment_id)
     agent = None
     if payload.edge_agent_id:
         agent = db.get(EdgeAgent, payload.edge_agent_id)
         if agent is None:
+            raise HTTPException(404, "edge agent not found")
+        if user.role != Role.ADMIN.value and agent.owner_user_id != user.id:
             raise HTTPException(404, "edge agent not found")
     return deployment_service.run_policy(db, deployment, agent)
 

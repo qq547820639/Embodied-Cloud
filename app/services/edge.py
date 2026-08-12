@@ -11,7 +11,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..models import AgentStatus, EdgeAgent, TelemetryEvent
+from ..models import AgentStatus, EdgeAgent, Role, TelemetryEvent, User
 from ..security import generate_token, hash_token
 
 
@@ -23,8 +23,17 @@ class EdgeService:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self.session_factory = session_factory
 
-    def register(self, db: Session, name: str, device_info: dict | None = None) -> tuple[EdgeAgent, str]:
-        """注册边缘设备; 返回 (agent, 原始 token), 原始 token 仅此一次返回."""
+    def register(
+        self,
+        db: Session,
+        name: str,
+        device_info: dict | None = None,
+        owner: User | None = None,
+    ) -> tuple[EdgeAgent, str]:
+        """注册边缘设备（§6，P0）：必须绑定 owner（API 层强制认证）。
+
+        返回 (agent, 原始 token)，原始 token 仅此一次返回。
+        """
         token = generate_token()
         agent = EdgeAgent(
             id=str(uuid.uuid4()),
@@ -32,6 +41,8 @@ class EdgeService:
             status=AgentStatus.REGISTERED.value,
             device_info=device_info or {},
             token_hash=hash_token(token),
+            owner_user_id=owner.id if owner is not None else None,
+            organization_id=owner.organization_id if owner is not None else None,
         )
         db.add(agent)
         db.commit()
@@ -61,11 +72,21 @@ class EdgeService:
         db.refresh(event)
         return event
 
-    def list_agents(self, db: Session) -> list[EdgeAgent]:
-        return list(db.scalars(select(EdgeAgent).order_by(EdgeAgent.created_at.desc())))
+    def list_agents(self, db: Session, user: User) -> list[EdgeAgent]:
+        """租户 scope：普通用户只见自己的 agent；admin 可见全部。"""
+        stmt = select(EdgeAgent).order_by(EdgeAgent.created_at.desc())
+        if user.role != Role.ADMIN.value:
+            stmt = stmt.where(EdgeAgent.owner_user_id == user.id)
+        return list(db.scalars(stmt))
 
-    def get_agent(self, db: Session, agent_id: str) -> EdgeAgent | None:
-        return db.get(EdgeAgent, agent_id)
+    def get_agent(self, db: Session, agent_id: str, user: User) -> EdgeAgent | None:
+        """租户 scope：越权一律视为不存在（404 语义）。"""
+        agent = db.get(EdgeAgent, agent_id)
+        if agent is None:
+            return None
+        if user.role != Role.ADMIN.value and agent.owner_user_id != user.id:
+            return None
+        return agent
 
 
 def get_agent_from_header(request: Request, db: Session) -> EdgeAgent:

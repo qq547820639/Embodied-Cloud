@@ -83,12 +83,17 @@ def test_report_telemetry_writes_event(factory, db):
 
 def test_list_and_get_agents(factory, db):
     svc = EdgeService(factory)
-    a1, _ = svc.register(db, "edge-01", {})
-    a2, _ = svc.register(db, "edge-02", {})
-    assert {a.id for a in svc.list_agents(db)} == {a1.id, a2.id}
-    assert svc.get_agent(db, a1.id) is not None
-    assert svc.get_agent(db, a1.id).id == a1.id
-    assert svc.get_agent(db, "missing") is None
+    from app.models import User
+
+    owner = User(id="u1", email="u1@example.com", username="u1", password_hash="x")  # noqa: S106
+    db.add(owner)
+    db.commit()
+    a1, _ = svc.register(db, "edge-01", {}, owner=owner)
+    a2, _ = svc.register(db, "edge-02", {}, owner=owner)
+    assert {a.id for a in svc.list_agents(db, owner)} == {a1.id, a2.id}
+    assert svc.get_agent(db, a1.id, owner) is not None
+    assert svc.get_agent(db, a1.id, owner).id == a1.id
+    assert svc.get_agent(db, "missing", owner) is None
 
 
 def test_agent_header_auth_success(factory, db):

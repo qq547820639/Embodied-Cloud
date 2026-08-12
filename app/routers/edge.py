@@ -4,26 +4,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
-from ..config import Settings
-from ..db import make_engine, make_session_factory, session_dependency
-from ..models import EdgeAgent, User
+from ..deps import DB, CurrentUser, edge_service
+from ..models import EdgeAgent
 from ..schemas import EdgeAgentOut, EdgeAgentRegisterIn, EdgeHeartbeatIn, TelemetryOut
-from ..security import make_session_dependency
-from ..services.edge import EdgeService, get_agent_from_header
-
-# 本地构造与本项目 deps 容器等价的依赖 (deps 模块存在既有 mypy 错误且不在本任务
-# 修改范围, 故不直接导入; 运行时配置同源, SQLAlchemy 按 URL 共享连接池).
-_settings = Settings()
-_settings.ensure_dirs()
-_session_factory = make_session_factory(make_engine(_settings))
-DB = Annotated[Session, Depends(session_dependency(_session_factory))]
-CurrentUser = Annotated[User, Depends(make_session_dependency(_session_factory, _settings))]
+from ..services.edge import get_agent_from_header
 
 router = APIRouter(prefix="/edge", tags=["edge"])
-
-edge_service = EdgeService(_session_factory)
 
 
 class AgentRegisterOut(BaseModel):
@@ -45,8 +32,13 @@ Agent = Annotated[EdgeAgent, Depends(agent_from_header)]
 
 
 @router.post("/agents/register", response_model=AgentRegisterOut, status_code=201)
-def register_agent(payload: EdgeAgentRegisterIn, db: DB):
-    agent, token = edge_service.register(db, payload.name, payload.device_info)
+def register_agent(payload: EdgeAgentRegisterIn, db: DB, user: CurrentUser):
+    """§6（P0）：agent 注册必须绑定认证用户（禁止匿名无主注册）。
+
+    安全 onboarding：authenticated owner registration（edge 侧后续可用
+    short-lived pairing code 扩展）。
+    """
+    agent, token = edge_service.register(db, payload.name, payload.device_info, owner=user)
     return AgentRegisterOut(agent=EdgeAgentOut.model_validate(agent), token=token)
 
 
@@ -66,13 +58,14 @@ def telemetry(agent_id: str, payload: TelemetryIn, db: DB, agent: Agent):
 
 @router.get("/agents", response_model=list[EdgeAgentOut])
 def list_agents(db: DB, user: CurrentUser):
-    # 单租户演示控制面: 注册的 agent 用户级可见 (admin 亦可见全部)
-    return edge_service.list_agents(db)
+    """租户 scope：普通用户只见自己的 agent；admin 全量。"""
+    return edge_service.list_agents(db, user)
 
 
 @router.get("/agents/{agent_id}", response_model=EdgeAgentOut)
 def get_agent(agent_id: str, db: DB, user: CurrentUser):
-    agent = edge_service.get_agent(db, agent_id)
+    """租户 scope：越权 404（不泄露存在性）。"""
+    agent = edge_service.get_agent(db, agent_id, user)
     if agent is None:
         raise HTTPException(404, "agent not found")
     return agent

@@ -546,6 +546,13 @@ class EdgeAgent(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=AgentStatus.REGISTERED.value)
     device_info: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    # §6（P0）租户所有权：agent 归属用户/组织；匿名无主注册禁止（API 层强制认证）
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True, index=True
+    )
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("organizations.id"), nullable=True, index=True
+    )
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

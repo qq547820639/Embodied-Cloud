@@ -15,6 +15,7 @@ from .models import User
 from .security import WorkspaceCredentialCipher, make_session_dependency, validate_credential_configuration
 from .seed import seed_templates
 from .services.billing import BillingPolicy
+from .services.edge import EdgeService
 from .services.ledger import CreditLedgerService
 from .services.orchestrator import WorkspaceOrchestrator
 from .services.providers.base import WorkspaceProvider
@@ -63,6 +64,7 @@ orchestrator = WorkspaceOrchestrator(
 )
 worker = OperationWorker(SessionFactory, orchestrator)
 warm_pool = WarmPoolManager(SessionFactory, orchestrator, settings)
+edge_service = EdgeService(SessionFactory)
 
 
 def bootstrap_db() -> None:
