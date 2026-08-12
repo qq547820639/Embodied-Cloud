@@ -1,11 +1,11 @@
 PYTHON ?= .venv/bin/python
 UV ?= uv
-VERSION ?= 0.2.0
+VERSION ?= 0.3.0
 
 .PHONY: install dev test lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
-        release api-docs
+        release api-docs validate
 
 install:
 	python3.12 -m venv .venv
@@ -72,3 +72,6 @@ release:
 
 api-docs:
 	$(PYTHON) -c "from app.main import app; import json, pathlib; open('docs/openapi.json','w').write(json.dumps(app.openapi(), indent=2))"
+
+validate:
+	$(PYTHON) scripts/validate_release.py

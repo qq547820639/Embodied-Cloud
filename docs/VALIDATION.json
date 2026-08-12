@@ -1,0 +1,45 @@
+{
+  "version": "0.3.0",
+  "generated_at": "2026-08-12T03:33:06.771741+00:00",
+  "overall": "PASS_WITH_PHYSICAL_PENDING",
+  "checks": {
+    "test_collected": {
+      "status": "PASS",
+      "count": 183
+    },
+    "test_run": {
+      "status": "PASS",
+      "passed": 182,
+      "skipped": 1,
+      "failed": 0
+    },
+    "lint": {
+      "status": "PASS"
+    },
+    "typecheck": {
+      "status": "PASS"
+    },
+    "migration": {
+      "status": "PASS"
+    },
+    "build": {
+      "status": "PASS"
+    },
+    "physical_gpu": {
+      "status": "PHYSICAL_VALIDATION_PENDING",
+      "note": "需要真实硬件验证"
+    },
+    "physical_k8s": {
+      "status": "PHYSICAL_VALIDATION_PENDING",
+      "note": "需要真实硬件验证"
+    },
+    "physical_streaming": {
+      "status": "PHYSICAL_VALIDATION_PENDING",
+      "note": "需要真实硬件验证"
+    },
+    "physical_robot": {
+      "status": "PHYSICAL_VALIDATION_PENDING",
+      "note": "需要真实硬件验证"
+    }
+  }
+}

@@ -20,6 +20,8 @@ jobs:
         run: make test
       - name: OpenAPI freshness
         run: make api-docs && git diff --exit-code docs/openapi.json
+      - name: Release validation freshness
+        run: make validate && git diff --exit-code docs/VALIDATION.json docs/VALIDATION.md
       - name: Build artifact
         run: make build
       - name: Smoke (mock mode)

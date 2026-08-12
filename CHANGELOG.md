@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0 — 2026-08-12（Acceptance Hardening）
+
+### Correctness（P0）
+- GPU 单一权威保持：scheduler reservation ↔ provider `--gpus` 一致性测试链（test_gpu_single_authority）。
+- **Operation lease/fencing**：lease_owner/fencing_token/heartbeat_at；claim 原子（rowcount）；
+  执行期心跳续期；finish 必须 fencing 验证（LeaseLostError 禁止过期 worker 写终态）；
+  SQL 层比较（SQLite/PostgreSQL 语义一致）。
+- **K8s offline 隔离**：model_factory 注入（tests/k8s_fakes.py），offline 测试零 Kubernetes SDK 依赖。
+- **K8s inventory 真实路径**：node nvidia.com/gpu capacity → GpuHost/Gpu（capacity reservation，
+  device 分配归 NVIDIA Device Plugin）。
+- K8s integration harness 真实全流程（无 NotImplementedError；无集群 SKIP 标 PENDING）。
+
+### Product hardening
+- Warm pool 真实 launch 路径：POST /api/workspaces → BillingPolicy → claim；credential rotation
+  （Mock/Docker/K8s 三实现；rotation 失败不得交付 → DRAINING + fallback）。
+- Warm pool 指标 COUNT(*) 真实计数。
+- ArtifactStore 集成：DeploymentService 走 store 协议（object_key/content_type/store_name）。
+- **Edge 上报 checksum 协议**：edge 本地 sha256 → server 比较 → VERIFIED/FAILED（防绕过/防 replay）。
+- Template.current_version_id 确定性版本指针（不用 created_at 猜 latest），Artifact/Deployment
+  版本来自 Workspace.template_version_id。
+- Billing 预授权（minimum_launch_minutes）+ active-runtime quota monitor（透支优雅停止）。
+- 凭据配置生产安全：EMBODIEDCLOUD_WORKSPACE_CREDENTIAL_KEY；生产 provider 未显式配置拒绝启动；
+  enc: 密文解密失败 fail closed。
+
+### Process
+- scripts/validate_release.py 自动生成 docs/VALIDATION.json/.md（CI freshness 门禁）。
+- 版本统一 0.3.0（pyproject/app/Makefile/CHANGELOG/OpenAPI 单一来源）。
+- Release 清洁验证（archive 不含 __pycache__/pyc/test db/.env）。
+
 ## 0.2.0 — 2026-08-12
 
 ### Identity / Isolation

@@ -3,7 +3,7 @@
   "info": {
     "title": "EmbodiedCloud API",
     "description": "Browser-first Isaac Lab workspace control plane",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "paths": {
     "/api/auth/register": {
@@ -2109,6 +2109,59 @@
         }
       }
     },
+    "/api/deployments/{deployment_id}/report-checksum": {
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Report Edge Checksum",
+        "description": "\u00a710\uff1aEdge \u4e0a\u62a5\u672c\u5730\u8ba1\u7b97\u7684 actual_sha256 \u2014\u2014 **\u552f\u4e00** edge\u2192server \u6821\u9a8c\u8def\u5f84\u3002\n\nserver \u6bd4\u8f83 actual == expected\uff08deployment.checksum\uff09\uff1a\nMATCH \u2192 VERIFIED\uff1bMISMATCH \u2192 FAILED\u3002\u5ba2\u6237\u7aef**\u4e0d\u80fd**\u76f4\u63a5\u63d0\u4ea4 status=VERIFIED\u3002",
+        "operationId": "report_edge_checksum_api_deployments__deployment_id__report_checksum_post",
+        "parameters": [
+          {
+            "name": "deployment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Deployment Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EdgeChecksumIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "summary": "Health",
@@ -2577,6 +2630,19 @@
           "name"
         ],
         "title": "EdgeAgentRegisterIn"
+      },
+      "EdgeChecksumIn": {
+        "properties": {
+          "actual_sha256": {
+            "type": "string",
+            "title": "Actual Sha256"
+          }
+        },
+        "type": "object",
+        "required": [
+          "actual_sha256"
+        ],
+        "title": "EdgeChecksumIn"
       },
       "EdgeHeartbeatIn": {
         "properties": {

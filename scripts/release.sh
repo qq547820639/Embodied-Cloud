@@ -81,6 +81,30 @@ step "4/5 make build"
 rm -rf dist
 make build
 
+# ---------- 2.5 release archive 清洁验证（§16） ----------
+step "2.5 校验 release archive 清洁度"
+# source archive 不得包含：__pycache__ / *.pyc / pytest/mypy/ruff cache /
+# test-*.db / .env / .venv / .workbuddy
+BAD_PATTERNS=(__pycache__ '*.pyc' .pytest_cache .mypy_cache .ruff_cache 'test-*.db' .env .venv .workbuddy)
+tar_gz=""
+for f in dist/*.tar.gz; do [[ -f "$f" ]] && tar_gz="$f"; done
+if [[ -n "$tar_gz" ]]; then
+  unclean=""
+  for pat in "${BAD_PATTERNS[@]}"; do
+    hits=$(tar -tzf "$tar_gz" 2>/dev/null | grep -c "$pat" || true)
+    if (( hits > 0 )); then
+      unclean="$unclean $pat($hits)"
+    fi
+  done
+  if [[ -n "$unclean" ]]; then
+    say "release FAILED: source archive 包含不应发布的条目:$unclean" >&2
+    exit 1
+  fi
+  say "source archive 清洁度 OK（无 __pycache__/pyc/cache/test-db/.env/.venv/.workbuddy）"
+else
+  say "警告: 未找到 *.tar.gz，跳过 archive 清洁度检查" >&2
+fi
+
 # ---------- 3. dist/checksums.txt ----------
 step "生成 dist/checksums.txt"
 hash_cmd="sha256sum"
