@@ -15,6 +15,7 @@ import logging
 import secrets
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
@@ -82,10 +83,24 @@ class OperationWorker:
     # 失败重试的指数 backoff（秒）：attempt 1 → 1s, 2 → 2s ...
     RETRY_BASE_DELAY = 1.0
 
-    def __init__(self, session_factory: sessionmaker[Session], executor):
-        """executor: 拥有 execute_operation(db, op) 方法的对象（WorkspaceOrchestrator）。"""
+    # §19/§21：周期任务间隔（tick 次数）—— 单 worker 循环执行，不建每 workspace 线程
+    PERIODIC_QUOTA_EVERY = 10
+    PERIODIC_WARM_POOL_EVERY = 30
+
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        executor,
+        periodic_tasks: "list[tuple[int, Callable[[], object]]] | None" = None,
+    ):
+        """executor: 拥有 execute_operation(db, op) 方法的对象（WorkspaceOrchestrator）。
+        periodic_tasks: [(every_n_ticks, callable)] —— 周期后台任务（配额监控/
+        warm pool maintain 等），由 worker 循环统一调度。
+        """
         self.session_factory = session_factory
         self.executor = executor
+        self.periodic_tasks = periodic_tasks or []
+        self._tick_count = 0
         # 唯一 worker id：lease_owner 标识（多实例/重启后可区分）
         self.worker_id = f"worker-{uuid.uuid4().hex[:8]}"
         self._stop = threading.Event()
@@ -116,6 +131,16 @@ class OperationWorker:
             self._thread.join(timeout=5)
             self._thread = None
 
+    def _run_periodic(self) -> None:
+        """执行到期的周期任务（单 worker 循环统一调度，不建每 workspace 线程）。"""
+        self._tick_count += 1
+        for every, task in self.periodic_tasks:
+            if every > 0 and self._tick_count % every == 0:
+                try:
+                    task()
+                except Exception as exc:
+                    logger.error("periodic task failed: %s", exc)
+
     def _run_forever(self) -> None:
         while not self._stop.is_set():
             processed = 0
@@ -125,6 +150,8 @@ class OperationWorker:
                     processed = self.tick_once()
                     if processed == 0:
                         break
+                # §19/§21：周期后台任务（配额监控、warm pool maintain）
+                self._run_periodic()
             except Exception as exc:  # worker 循环永不退出；异常记录后继续
                 logger.exception("worker tick failed: %s", exc)
             if processed == 0:

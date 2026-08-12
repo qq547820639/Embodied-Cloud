@@ -58,6 +58,14 @@ def make_provider() -> WorkspaceProvider:
     return MockProvider(settings.public_base_url)
 
 
+def _warm_pool_maintain() -> None:
+    """warm pool 后台 maintain（幂等；enabled 时补齐 READY）。"""
+    if not settings.warm_pool_enabled:
+        return
+    with SessionFactory() as db:
+        warm_pool.maintain(db)
+
+
 provider = make_provider()
 orchestrator = WorkspaceOrchestrator(
     SessionFactory,
@@ -69,7 +77,16 @@ orchestrator = WorkspaceOrchestrator(
     credential_cipher=credential_cipher,
     ready_timeout_seconds=settings.provision_ready_timeout_seconds,
 )
-worker = OperationWorker(SessionFactory, orchestrator)
+worker = OperationWorker(
+    SessionFactory,
+    orchestrator,
+    periodic_tasks=[
+        # §19：active-runtime 配额监控（透支 → 优雅停止）
+        (OperationWorker.PERIODIC_QUOTA_EVERY, orchestrator.monitor_runtime_quotas),
+        # §21：warm pool 后台 maintain（按 warm_pool_enabled 生效）
+        (OperationWorker.PERIODIC_WARM_POOL_EVERY, _warm_pool_maintain),
+    ],
+)
 # §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用
 if settings.warm_pool_enabled and not provider.supports_credential_rotation:
     import logging
