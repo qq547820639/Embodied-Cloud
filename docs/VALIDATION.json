@@ -1,15 +1,15 @@
 {
   "version": "0.3.0",
-  "generated_at": "2026-08-12T03:35:58.062495+00:00",
+  "generated_at": "2026-08-12T04:30:21.688762+00:00",
   "overall": "PASS_WITH_PHYSICAL_PENDING",
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 183
+      "count": 227
     },
     "test_run": {
       "status": "PASS",
-      "passed": 182,
+      "passed": 226,
       "skipped": 1,
       "failed": 0
     },
@@ -26,20 +26,20 @@
       "status": "PASS"
     },
     "physical_gpu": {
-      "status": "PHYSICAL_VALIDATION_PENDING",
-      "note": "需要真实硬件验证"
+      "status": "NOT_RUN",
+      "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新"
     },
     "physical_k8s": {
-      "status": "PHYSICAL_VALIDATION_PENDING",
-      "note": "需要真实硬件验证"
+      "status": "NOT_RUN",
+      "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新"
     },
     "physical_streaming": {
-      "status": "PHYSICAL_VALIDATION_PENDING",
-      "note": "需要真实硬件验证"
+      "status": "NOT_RUN",
+      "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新"
     },
     "physical_robot": {
-      "status": "PHYSICAL_VALIDATION_PENDING",
-      "note": "需要真实硬件验证"
+      "status": "NOT_RUN",
+      "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新"
     }
   }
 }

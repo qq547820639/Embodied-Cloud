@@ -1,20 +1,20 @@
 # VALIDATION — EmbodiedCloud
 
-> 版本：0.3.0 · 生成：2026-08-12T03:35:58.062495+00:00（自动生成，勿手改）
+> 版本：0.3.0 · 生成：2026-08-12T04:30:21.688762+00:00（自动生成，勿手改）
 
 ## 总览：**PASS_WITH_PHYSICAL_PENDING**
 
 | Gate | 状态 | 明细 |
 |---|---|---|
-| Test collected | PASS | 183 |
-| Test run | PASS | passed=182 skipped=1 failed=0 |
+| Test collected | PASS | 227 |
+| Test run | PASS | passed=226 skipped=1 failed=0 |
 | lint | PASS | |
 | typecheck | PASS | |
 | migration | PASS | |
 | build | PASS | |
-| Physical gpu | PHYSICAL_VALIDATION_PENDING | 需要真实硬件验证 |
-| Physical k8s | PHYSICAL_VALIDATION_PENDING | 需要真实硬件验证 |
-| Physical streaming | PHYSICAL_VALIDATION_PENDING | 需要真实硬件验证 |
-| Physical robot | PHYSICAL_VALIDATION_PENDING | 需要真实硬件验证 |
+| Physical gpu | NOT_RUN | 未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新 |
+| Physical k8s | NOT_RUN | 未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新 |
+| Physical streaming | NOT_RUN | 未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新 |
+| Physical robot | NOT_RUN | 未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新 |
 
 > 由 `python scripts/validate_release.py` 生成；CI 校验 freshness（重新生成无 diff）。

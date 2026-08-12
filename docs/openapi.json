@@ -300,6 +300,7 @@
           "workspaces"
         ],
         "summary": "Delete Workspace",
+        "description": "\u00a712\uff1adurable DESTROY \u2014\u2014 enqueue DESTROY operation\uff1bworker \u6267\u884c\n\uff08\u5e42\u7b49 tombstone\uff1b\u91cd\u542f\u4e0d\u4e22\u6e05\u7406\uff09\u3002",
         "operationId": "delete_workspace_api_workspaces__workspace_id__delete",
         "parameters": [
           {
@@ -419,6 +420,7 @@
           "workspaces"
         ],
         "summary": "Stop Workspace",
+        "description": "\u00a712\uff1adurable STOP \u2014\u2014 enqueue STOP operation\uff1bworker \u6267\u884c\uff08fast-path \u540c\u6b65\n\u5904\u7406\uff0c\u4efb\u52a1\u6301\u4e45\u5316\uff1a\u63a7\u5236\u9762\u91cd\u542f\u540e cleanup \u4e0d\u4e22\u5931\uff09\u3002",
         "operationId": "stop_workspace_api_workspaces__workspace_id__stop_post",
         "parameters": [
           {
@@ -1577,6 +1579,7 @@
           "edge"
         ],
         "summary": "Register Agent",
+        "description": "\u00a76\uff08P0\uff09\uff1aagent \u6ce8\u518c\u5fc5\u987b\u7ed1\u5b9a\u8ba4\u8bc1\u7528\u6237\uff08\u7981\u6b62\u533f\u540d\u65e0\u4e3b\u6ce8\u518c\uff09\u3002\n\n\u5b89\u5168 onboarding\uff1aauthenticated owner registration\uff08edge \u4fa7\u540e\u7eed\u53ef\u7528\nshort-lived pairing code \u6269\u5c55\uff09\u3002",
         "operationId": "register_agent_api_edge_agents_register_post",
         "requestBody": {
           "content": {
@@ -1722,6 +1725,7 @@
           "edge"
         ],
         "summary": "List Agents",
+        "description": "\u79df\u6237 scope\uff1a\u666e\u901a\u7528\u6237\u53ea\u89c1\u81ea\u5df1\u7684 agent\uff1badmin \u5168\u91cf\u3002",
         "operationId": "list_agents_api_edge_agents_get",
         "responses": {
           "200": {
@@ -1747,6 +1751,7 @@
           "edge"
         ],
         "summary": "Get Agent",
+        "description": "\u79df\u6237 scope\uff1a\u8d8a\u6743 404\uff08\u4e0d\u6cc4\u9732\u5b58\u5728\u6027\uff09\u3002",
         "operationId": "get_agent_api_edge_agents__agent_id__get",
         "parameters": [
           {
@@ -1923,7 +1928,7 @@
           "deployments"
         ],
         "summary": "Download Deployment",
-        "description": "edge \u6d41\u7a0b\u6a21\u62df: download \u2192 verify.",
+        "description": "download \u53ea\u8fdb\u5165 DOWNLOADING\uff08\u00a75\uff0cP0\uff09\u3002\n\n\u7edd\u4e0d\u81ea\u52a8\u8fdb\u5165 VERIFIED\uff1a\u552f\u4e00 VERIFIED \u8def\u5f84 = Edge \u4e0b\u8f7d\u771f\u5b9e bytes \u2192\n\u672c\u5730 SHA256 \u2192 POST /report-checksum \u4e0a\u62a5 \u2192 server \u6bd4\u8f83 expected\u3002",
         "operationId": "download_deployment_api_deployments__deployment_id__download_post",
         "parameters": [
           {
@@ -1966,7 +1971,7 @@
           "deployments"
         ],
         "summary": "Run Deployment",
-        "description": "verify \u2192 running; body \u53ef\u9009 edge_agent_id \u7ed1\u5b9a\u6267\u884c agent.",
+        "description": "verify \u2192 running; body \u53ef\u9009 edge_agent_id \u7ed1\u5b9a\u6267\u884c agent\u3002\n\n\u00a76\uff08P0\uff09\u79df\u6237\u6821\u9a8c\uff1a\u53ea\u80fd\u7ed1\u5b9a**\u81ea\u5df1\u7684** agent\uff08admin \u4f8b\u5916\uff09\uff1b\u4e0d\u80fd\u628a\ndeployment \u6d3e\u53d1\u7ed9\u5176\u4ed6 tenant \u7684 agent\u3002",
         "operationId": "run_deployment_api_deployments__deployment_id__run_post",
         "parameters": [
           {

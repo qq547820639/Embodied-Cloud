@@ -217,7 +217,11 @@ class KubernetesProvider:
                 replicas=1,
                 selector=client.V1LabelSelector(match_labels={"app": deployment_name}),
                 template=client.V1PodTemplateSpec(
-                    metadata=client.V1ObjectMeta(labels={"app": deployment_name}),
+                    # §14：Pod labels 必须包含 embodiedcloud.workspace（NetworkPolicy
+                    # selector 命中依据；此前只有 app label = 假安全配置）
+                    metadata=client.V1ObjectMeta(
+                        labels={"app": deployment_name, "embodiedcloud.workspace": "true"}
+                    ),
                     spec=client.V1PodSpec(
                         node_selector=node_selector or None,
                         containers=[

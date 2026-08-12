@@ -23,36 +23,47 @@ def run(cmd: list[str], timeout: int = 900) -> tuple[int, str]:
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
+def count_tests_junit(report_path: Path) -> dict:
+    """§16：用 JUnit XML 的 testsuite 属性稳定计数（不解析 pytest 文本输出）。"""
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(report_path)
+    root = tree.getroot()
+    # pytest 产出 <testsuites><testsuite .../></testsuites>
+    suite = root if root.tag == "testsuite" else root.find("testsuite")
+    if suite is None:
+        return {"collected": 0, "passed": 0, "skipped": 0, "failed": 0}
+    return {
+        "collected": int(suite.get("tests", 0)),
+        "passed": int(suite.get("tests", 0))
+        - int(suite.get("failures", 0))
+        - int(suite.get("errors", 0))
+        - int(suite.get("skipped", 0)),
+        "skipped": int(suite.get("skipped", 0)),
+        "failed": int(suite.get("failures", 0)) + int(suite.get("errors", 0)),
+    }
+
+
 def main() -> int:
     checks: dict[str, dict] = {}
+    import tempfile
 
-    # 1) test collection
-    code, out = run([PYTHON, "-m", "pytest", "--collect-only"])
-    collected = 0
-    for line in out.splitlines():
-        if "tests collected" in line:
-            collected = int(line.split()[0])
-    checks["test_collected"] = {"status": "PASS" if code == 0 else "FAIL", "count": collected}
-
-    # 2) full test run
-    code, out = run([PYTHON, "-m", "pytest"])
-    passed = skipped = failed = 0
-    for line in out.splitlines():
-        if "passed" in line:
-            for part in line.split(","):
-                part = part.strip()
-                if part.endswith("passed"):
-                    passed = int(part.split()[0])
-                elif part.endswith("skipped"):
-                    skipped = int(part.split()[0])
-                elif part.endswith("failed"):
-                    failed = int(part.split()[0])
-    checks["test_run"] = {
-        "status": "PASS" if code == 0 else "FAIL",
-        "passed": passed,
-        "skipped": skipped,
-        "failed": failed,
-    }
+    # 1) 全量 test run（JUnit 报告 → 稳定计数）
+    with tempfile.TemporaryDirectory() as tmp:
+        junit = Path(tmp) / "junit.xml"
+        code, _ = run([PYTHON, "-m", "pytest", "--junitxml", str(junit)])
+        if junit.exists():
+            counts = count_tests_junit(junit)
+            checks["test_collected"] = {"status": "PASS", "count": counts["collected"]}
+            checks["test_run"] = {
+                "status": "PASS" if code == 0 else "FAIL",
+                "passed": counts["passed"],
+                "skipped": counts["skipped"],
+                "failed": counts["failed"],
+            }
+        else:
+            checks["test_collected"] = {"status": "FAIL", "count": 0}
+            checks["test_run"] = {"status": "FAIL", "passed": 0, "skipped": 0, "failed": 0}
 
     # 3) lint / type / migration / build
     code, _ = run([PYTHON, "-m", "ruff", "check", "app", "tests"])
@@ -76,24 +87,21 @@ def main() -> int:
     code, _ = run([PYTHON, "-m", "build"])
     checks["build"] = {"status": "PASS" if code == 0 else "FAIL"}
 
-    # 4) 物理 gate（无硬件 → PENDING，不假装 PASS）
+    # 4) 物理 gate：未执行 = NOT_RUN（不永久 hardcode PENDING；执行后按真实
+    #    acceptance 结果写 PASS/FAIL/BLOCKED）
     physical = {
-        "GPU": "GPU_PHYSICAL_VALIDATION_PENDING",
-        "K8s": "K8S_PHYSICAL_VALIDATION_PENDING",
-        "Streaming": "STREAMING_PHYSICAL_VALIDATION_PENDING",
-        "Robot": "ROBOT_PHYSICAL_VALIDATION_PENDING",
+        "GPU": "NOT_RUN",
+        "K8s": "NOT_RUN",
+        "Streaming": "NOT_RUN",
+        "Robot": "NOT_RUN",
     }
     for name, tag in physical.items():
-        checks[f"physical_{name.lower()}"] = {"status": tag, "note": "需要真实硬件验证"}
+        checks[f"physical_{name.lower()}"] = {
+            "status": tag,
+            "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新",
+        }
 
     # 5) 汇总
-    all_pass = all(
-        c.get("status") in {"PASS", "PHYSICAL_PENDING"} or c["status"].endswith("_PENDING")
-        for c in checks.values()
-    )
-    for c in checks.values():
-        if c["status"].endswith("_PENDING"):
-            c["status"] = "PHYSICAL_VALIDATION_PENDING"
     software_failed = any(
         c["status"] == "FAIL" for c in checks.values()
     )

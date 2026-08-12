@@ -101,23 +101,29 @@ def _op_status(op_id: str) -> tuple[str, str | None, str | None]:
 
 def test_long_running_operation_renews_lease(monkeypatch):
     """长 provision（> lease 时长）：heartbeat 持续续期，最终 SUCCEEDED。"""
-    OperationWorker.LEASE_SECONDS = 0.2
-    OperationWorker.HEARTBEAT_INTERVAL = 0.05
-    with Factory() as db:
-        _seed(db)
-        wid = _make_ws(db)
-        orchestrator = WorkspaceOrchestrator(
-            Factory, SlowMockProvider(delay=0.6), Path("/tmp/test-fencing2")  # noqa: S108
-        )
-    worker = OperationWorker(Factory, orchestrator)
-    op = worker.enqueue(wid, OperationType.PROVISION)
-    assert op is not None
+    old_lease = OperationWorker.LEASE_SECONDS
+    old_hb = OperationWorker.HEARTBEAT_INTERVAL
+    try:
+        OperationWorker.LEASE_SECONDS = 0.5
+        OperationWorker.HEARTBEAT_INTERVAL = 0.1
+        with Factory() as db:
+            _seed(db)
+            wid = _make_ws(db)
+            orchestrator = WorkspaceOrchestrator(
+                Factory, SlowMockProvider(delay=1.2), Path("/tmp/test-fencing2")  # noqa: S108
+            )
+        worker = OperationWorker(Factory, orchestrator)
+        op = worker.enqueue(wid, OperationType.PROVISION)
+        assert op is not None
 
-    processed = worker.tick_once()  # 同步执行（0.6s > lease 0.2s，依赖 heartbeat 续期）
-    assert processed == 1
-    status, owner, _ = _op_status(op.id)
-    assert status == OperationStatus.SUCCEEDED.value
-    assert owner == worker.worker_id
+        processed = worker.tick_once()  # 同步执行（1.2s > lease 0.5s，依赖 heartbeat 续期）
+        assert processed == 1
+        status, owner, _ = _op_status(op.id)
+        assert status == OperationStatus.SUCCEEDED.value
+        assert owner == worker.worker_id
+    finally:
+        OperationWorker.LEASE_SECONDS = old_lease
+        OperationWorker.HEARTBEAT_INTERVAL = old_hb
 
 
 def test_expired_worker_cannot_finish_after_reclaim():
