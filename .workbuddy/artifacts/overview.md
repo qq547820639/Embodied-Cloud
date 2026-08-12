@@ -1,53 +1,46 @@
-# EmbodiedCloud v0.2.1 + v0.3.0 — 交付总结
+# EmbodiedCloud v0.3.0 Acceptance Hardening — 交付总结
 
-> 日期：2026-08-12 · 分支：main · 版本：0.2.0 → 0.3.0（软件面）
-> 仓库：github.com/qq547820639/Embodied-Cloud（工作树 CLEAN，全部提交已落）
+> 日期：2026-08-12 · 分支：main · 版本：0.3.0（软件面完成）
+> 数据来源：docs/VALIDATION.json（`make validate` 自动生成，CI freshness 门禁）
 
 ## 交付概览
 
-- **TL;DR**：消灭 GPU 双重调度（GpuScheduler 唯一权威，测试证明 DB↔docker 一致），
-  并完成 v0.2.1 Correctness Hotfix + v0.3.0 Runtime Correctness 全部软件面。
-- **测试**：152 passed + 2 skipped（k8s_integration 无集群正确标记 PENDING）
-- **Lint / Typecheck / Migration / OpenAPI**：全绿；5 级迁移链 empty→head 通过
-- **提交**：本轮 22 个 commit（功能 10 + 文档 3 + 修复/样式 9），工作树 CLEAN
+- **TL;DR**：v0.3.0 全部软件 acceptance gate 通过（182 passed + 1 skipped），
+  发布产物 embodiedcloud-0.3.0 已生成并通过 archive 清洁验证。
+- **验证**：`make check` 全绿（lint/type/test 182+1）· migration 8 级链 ·
+  build · smoke（SMOKE_OK）· release 全流程 · OpenAPI/VALIDATION freshness
+- **提交**：本轮 16 个 commit，工作树 CLEAN
 
-## 已落地（VERIFIED PASS，全部有测试证明）
+## VERIFIED PASS（自动测试证明）
 
-| 模块 | 关键变更 |
+| § | 内容 |
 |---|---|
-| GPU 单一权威 | `_choose_gpu()` 删除；typed ResourceReservation；`--gpus device=N` 与 DB GpuAllocation 完全一致（test_gpu_single_authority 5 用例） |
-| Provider 契约 | health/provision/start/stop/destroy/inspect/logs/reconcile + RuntimeState 三实现统一 |
-| Provision 回滚 | 补偿事务：任意步骤失败清理全部下游资源（6 用例） |
-| Durable ops | WorkspaceOperation + DB worker（lease/过期 reclaim/串行/重试），替换 threading.Thread（10 用例） |
-| Reconcile | 基于 runtime 事实收敛，不再无条件停 RUNNING；幂等（7 用例） |
-| Streaming 耦合 | stop/destroy 先终结流会话 + 释放端口（4 用例） |
-| Soft delete | tombstone（DELETED+deleted_at），API 默认不可见，admin 审计 |
-| Immutable versions | TemplateVersion：UNIQUE(template_id,version)，seed 不覆盖 released（6 用例） |
-| Billing policy | 负余额/课程配额 launch 前门禁（402），结算幂等（5 用例） |
-| 凭据加密 | Workspace.password Fernet 落库，access 解密；日志脱敏（3 用例） |
-| Warm pool | 真实 claim 状态机 PREWARMING→READY→CLAIMING→CLAIMED，原子抢占并发测试（5 用例） |
-| Deployment 校验 | verify 必须真实 download 后执行（防绕过），tampered/mismatch/幂等（5 用例） |
-| Object storage | ArtifactStore Protocol + Local 实现 + S3 明确 BLOCKED；path traversal 防护（9 用例） |
-| Observability | launch/failed/seconds/gpu_seconds 接入真实业务路径 |
-| K8s | GPU limit/nodeSelector 来自 reservation；RBAC/NetworkPolicy 清单；integration marker |
-| 前端 | 统一 API wrapper（typed error）；workspace 日志查看 |
+| §2 | K8s offline 隔离：model_factory 注入，offline 测试零 Kubernetes SDK 依赖（blocked-import 证明） |
+| §3 | K8s inventory 真实路径：node nvidia.com/gpu capacity → GpuHost/Gpu（capacity reservation，device 分配归 Device Plugin） |
+| §4 | K8s integration harness 真实全流程（无 NotImplementedError；无集群 SKIP） |
+| §5 | **Operation lease/fencing（P0）**：lease_owner/fencing_token/heartbeat_at；原子 claim；执行期心跳续期；finish 必须 fencing（LeaseLostError）；SQL 层比较 |
+| §6 | Warm pool 真实 launch 路径（POST /api/workspaces → BillingPolicy → claim） |
+| §7 | **Warm pool credential rotation**：三 provider 实现；rotation 失败不得交付（DRAINING + fallback） |
+| §8 | Warm pool 指标 COUNT(*) 真实计数 |
+| §9 | **ArtifactStore 集成**：DeploymentService 走 store 协议（object_key/content_type/store_name） |
+| §10 | **Edge 上报 checksum**：report-checksum 协议，server 比较；防绕过/防 replay |
+| §11 | **Template.current_version_id** 确定性指针；Artifact/Deployment 版本真相 |
+| §12 | **Billing 预授权** + active-runtime quota monitor（透支优雅停止，幂等） |
+| §13 | **凭据生产安全**：生产 provider 必须显式密钥；enc: 解密失败 fail closed |
+| §14 | validate_release.py → VALIDATION.json/.md（CI freshness） |
+| §15 | 版本统一 0.3.0（单一来源） |
+| §16 | release archive 清洁验证（实测通过） |
 
-## IMPLEMENTED / PHYSICAL VALIDATION PENDING
+## PHYSICAL_VALIDATION_PENDING（不假装 PASS）
 
-- `GPU_PHYSICAL_VALIDATION_PENDING`：Docker GPU runtime（G1–G4 脚本就绪，无 GPU 主机）
-- `K8S_PHYSICAL_VALIDATION_PENDING`：真实集群验证（pytest -m k8s_integration 正确 skip）
-- `STREAMING_PHYSICAL_VALIDATION_PENDING`：真实 WebRTC 媒体面
-- `ROBOT_PHYSICAL_VALIDATION_PENDING`：Sim2Real / RobotDriver 真机
-- Warm pool SLA（P50<15s/P95<30s）需真实 GPU 实测
+GPU（G1–G4 脚本就绪）· K8s（pytest -m k8s_integration 正确 skip）· Streaming · Robot · Warm pool SLA
 
 ## BLOCKED_EXTERNAL_DEPENDENCY
 
-- NGC 凭据 → workspace 镜像构建 + image_digest 回填
-- PostgreSQL / 真实 K8s 集群 / S3 凭据 → 生产模式验证
-- Python lockfile / SBOM（P2 供应链项）
+NGC 凭据（镜像 digest 回填）· PostgreSQL 生产验证 · S3 凭据 · lockfile/SBOM（P2）
 
-## 下一步
+## NEXT PHYSICAL ACTIONS
 
-1. GPU 主机上跑 `make gpu-preflight && make gpu-test`（G1–G4）
-2. K8s 集群上 `EMBODIEDCLOUD_K8S_TEST=1 pytest -m k8s_integration`
-3. v0.3.1 剩余：真实集群 GPU inventory adapter 验证
+1. GPU 主机：`make gpu-preflight && make gpu-test`
+2. K8s 集群：`EMBODIEDCLOUD_K8S_TEST=1 pytest -m k8s_integration`
+3. 生产：`EMBODIEDCLOUD_BILLING_ENFORCE_PREAUTHORIZATION=true` + `EMBODIEDCLOUD_WORKSPACE_CREDENTIAL_KEY=<强密钥>` + PostgreSQL
