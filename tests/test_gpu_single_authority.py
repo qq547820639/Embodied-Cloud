@@ -220,7 +220,7 @@ def test_concurrent_workspace_gpu_allocation(monkeypatch, tmp_path):
 
 
 def test_gpu_release_after_stop(monkeypatch, tmp_path):
-    provider, orchestrator, _ = _setup(monkeypatch, tmp_path)
+    _, orchestrator, _ = _setup(monkeypatch, tmp_path)
 
     with Factory() as db:
         _add_template(db)
@@ -243,7 +243,7 @@ def test_gpu_release_after_stop(monkeypatch, tmp_path):
 
 
 def test_gpu_release_after_destroy(monkeypatch, tmp_path):
-    provider, orchestrator, _ = _setup(monkeypatch, tmp_path)
+    _, orchestrator, _ = _setup(monkeypatch, tmp_path)
 
     with Factory() as db:
         _add_template(db)

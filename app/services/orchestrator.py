@@ -1,3 +1,4 @@
+import contextlib
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -91,12 +92,19 @@ class WorkspaceOrchestrator:
                     memory_mb=gpu.memory_total,
                 )
                 # 2) provider 严格按 reservation 绑定资源，禁止二次决策
-                result = self.provider.provision(
-                    workspace,
-                    template,
-                    self.workspace_root / workspace.id,
-                    reservation,
-                )
+                try:
+                    result = self.provider.provision(
+                        workspace,
+                        template,
+                        self.workspace_root / workspace.id,
+                        reservation,
+                    )
+                except Exception:
+                    # 补偿回滚：清理 provider 已创建的下游资源（容器/Pod/PVC/Service），
+                    # 幂等（container_name 未落库时按 workspace.id 推导）
+                    with contextlib.suppress(Exception):
+                        self.provider.destroy(workspace)
+                    raise
                 workspace.ide_port = result.ide_port
                 workspace.signal_port = result.signal_port
                 workspace.media_port = result.media_port

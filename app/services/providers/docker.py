@@ -195,8 +195,10 @@ class DockerProvider:
             self._run(["docker", "stop", "-t", "20", workspace.container_name], check=False)
 
     def destroy(self, workspace: Workspace) -> None:
-        if workspace.container_name:
-            self._run(["docker", "rm", "-f", workspace.container_name], check=False)
+        """删除容器（幂等）。container_name 未持久化（如 provision 中途失败）时
+        按命名约定 ec-{workspace.id[:12]} 推导，保证补偿清理可达。"""
+        container_name = workspace.container_name or f"ec-{workspace.id[:12]}"
+        self._run(["docker", "rm", "-f", container_name], check=False)
 
     def inspect(self, workspace: Workspace) -> dict:
         """读取容器实况：running/restarting/exited/absent。"""

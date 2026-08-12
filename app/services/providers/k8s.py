@@ -91,6 +91,24 @@ class KubernetesProvider:
         return f"ec-pvc-{workspace.id[:12]}"
 
     # ------------------------------------------------------------------
+    # 补偿清理（provision 中途失败时删除已创建资源；幂等，404 视为成功）
+    # ------------------------------------------------------------------
+
+    def _try_delete_service(self, core: Any, ns: str, name: str) -> None:
+        try:
+            core.delete_namespaced_service(name=name, namespace=ns)
+        except Exception as exc:
+            if getattr(exc, "status", None) != 404:
+                raise RuntimeError(f"补偿清理 Service {name} 失败: {self._describe(exc)}") from exc
+
+    def _try_delete_pvc(self, core: Any, ns: str, name: str) -> None:
+        try:
+            core.delete_namespaced_persistent_volume_claim(name=name, namespace=ns)
+        except Exception as exc:
+            if getattr(exc, "status", None) != 404:
+                raise RuntimeError(f"补偿清理 PVC {name} 失败: {self._describe(exc)}") from exc
+
+    # ------------------------------------------------------------------
     # WorkspaceProvider 接口
     # ------------------------------------------------------------------
 
@@ -161,6 +179,8 @@ class KubernetesProvider:
         try:
             core.create_namespaced_service(namespace=ns, body=service)
         except Exception as exc:
+            # 补偿：PVC 已创建 → 删除，避免孤儿 volume
+            self._try_delete_pvc(core, ns, pvc_name)
             raise RuntimeError(f"创建 Service {deployment_name} 失败: {self._describe(exc)}") from exc
 
         # 3) Deployment：不设置 privileged / docker.sock / hostNetwork（默认隔离）
@@ -216,6 +236,9 @@ class KubernetesProvider:
         try:
             apps.create_namespaced_deployment(namespace=ns, body=deployment)
         except Exception as exc:
+            # 补偿：清理已创建的 Service + PVC，避免孤儿资源
+            self._try_delete_service(core, ns, deployment_name)
+            self._try_delete_pvc(core, ns, pvc_name)
             raise RuntimeError(f"创建 Deployment {deployment_name} 失败: {self._describe(exc)}") from exc
 
         return ProvisionResult(
