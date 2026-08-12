@@ -340,6 +340,6 @@ def test_offline_provision_never_imports_kubernetes_sdk(tmp_path, monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", blocked)
-    provider, fake = make_provider()
+    provider, _ = make_provider()
     result = provider.provision(make_workspace(), make_template(), tmp_path / "ws", make_reservation())
     assert result.container_name == DEPLOYMENT_NAME
