@@ -88,9 +88,9 @@ def _running_workspace_with_stream(provider=None, orchestrator=None) -> tuple[Wo
     """创建 RUNNING workspace + 一个 READY 的 streaming session。"""
     provider = provider or TrackingMockProvider()
     streaming = StreamingSessionService(Factory)
-    # noqa: S108 测试隔离目录
+    # S108: /tmp 为测试隔离目录（有意使用）
     orchestrator = orchestrator or WorkspaceOrchestrator(
-        Factory, provider, Path("/tmp/test-stream-ws"), streaming=streaming
+        Factory, provider, Path("/tmp/test-stream-ws"), streaming=streaming  # noqa: S108
     )
     with Factory() as db:
         _seed(db)
