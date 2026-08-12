@@ -10,7 +10,6 @@ release → destroy → resource cleanup。
 
 import os
 import shutil
-from pathlib import Path
 
 import pytest
 
@@ -36,7 +35,7 @@ def cluster_ready() -> bool:
         return False
     import subprocess
 
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603 仅受控 kubectl 探测（固定参数）
         [KUBECTL, "get", "nodes", "-o", "jsonpath={.items[*].status.allocatable.nvidia\\.com/gpu}"],
         text=True,
         capture_output=True,

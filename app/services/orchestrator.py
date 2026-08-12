@@ -1,4 +1,5 @@
 import contextlib
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -140,6 +141,15 @@ class WorkspaceOrchestrator:
         workspace.status = WorkspaceStatus.QUEUED.value
         workspace.error_message = None
         db.commit()
+        # §25：launch 指标（含时长观测）
+        from ..metrics import (
+            record_workspace_launch_duration,
+            record_workspace_launch_failure,
+            record_workspace_launch_start,
+        )
+
+        record_workspace_launch_start(template.id, workspace.provider)
+        launch_started = time.monotonic()
         try:
             # 1) 原子分配 GPU（GpuScheduler 是唯一 GPU reservation 决策入口）
             gpu = self.scheduler.allocate(
@@ -187,8 +197,10 @@ class WorkspaceOrchestrator:
             workspace.status = WorkspaceStatus.RUNNING.value
             workspace.started_at = utcnow()
             workspace.stopped_at = None
+            record_workspace_launch_duration(template.id, time.monotonic() - launch_started)
         except Exception as exc:
             # 盲捕获是有意设计：provider/scheduler 边界任意异常 → FAILED（ADR 0002）
+            record_workspace_launch_failure(template.id, workspace.provider)
             self._fail(db, workspace, str(exc))
             raise
         db.commit()
@@ -244,6 +256,10 @@ class WorkspaceOrchestrator:
             self.ledger.settle_workspace_run(
                 db, workspace, run_seconds, workspace.started_at.isoformat()
             )
+            # §25：实际计费 GPU 秒指标
+            from ..metrics import record_gpu_seconds
+
+            record_gpu_seconds(run_seconds)
         # 释放 GPU（stop 后释放；幂等）
         self.scheduler.release(db, workspace.id)
         workspace.status = WorkspaceStatus.STOPPED.value

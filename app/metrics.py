@@ -56,6 +56,18 @@ STREAM_FAILURE_TOTAL = Counter(
     "Total streaming session failures",
     ["workspace_id"],
 )
+WARM_POOL_READY = Gauge(
+    "warm_pool_ready",
+    "Number of READY warm runtime workspaces",
+)
+WARM_POOL_CLAIM_TOTAL = Counter(
+    "warm_pool_claim_total",
+    "Total warm pool claim attempts",
+)
+WARM_POOL_CLAIM_FAILED = Counter(
+    "warm_pool_claim_failed",
+    "Total failed warm pool claims (race/empty)",
+)
 
 
 def record_workspace_launch_start(template_id: str, provider: str) -> None:

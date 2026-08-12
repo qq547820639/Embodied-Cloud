@@ -105,6 +105,17 @@ class OperationStatus(StrEnum):
     FAILED = "failed"
 
 
+class WarmPoolState(StrEnum):
+    """Warm pool 真实状态机（§18）：READY 的 runtime 没有用户归属/用户数据。"""
+
+    PREWARMING = "prewarming"
+    READY = "ready"
+    CLAIMING = "claiming"
+    CLAIMED = "claimed"
+    DRAINING = "draining"
+    FAILED = "failed"
+
+
 # ---------------------------------------------------------------------------
 # Identity / Auth
 # ---------------------------------------------------------------------------
@@ -260,6 +271,8 @@ class Workspace(Base):
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # soft delete tombstone：destroy 后行保留（billing/audit/deployment history/安全调查）
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    # warm pool 状态（§18）：None = 普通 workspace；否则为池状态机
+    warm_pool_state: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     accumulated_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
