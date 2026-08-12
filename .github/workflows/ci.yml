@@ -18,6 +18,8 @@ jobs:
         run: make typecheck
       - name: Unit + integration tests
         run: make test
+      - name: OpenAPI freshness
+        run: make api-docs && git diff --exit-code docs/openapi.json
       - name: Build artifact
         run: make build
       - name: Smoke (mock mode)

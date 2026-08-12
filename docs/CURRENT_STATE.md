@@ -1,73 +1,86 @@
 # CURRENT_STATE — EmbodiedCloud
 
-> 版本：0.2.0（2026-08-12）。结论依据：本机实际执行结果。
-> 环境：macOS（Python 3.12.13 / uv / 无 Docker daemon / 无 NVIDIA GPU / 无 NGC 凭据 / 无真实机器人）
+> 版本：0.2.0（基线）→ 正在推进 v0.2.1 / v0.3.0。
+> 更新：2026-08-12（本次为真实 baseline audit 结果，非复制旧文档结论）。
+> 环境：macOS（Python 3.12.13 / venv / 无 Docker daemon / 无 NVIDIA GPU / 无 NGC 凭据 / 无真实机器人）。
 
-## 1. 执行记录（v0.2.0 交付）
+## 1. 实际执行记录（本次验证）
 
 | 审计项 | 命令 | 结果 |
 |---|---|---|
-| 安装 | `make install`（python3.12 venv） | PASS |
-| Lint | `make lint`（ruff + shell syntax） | PASS（0 errors） |
-| Type | `make typecheck`（mypy） | PASS（36 files） |
-| 测试 | `make test`（pytest） | PASS（84 passed） |
-| 迁移 | `alembic upgrade head / downgrade base` 循环 | PASS（tests/test_migrations.py） |
-| 构建 | `make build` | PASS（wheel + sdist） |
-| Smoke | `make smoke`（auth 全流程 + metrics） | PASS |
-| Release | `scripts/release.sh` | PASS（checksums + VALIDATION_STATUS.md） |
-| CLI | `python -m app.cli bootstrap-admin/list-gpus/show-usage` | PASS |
-| API 端到端 | 注册→模板→建工作区→running→access→usage→stop→delete | PASS |
-| 隔离 | User A 读/改/删 User B workspace | 404（tests/test_isolation.py 3 用例） |
-| 调度并发 | 8 线程抢 2 GPU | 无重复分配（tests/test_scheduler.py） |
-| Ledger 幂等 | 同运行段重复结算 | 不重复扣款（tests/test_ledger.py） |
-| Secret 扫描 | grep 全库 | PASS（无 hard-coded secret） |
+| 仓库状态 | `git status` | CLEAN（main @ e69f67b，与 origin/main 一致，无 tag） |
+| 版本 | `pyproject.toml` / CHANGELOG | v0.2.0 |
+| 测试 | `.venv/bin/python -m pytest -q` | PASS（**84 passed**） |
+| Lint | `ruff check app tests` | PASS（All checks passed） |
+| Type | `mypy app` | PASS（36 source files） |
+| 迁移 | `tests/test_migrations.py`（含于 84 用例） | PASS |
+| 前端 | `app/static/app.js` | 存在非 2xx 无 typed error 问题（见 §2） |
+| OpenAPI | `docs/openapi.json` 与真实 app 比对 | 待验证（本次重新生成） |
 
-## 2. 分项状态
+## 2. 审计发现（VERIFIED 缺陷，本次代码阅读确认）
 
-### Working（本环境已验证）
-- 控制面：FastAPI 全 API 面（auth/templates/workspaces/gpus/usage/ledger/streaming/courses/edge/deployments/metrics/health）
-- Auth + 隔离：注册/登录/登出/me；owner/org 校验；PBKDF2 哈希会话
-- GPU Scheduler：原子分配/释放/并发防重/unhealthy/draining/crash recovery
-- 不可变 CreditLedger + 幂等 usage 结算
-- Alembic 迁移体系（SQLite up/down 验证；PostgreSQL 配置就绪未实测）
-- Template Registry（5 SKU，version locked）
-- Streaming 状态机（starting/ready/connected/disconnected/failed，模拟链路测试）
-- Warm Pool manager + benchmark harness
-- Course/Lab/Assignment/Submission 流程
-- Edge Agent + RobotDriver(Mock) + Deployment 流程（checksum/verify）
-- K8sWorkspaceProvider（离线单测 8 用例；集群连接 BLOCKED）
-- Observability：/metrics + JSON 日志 + request_id + 脱敏
-- CLI 运维工具 + 静态 UI（登录注册 + 工作区管理）
-- G1–G4 验收脚本 + release.sh
+| # | 缺陷 | 位置 | 影响 | 优先级 |
+|---|---|---|---|---|
+| B1 | **usage balance bug**：standalone user（无 org、非 admin）`credits_balance` 恒为 0，即使有 CreditLedger 记录 | `app/routers/usage.py:43` | 计费展示错误 | P0 (v0.2.1) |
+| B2 | **GPU 双重调度**：`GpuScheduler.allocate()` 已分配 GPU，`DockerProvider.provision()` 又调用 `_choose_gpu()` 独立选 GPU | `app/services/providers/docker.py:84,139` | 控制面分配 A、实际容器跑 B，违反 ONE RESOURCE = ONE SOURCE OF TRUTH | P0 (v0.3.0) |
+| B3 | **镜像决策错误**：DockerProvider 使用 `settings.workspace_image` 而非 `template.image` | `docker.py:166` | 模板 A/B 可能跑同一镜像 | P0 (v0.3.0) |
+| B4 | **threading.Thread 异步启动**：进程重启丢任务、无 lease/heartbeat、无串行保证 | `app/services/orchestrator.py:60` | 恢复语义脆弱 | P0 |
+| B5 | **crash_recovery 停掉所有 RUNNING**：无 runtime inspect/reconcile | `orchestrator.py:181-198` | 控制面重启即杀真实容器 | P0 |
+| B6 | **destroy 硬删除**：`db.delete(workspace)`，`WorkspaceStatus.DELETED` 成死代码 | `orchestrator.py:177` | 无 billing/audit/安全追溯 | P1 |
+| B7 | **Streaming 生命周期未耦合**：stop/destroy 不调用 `StreamingSessionService.stop` | `orchestrator.py:118-178` | 会话悬挂、端口不释放 | P1 |
+| B8 | **Provider Protocol 不完整**：仅 health/provision/stop/destroy；docker/mock 缺 start/inspect/logs/reconcile | `app/services/providers/base.py` | 无法 reconcile | P0 |
+| B9 | **K8s 无 GPU 资源声明**：无 `nvidia.com/gpu` limit、无 nodeSelector/affinity | `k8s.py:153-199` | Pod 不保证绑定 GPU | P1 |
+| B10 | **前端非 2xx 不抛 typed error**：body 解析后不 throw，调用方拿不到 FastAPI detail | `app/static/app.js:10` | 错误展示不一致 | P1 (v0.2.1) |
+| B11 | `Workspace.password` 明文持久化 | `models.py:201`、`orchestrator.py:99` | 凭据长期落库 | P1 |
+| B12 | Provision 无补偿回滚：GPU allocate 成功后 provider 失败，仅 `_fail` 释放 GPU，但端口/容器/volume 不清理 | `orchestrator.py:104-107` | 孤儿资源 | P0 |
 
-### Partially Working
-- Docker GPU Provider：代码与单测完整，未对真实 Docker daemon/GPU 执行
-- K8s Provider：单测通过，未对真实集群执行
+## 3. 分项状态（按验证结果分类）
+
+### VERIFIED（本环境实际验证通过）
+- 控制面全 API 面：auth/templates/workspaces/gpus/usage/ledger/streaming/courses/edge/deployments/metrics/health
+- Auth + owner/org 隔离（tests/test_isolation.py）
+- GPU Scheduler 原子分配/释放/并发防重（tests/test_scheduler.py）
+- 不可变 CreditLedger + 幂等 usage 结算（tests/test_ledger.py）
+- Alembic 迁移 up/down（tests/test_migrations.py）
+- Template Registry（5 SKU，version locked 声明）
+- Streaming 状态机（模拟链路，tests/test_streaming.py）
+- Warm Pool manager + benchmark harness（tests/test_warmpool.py）
+- Course/Edge/Deployment/Robot(Mock) 流程
+- K8s Provider 离线单测（fake client，tests/test_k8s_provider.py）
+- Observability：/metrics + 结构化日志 + request_id + 脱敏
+- CLI + 静态 UI + G1–G4 验收脚本 + release.sh
+
+### PARTIAL
+- DockerProvider：单测完整，**真实 Docker daemon/GPU 未执行**；且存在 B2/B3 双重调度缺陷（v0.3.0 修复）
 - Streaming：控制面状态机完整，真实 WebRTC 媒体链路未验证
+- OpenAPI：docs/openapi.json 存在，freshness 检查本次加入
 
-### Broken
-- 无（本环境可复现范围内 0 失败）
+### BROKEN
+- `GET /api/usage` standalone user balance（B1）→ v0.2.1 修复
+- Provider Protocol 契约不完整（B8）→ v0.2.1 修复
 
-### Mock Only
-- GPU 分配（mock-gpu-0001/0002 虚拟 inventory）
-- 浏览器 IDE / Streaming 视图（demo 页）
+### MOCK_ONLY
+- GPU inventory（mock-gpu-0001/0002）、浏览器 IDE/Streaming demo 页
+- RobotDriver（MockRobotDriver 无物理硬件）
 
-### Blocked External（本环境无法完成，不标 PASS）
-- Docker daemon / NVIDIA Container Toolkit → G1
-- NVIDIA GPU → G2/G3/G4
+### BLOCKED_EXTERNAL_DEPENDENCY（本环境无法完成，不标 PASS）
+- Docker daemon / NVIDIA Container Toolkit → G1；NVIDIA GPU → G2–G4
 - NGC 凭据 → workspace 镜像构建
-- 真实机器人 → Sim2Real（G5.2）
+- 真实机器人 → Sim2Real
 - PostgreSQL / 真实 K8s 集群 → 生产模式验证
 
-## 3. 结论
+## 4. 当前 Roadmap 状态
 
-v0.2.0 交付了 P0–P2 全部软件工程能力：身份与隔离、GPU 调度、不可变计费、Template Registry、
-Streaming 状态机、Warm Pool、高校课程、Edge/Sim2Real 模块、K8s Provider、可观测性、CI/CD、release 流程。
-84 个测试覆盖核心模块与主路径；lint/type/build/smoke 全绿。全部真实硬件验收项
-（G1–G4、Streaming 媒体面、Sim2Real 真机）如实标记 BLOCKED_EXTERNAL_DEPENDENCY，未伪造 PASS。
+| 版本 | 内容 | 状态 |
+|---|---|---|
+| v0.2.1 | Correctness Hotfix：usage balance / 前端 error handling / Provider Protocol / OpenAPI | 🔄 进行中 |
+| v0.3.0 | Single GPU Authority：ResourceReservation、删 `_choose_gpu`、template.image 真实化、一致性测试 | ⏳ 下一步 |
+| v0.3.1 | Kubernetes Runtime：GPU inventory adapter、nvidia.com/gpu、RBAC/PVC/Service/NetworkPolicy | ⏳ |
+| v0.4.0+ | Cloud Beta / Production / Sim2Real / v1.0.0-rc1 | ⏳ |
 
-## 4. 遗留风险
-- 计费汇率为固定 1s=1 credit 展示口径；真实定价费率需产品决策后入 ledger service。
-- Streaming 单实例固定端口策略仍为保守 MVP 决策（ADR 0001）。
-- Warm Pool 性能目标（P50<15s/P95<30s）需真实 GPU 实测调优。
-- PostgreSQL/Redis/对象存储的生产拓扑（docs/K8S_PRODUCTION.md）未在本环境实测。
+## 5. 结论
+
+v0.2.0 基线全部自动验证通过（84 tests / lint / mypy / build / smoke）。但代码审计确认
+**P0 正确性缺陷**：GPU 双重调度（B2）、usage balance（B1）、无补偿回滚（B12）、threading 异步
+（B4）、无 reconcile（B5/B8）。v0.2.1 + v0.3.0 的目标是消灭这些缺陷并全部用自动测试证明。
+硬件验收项（G1–G4、Streaming 媒体面、Sim2Real）持续标记 BLOCKED_EXTERNAL_DEPENDENCY，不伪造 PASS。
