@@ -372,6 +372,54 @@ class KubernetesProvider:
         except Exception:
             return ""
 
+    def wait_ready(self, workspace, template, timeout_seconds: int = 120) -> bool:
+        """§9 readiness：Deployment available_replicas>=1 + Pod Ready + Service 端点。"""
+        import time as _time
+
+        deployment_name = workspace.container_name or self._deployment_name(workspace)
+        deadline = _time.monotonic() + max(1, timeout_seconds)
+        try:
+            api = self._require_client()
+            apps = api.AppsV1Api()
+            core = api.CoreV1Api()
+        except Exception:
+            return False
+        while _time.monotonic() < deadline:
+            try:
+                status = apps.read_namespaced_deployment_status(
+                    name=deployment_name, namespace=self.settings.k8s_namespace
+                ).status
+                if int(getattr(status, "available_replicas", None) or 0) < 1:
+                    _time.sleep(2)
+                    continue
+                # Pod Ready（所有容器 ready）
+                pods = core.list_namespaced_pod(
+                    namespace=self.settings.k8s_namespace,
+                    label_selector=f"app={deployment_name}",
+                )
+                if not pods.items:
+                    _time.sleep(2)
+                    continue
+                pod = pods.items[0]
+                if not (getattr(pod.status, "phase", "") == "Running"):
+                    _time.sleep(2)
+                    continue
+                conditions = {c.type: c.status for c in (getattr(pod.status, "conditions", None) or [])}
+                if conditions.get("Ready") != "True":
+                    _time.sleep(2)
+                    continue
+                # Service 端点健康（endpoints 非空）
+                eps = core.read_namespaced_endpoints(
+                    name=deployment_name, namespace=self.settings.k8s_namespace
+                )
+                subsets = getattr(eps, "subsets", None) or []
+                if subsets:
+                    return True
+                _time.sleep(2)
+            except Exception:
+                _time.sleep(2)
+        return False
+
     @property
     def supports_credential_rotation(self) -> bool:
         # K8s 通过 patch Deployment env → 滚动重启实现轮换

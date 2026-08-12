@@ -70,6 +70,18 @@ class WorkspaceProvider(Protocol):
     def inspect(self, workspace: Workspace) -> dict: ...
     def logs(self, workspace: Workspace, tail: int = 200) -> str: ...
     def reconcile(self, workspace: Workspace) -> RuntimeState: ...
+    def wait_ready(
+        self,
+        workspace: Workspace,
+        template: Template,
+        timeout_seconds: int = 120,
+    ) -> bool:
+        """§9 typed readiness：runtime 存在 + 健康 + IDE TCP/HTTP 可达 +
+        TemplateVersion.healthcheck 真实执行。
+
+        返回 False = 未就绪（调用方不得置 RUNNING，应 rollback → FAILED）。
+        """
+
     def rotate_credentials(self, workspace: Workspace, credentials: dict) -> bool:
         """轮换 runtime 凭据（§7，warm pool claim 用）。
 

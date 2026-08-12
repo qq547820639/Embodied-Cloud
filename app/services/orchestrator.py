@@ -41,6 +41,7 @@ class WorkspaceOrchestrator:
         streaming: StreamingSessionService | None = None,
         billing: "BillingPolicy | None" = None,
         credential_cipher=None,
+        ready_timeout_seconds: int = 120,
     ):
         self.session_factory = session_factory
         self.provider = provider
@@ -51,6 +52,7 @@ class WorkspaceOrchestrator:
         self.billing = billing
         # §20：控制面 DB 不保存明文密码（None 时=测试/无加密环境，直接存明文）
         self.credential_cipher = credential_cipher
+        self.ready_timeout_seconds = ready_timeout_seconds
 
     # ------------------------------------------------------------------
     # create
@@ -174,7 +176,8 @@ class WorkspaceOrchestrator:
                 gpu_index=gpu.gpu_index or 0,
                 memory_mb=gpu.memory_total,
             )
-            # 2) provider 严格按 reservation 绑定资源，禁止二次决策
+            # 2) provider 严格按 reservation 绑定资源，禁止二次决策；
+            #    §9 readiness gate 也在同一补偿域内（未就绪 → destroy + release）
             try:
                 result = self.provider.provision(
                     workspace,
@@ -182,6 +185,13 @@ class WorkspaceOrchestrator:
                     self.workspace_root / workspace.id,
                     reservation,
                 )
+                ready = self.provider.wait_ready(
+                    workspace, template, timeout_seconds=self.ready_timeout_seconds
+                )
+                if not ready:
+                    raise RuntimeError(
+                        f"runtime readiness timeout after {self.ready_timeout_seconds}s"
+                    )
             except Exception:
                 # 补偿回滚：清理 provider 已创建的下游资源（容器/Pod/PVC/Service），
                 # 幂等（container_name 未落库时按 workspace.id 推导）
@@ -219,6 +229,10 @@ class WorkspaceOrchestrator:
             self.scheduler.release(db, workspace.id)
         except Exception:
             db.rollback()
+        # FAILED 的 workspace 不得声称占有 GPU（字段一并清除）
+        workspace.gpu_id = None
+        workspace.gpu_index = None
+        workspace.gpu_name = None
 
     # ------------------------------------------------------------------
     # stop / destroy（同步 API 语义）

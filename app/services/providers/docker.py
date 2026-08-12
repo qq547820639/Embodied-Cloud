@@ -234,6 +234,61 @@ class DockerProvider:
             return ""
         return result.stdout
 
+    def wait_ready(self, workspace, template, timeout_seconds: int = 120) -> bool:
+        """§9 readiness：容器 running + IDE 端口 TCP/HTTP 可达 +
+        TemplateVersion.healthcheck 真实 exec（如配置）。"""
+        import time as _time
+
+        if not workspace.container_name:
+            return False
+        deadline = _time.monotonic() + max(1, timeout_seconds)
+        while _time.monotonic() < deadline:
+            try:
+                state = self.inspect(workspace)
+            except Exception:
+                state = {}
+            if not state.get("running"):
+                _time.sleep(2)
+                continue
+            ide_port = workspace.ide_port
+            # IDE TCP + HTTP 探测
+            if ide_port is not None:
+                import socket
+
+                tcp_ok = False
+                http_ok = False
+                try:
+                    with socket.create_connection(("127.0.0.1", ide_port), timeout=2):
+                        tcp_ok = True
+                except OSError:
+                    pass
+                if tcp_ok:
+                    try:
+                        import urllib.request
+
+                        with urllib.request.urlopen(
+                            f"http://127.0.0.1:{ide_port}/", timeout=2
+                        ) as resp:
+                            http_ok = resp.status < 500
+                    except Exception:
+                        http_ok = False
+                if not (tcp_ok and http_ok):
+                    _time.sleep(2)
+                    continue
+            # TemplateVersion.healthcheck 真实执行（容器内 exec）
+            hc = getattr(template, "healthcheck", None) or {}
+            command = hc.get("command") if isinstance(hc, dict) else None
+            if command:
+                result = self._run(
+                    ["docker", "exec", workspace.container_name, "sh", "-c", command],
+                    check=False,
+                )
+                if result.returncode != 0:
+                    _time.sleep(2)
+                    continue
+            return True
+        return False
+
     @property
     def supports_credential_rotation(self) -> bool:
         # 运行中容器 env 不可变 → 不支持运行时轮换 → Docker Warm Pool 默认禁用

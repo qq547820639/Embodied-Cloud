@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     eula_accepted: bool = False
     privacy_consent: bool = False
     default_idle_timeout_minutes: int = 60
+    # §9：provision readiness 等待超时（秒）
+    provision_ready_timeout_seconds: int = 120
 
     # --- billing（§12）---
     # 启动预授权（生产开启）：余额必须 ≥ minimum_launch_minutes × 60 credits 才能启动

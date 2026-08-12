@@ -129,6 +129,9 @@ class CapturingDockerProvider(DockerProvider):
     def health(self):
         return True, "fake"
 
+    def wait_ready(self, workspace, template, timeout_seconds: int = 120) -> bool:
+        return True
+
     def _streaming_workspace_running(self):
         return False
 

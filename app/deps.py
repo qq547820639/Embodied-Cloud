@@ -67,6 +67,7 @@ orchestrator = WorkspaceOrchestrator(
     ledger,
     billing=billing,
     credential_cipher=credential_cipher,
+    ready_timeout_seconds=settings.provision_ready_timeout_seconds,
 )
 worker = OperationWorker(SessionFactory, orchestrator)
 # §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用

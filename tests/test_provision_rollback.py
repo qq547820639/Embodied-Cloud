@@ -102,6 +102,9 @@ class FailingDockerProvider(DockerProvider):
     def health(self):
         return True, "fake"
 
+    def wait_ready(self, workspace, template, timeout_seconds: int = 120) -> bool:
+        return True  # 失败注入路径不达 ready；保险返回 True
+
     def _streaming_workspace_running(self):
         return False
 

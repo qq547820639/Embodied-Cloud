@@ -43,6 +43,9 @@ class CapturingDockerProvider(DockerProvider):
     def health(self):
         return True, "fake docker + gpu"
 
+    def wait_ready(self, workspace, template, timeout_seconds: int = 120) -> bool:
+        return True  # fake 环境模拟就绪
+
     def _streaming_workspace_running(self):
         return False
 
