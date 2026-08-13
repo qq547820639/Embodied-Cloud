@@ -22,6 +22,12 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+# nvidia-smi `--query-gpu=memory.total` 上报单位为 MiB；标称「N GB」的卡实际可用
+# MiB 常略低于 N*1024（如 24GB 卡上报 24564 MiB，比 24576 少 12 MiB）。分配时
+# 给需求 MiB 留一个小容差，避免「24GB 卡无法满足 24GB 模板」的误判。
+VRAM_TOLERANCE_MIB = 16
+
+
 @dataclass
 class GpuInfo:
     gpu_uuid: str
@@ -94,12 +100,14 @@ class GpuScheduler:
 
         返回已标记 ALLOCATED 的 Gpu（同一 db 会话内）。
         """
+        # 统一单位：模板需求 GB → MiB（1 GiB = 1024 MiB），再扣掉厂商预留容差
+        required_mib = gpu_requirement_gb * 1024 - VRAM_TOLERANCE_MIB
         candidates = (
             db.scalars(
                 select(Gpu)
                 .where(
                     Gpu.status == GpuStatus.AVAILABLE.value,
-                    Gpu.memory_total >= gpu_requirement_gb * 1024,
+                    Gpu.memory_total >= required_mib,
                 )
                 .order_by(Gpu.memory_total.asc())
                 .with_for_update(skip_locked=True)
@@ -195,26 +203,56 @@ def recover_stuck_workspaces(db: Session) -> list[str]:
 
 
 def recover_stuck_gpu_allocations(db: Session) -> None:
-    """释放所有无 RUNNING workspace 的孤儿 GPU 绑定（幂等）。"""
-    from ..models import Workspace
+    """释放所有非占用 workspace 的孤儿 GPU 绑定（幂等）。
 
-    running_ids = set(
+    占用判据（避免误释放进行中生命周期，防止同一物理 GPU 被二次分配 → 一卡双跑）：
+    - workspace 状态属于非终态 {QUEUED, PROVISIONING, RUNNING, STOPPING}
+    - 或存在 active operation（workspace_operations.status ∈ {PENDING, RUNNING, RETRYING}）
+    其余（workspace 不存在、终态 workspace 且无 active operation）的 GPU 绑定
+    视为孤儿，予以释放。
+    """
+    from ..models import OperationStatus, Workspace, WorkspaceOperation
+
+    occupied_ids = set(
         db.scalars(
-            select(Workspace.id).where(Workspace.status == WorkspaceStatus.RUNNING.value)
+            select(Workspace.id).where(
+                Workspace.status.in_(
+                    [
+                        WorkspaceStatus.QUEUED.value,
+                        WorkspaceStatus.PROVISIONING.value,
+                        WorkspaceStatus.RUNNING.value,
+                        WorkspaceStatus.STOPPING.value,
+                    ]
+                )
+            )
+        )
+    )
+    # active operation 的 workspace 也视为占用（终态 workspace 仍可能有 DESTROY/STOP 重试中）
+    occupied_ids |= set(
+        db.scalars(
+            select(WorkspaceOperation.workspace_id).where(
+                WorkspaceOperation.status.in_(
+                    [
+                        OperationStatus.PENDING.value,
+                        OperationStatus.RUNNING.value,
+                        OperationStatus.RETRYING.value,
+                    ]
+                )
+            )
         )
     )
     allocs = db.scalars(
         select(GpuAllocation).where(GpuAllocation.released_at.is_(None))
     ).all()
     for alloc in allocs:
-        if alloc.workspace_id not in running_ids:
+        if alloc.workspace_id not in occupied_ids:
             alloc.released_at = utcnow()
             db.delete(alloc)
-    # 无 RUNNING workspace 的孤儿 GPU 绑定全部归还（running_ids 为空时清所有绑定）
-    if running_ids:
+    # 归还所有非占用 workspace 的 GPU 绑定（occupied_ids 为空时清空所有绑定）
+    if occupied_ids:
         db.execute(
             update(Gpu)
-            .where(Gpu.workspace_id.notin_(running_ids))
+            .where(Gpu.workspace_id.notin_(occupied_ids))
             .values(status=GpuStatus.AVAILABLE.value, workspace_id=None, updated_at=utcnow())
         )
     else:

@@ -177,3 +177,102 @@ def test_docker_run_fallback_image_when_template_has_none(tmp_path, monkeypatch)
     )
     joined = " ".join(provider.commands[-1])
     assert "embodiedcloud/default-image:0.5.0" in joined
+
+
+def test_destroy_idempotent_when_no_such_container(monkeypatch, tmp_path):
+    """docker rm 返回「No such container」→ 幂等成功，不抛错。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = DockerProvider(settings)
+    ws = make_workspace()
+    ws.container_name = "ec-test"
+
+    def fake_run(args, *, check=True):
+        if args[:2] == ["docker", "rm"]:
+            return CompletedProcess(
+                args=args, returncode=1, stdout="", stderr="Error: No such container: ec-test"
+            )
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    provider.destroy(ws)  # 不应抛错
+
+
+def test_destroy_idempotent_when_container_absent_by_inspection(monkeypatch, tmp_path):
+    """docker rm 报错文案不含「No such container」，但 inspect 判定容器不存在 → 幂等成功。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = DockerProvider(settings)
+    ws = make_workspace()
+    ws.container_name = "ec-test"
+
+    def fake_run(args, *, check=True):
+        if args[:2] == ["docker", "rm"]:
+            return CompletedProcess(
+                args=args, returncode=1, stdout="", stderr="Error: container already gone"
+            )
+        if args[:2] == ["docker", "inspect"]:
+            return CompletedProcess(
+                args=args, returncode=1, stdout="", stderr="Error: No such object: ec-test"
+            )
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    provider.destroy(ws)  # 不应抛错
+
+
+def test_destroy_raises_when_container_still_exists(monkeypatch, tmp_path):
+    """docker rm 失败且 inspect 判定容器仍存在 → 上抛 RuntimeError，不吞错。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = DockerProvider(settings)
+    ws = make_workspace()
+    ws.container_name = "ec-test"
+
+    def fake_run(args, *, check=True):
+        if args[:2] == ["docker", "rm"]:
+            return CompletedProcess(
+                args=args, returncode=1, stdout="", stderr="Error: removal in progress"
+            )
+        if args[:2] == ["docker", "inspect"]:
+            # 容器仍存在 → 非幂等，必须上抛
+            return CompletedProcess(args=args, returncode=0, stdout="container-id\n", stderr="")
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="docker command failed"):
+        provider.destroy(ws)
+
+
+def test_destroy_raises_when_daemon_unavailable(monkeypatch, tmp_path):
+    """docker rm 失败且 inspect 也失败（daemon 不可用，无法确认 absent）→ 上抛，不吞错。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = DockerProvider(settings)
+    ws = make_workspace()
+    ws.container_name = "ec-test"
+
+    def fake_run(args, *, check=True):
+        if args[:2] in (["docker", "rm"], ["docker", "inspect"]):
+            return CompletedProcess(
+                args=args, returncode=1, stdout="", stderr="Cannot connect to the Docker daemon"
+            )
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="docker command failed"):
+        provider.destroy(ws)
+
+
+def test_stop_idempotent_when_no_such_container(monkeypatch, tmp_path):
+    """docker stop 对不存在的容器也应幂等成功（不因静默失败遗留错误状态）。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = DockerProvider(settings)
+    ws = make_workspace()
+    ws.container_name = "ec-test"
+
+    def fake_run(args, *, check=True):
+        if args[:2] == ["docker", "stop"]:
+            return CompletedProcess(
+                args=args, returncode=1, stdout="", stderr="Error: No such container: ec-test"
+            )
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    provider.stop(ws)  # 不应抛错

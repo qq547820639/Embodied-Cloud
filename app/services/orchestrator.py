@@ -343,20 +343,29 @@ class WorkspaceOrchestrator:
             db.rollback()
         try:
             self._settle_running_segment(db, workspace)
-        except Exception:
+        except Exception as exc:
             db.rollback()
+            # 结算失败不得静默丢账：留下可审计、可补偿的痕迹（error_message + ERROR 日志），
+            # 但不阻断资源释放与 DELETED 置位（修复方向是「可补偿」，不是「让 destroy 失败」）。
+            workspace.error_message = f"destroy settle failed: {exc}"
+            logger.error("workspace %s destroy settle failed: %s", workspace.id[:8], exc)
         try:
             self.provider.destroy(workspace)
-        finally:
-            try:
-                self.scheduler.release(db, workspace.id)
-            except Exception:
-                db.rollback()
-            # tombstone：状态 DELETED + deleted_at，行保留
-            workspace.status = WorkspaceStatus.DELETED.value
-            workspace.deleted_at = utcnow()
-            workspace.started_at = None
-            db.commit()
+        except Exception:
+            # provider 清理失败（如 docker daemon 不可用）→ 不得释放 GPU / 置 DELETED：
+            # 否则孤儿容器仍持有 --gpus device=N，却被释放 GPU → 一卡双跑。
+            # 上抛让 DESTROY operation 重试（ADR 0002 边界），重试时再补做清理。
+            db.rollback()
+            raise
+        try:
+            self.scheduler.release(db, workspace.id)
+        except Exception:
+            db.rollback()
+        # tombstone：状态 DELETED + deleted_at，行保留（仅 provider 清理成功后置位）
+        workspace.status = WorkspaceStatus.DELETED.value
+        workspace.deleted_at = utcnow()
+        workspace.started_at = None
+        db.commit()
 
     # ------------------------------------------------------------------
     # reconciliation（替代 crash_recovery 的"停掉所有 RUNNING"）

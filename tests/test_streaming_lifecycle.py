@@ -46,6 +46,7 @@ class TrackingMockProvider(MockProvider):
         self.stop_calls = 0
         self.destroy_calls = 0
         self.fail_stop_times = 0  # 前 N 次 stop 抛错
+        self.fail_destroy_times = 0  # 前 N 次 destroy 抛错
 
     def stop(self, workspace):
         self.stop_calls += 1
@@ -56,6 +57,9 @@ class TrackingMockProvider(MockProvider):
 
     def destroy(self, workspace):
         self.destroy_calls += 1
+        if self.fail_destroy_times > 0:
+            self.fail_destroy_times -= 1
+            raise RuntimeError("simulated: runtime destroy failure")
 
 
 def _seed(db) -> None:
@@ -222,3 +226,62 @@ def test_stop_is_idempotent_no_double_release():
         ws = db.get(Workspace, wid)
         assert ws.status == WorkspaceStatus.STOPPED.value
         assert db.scalar(select(Gpu)).status == GpuStatus.AVAILABLE.value
+
+
+def test_destroy_settle_failure_marks_auditable_and_still_releases():
+    """结算抛异常：destroy 仍完成资源释放 + tombstone，并留下可审计痕迹（error_message）。"""
+    orchestrator, wid, _ = _running_workspace_with_stream()
+
+    class FailingLedger:
+        def settle_workspace_run(self, db, workspace, seconds, started_iso):
+            raise RuntimeError("simulated ledger outage")
+
+    orchestrator.ledger = FailingLedger()
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        ws.started_at = datetime.now(UTC) - timedelta(seconds=30)
+        db.commit()
+        orchestrator.destroy(db, ws)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.DELETED.value
+        assert ws.deleted_at is not None
+        # 可审计痕迹：结算失败被记录，而非静默丢账
+        assert ws.error_message and "settle failed" in ws.error_message
+        # 资源释放不被结算失败阻断
+        assert db.scalar(select(Gpu)).status == GpuStatus.AVAILABLE.value
+        assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == wid)) is None
+
+
+def test_destroy_provider_failure_does_not_release_or_tombstone():
+    """provider.destroy 失败：不释放 GPU、不置 DELETED，异常上抛由 DESTROY 重试。"""
+    provider = TrackingMockProvider()
+    provider.fail_destroy_times = 1
+    orchestrator, wid, _ = _running_workspace_with_stream(provider=provider)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        with pytest.raises(RuntimeError, match="runtime destroy failure"):
+            orchestrator.destroy(db, ws)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        # 未 tombstone、GPU 未释放（容器可能仍持有 GPU，不能双跑）
+        assert ws.deleted_at is None
+        assert ws.status != WorkspaceStatus.DELETED.value
+        assert db.scalar(select(Gpu)).status == GpuStatus.ALLOCATED.value
+        assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == wid)) is not None
+
+    # 重试：provider 恢复后 destroy 完成清理
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        orchestrator.destroy(db, ws)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.DELETED.value
+        assert ws.deleted_at is not None
+        assert db.scalar(select(Gpu)).status == GpuStatus.AVAILABLE.value
+        assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == wid)) is None

@@ -62,6 +62,38 @@ class DockerProvider:
         )
         return workspace.container_name in result.stdout.splitlines()
 
+    def _run_checked(self, args: list[str], *, container_name: str) -> None:
+        """执行容器生命周期命令并校验 returncode。
+
+        容器不存在（幂等成功）时静默返回；其他失败（如 docker daemon 不可用）
+        上抛 RuntimeError —— 调用方据此阻断「置 DELETED + 释放 GPU」，由 reconcile
+        重试，避免孤儿容器仍持有 --gpus device=N 造成一卡双跑。
+        """
+        result = self._run(args, check=False)
+        if result.returncode == 0:
+            return
+        output = f"{result.stdout or ''}\n{result.stderr or ''}"
+        if "No such container" in output:
+            return  # 容器已不存在：幂等成功
+        # 兜底：rm/stop/start 报错文案各异，用 inspect 二次确认容器是否确实不存在。
+        # inspect 自身失败（如 daemon 不可用）时无法判定 absent → 视为真实失败上抛。
+        inspect = self._run(
+            ["docker", "inspect", "--format", "{{.Id}}", container_name], check=False
+        )
+        if inspect.returncode == 0:
+            # 容器仍存在 → 命令确实失败
+            raise RuntimeError(
+                f"docker command failed: {' '.join(args)} "
+                f"(rc={result.returncode}): {output.strip()[:400]}"
+            )
+        inspect_err = (inspect.stderr or "").lower()
+        if "no such" in inspect_err or "not found" in inspect_err:
+            return  # 容器确实不存在：幂等成功
+        raise RuntimeError(
+            f"docker command failed: {' '.join(args)} "
+            f"(rc={result.returncode}): {output.strip()[:400]}"
+        )
+
     def _streaming_workspace_running(self) -> bool:
         if shutil.which("docker") is None:
             return False
@@ -203,17 +235,21 @@ class DockerProvider:
     def start(self, workspace: Workspace) -> None:
         """从 STOPPED 恢复：docker start 已有容器（容器由 scheduler reservation 绑定）。"""
         if workspace.container_name:
-            self._run(["docker", "start", workspace.container_name], check=False)
+            self._run_checked(
+                ["docker", "start", workspace.container_name], container_name=workspace.container_name
+            )
 
     def stop(self, workspace: Workspace) -> None:
         if workspace.container_name:
-            self._run(["docker", "stop", "-t", "20", workspace.container_name], check=False)
+            self._run_checked(
+                ["docker", "stop", "-t", "20", workspace.container_name], container_name=workspace.container_name
+            )
 
     def destroy(self, workspace: Workspace) -> None:
         """删除容器（幂等）。container_name 未持久化（如 provision 中途失败）时
         按命名约定 ec-{workspace.id[:12]} 推导，保证补偿清理可达。"""
         container_name = workspace.container_name or f"ec-{workspace.id[:12]}"
-        self._run(["docker", "rm", "-f", container_name], check=False)
+        self._run_checked(["docker", "rm", "-f", container_name], container_name=container_name)
 
     def inspect(self, workspace: Workspace) -> dict:
         """读取容器实况：running/restarting/exited/absent。"""
