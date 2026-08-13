@@ -1,6 +1,6 @@
 # VALIDATION — EmbodiedCloud
 
-> 版本：0.4.0 · 生成：2026-08-13T23:10:40.370655+00:00（自动生成，勿手改）
+> 版本：0.4.0（自动生成，勿手改）
 
 ## 总览：**PASS_WITH_PHYSICAL_PENDING**
 

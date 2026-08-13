@@ -8,10 +8,8 @@ GPU/K8s/Streaming/Robot 物理状态。CURRENT_STATE 引用本文件输出；CI 
 """
 
 import json
-import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,7 +17,8 @@ PYTHON = sys.executable  # 当前解释器（venv）
 
 
 def run(cmd: list[str], timeout: int = 900) -> tuple[int, str]:
-    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout)
+    # S603: cmd 由本脚本受控常量构造（[sys.executable, "-m", pytest/ruff/mypy/...]），无用户输入
+    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout)  # noqa: S603
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
@@ -27,7 +26,7 @@ def count_tests_junit(report_path: Path) -> dict:
     """§16：用 JUnit XML 的 testsuite 属性稳定计数（不解析 pytest 文本输出）。"""
     import xml.etree.ElementTree as ET
 
-    tree = ET.parse(report_path)
+    tree = ET.parse(report_path)  # noqa: S314 pytest 生成的本地 JUnit（受控输出，非外部输入）
     root = tree.getroot()
     # pytest 产出 <testsuites><testsuite .../></testsuites>
     suite = root if root.tag == "testsuite" else root.find("testsuite")
@@ -78,7 +77,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         db_url = f"sqlite:///{tmp}/validate.db"
         env = dict(os.environ, EMBODIEDCLOUD_DATABASE_URL=db_url)
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603 受控常量参数（alembic CLI），无用户输入
             [PYTHON, "-m", "alembic", "upgrade", "head"],
             cwd=ROOT, text=True, capture_output=True, env=env, timeout=300,
         )
@@ -106,9 +105,11 @@ def main() -> int:
         c["status"] == "FAIL" for c in checks.values()
     )
     overall = "FAIL" if software_failed else "PASS_WITH_PHYSICAL_PENDING"
+    # 注意：报告内容必须**确定性**（不含时间戳）——CI freshness 门禁是
+    # `make validate && git diff --exit-code docs/VALIDATION.*`，任何每次运行
+    # 都变化的内容（如生成时间）都会让门禁必然失败。生成时间不入报告。
     report = {
         "version": _read_version(),
-        "generated_at": datetime.now(UTC).isoformat(),
         "overall": overall,
         "checks": checks,
     }
@@ -133,7 +134,7 @@ def _render_md(report: dict) -> str:
     lines = [
         "# VALIDATION — EmbodiedCloud",
         "",
-        f"> 版本：{report['version']} · 生成：{report['generated_at']}（自动生成，勿手改）",
+        f"> 版本：{report['version']}（自动生成，勿手改）",
         "",
         f"## 总览：**{report['overall']}**",
         "",
