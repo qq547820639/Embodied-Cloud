@@ -74,6 +74,27 @@ class BillingPolicy:
                     f"(lab {lab.id[:8]})"
                 )
 
+    def check_course_quota(self, db: Session, user: User, template: Template) -> None:
+        """provision 重试路径的 course quota 门禁（无 lab 上下文）。
+
+        `check_launch_eligible` 仅在显式传入 lab 时才检查 course quota；workspace
+        只记录 template_id 不记录 lab_id，因此重试/直接执行 PROVISION 时按
+        template 匹配所有 lab，任一 lab 用量 ≥ 配额即拒绝（与 monitor_runtime_quotas
+        的判定口径一致）。admin/instructor 不受限制。
+        """
+        if user.role in {Role.ADMIN.value, Role.INSTRUCTOR.value}:
+            return
+        labs = db.scalars(
+            select(Lab).where(Lab.template_id == template.id)
+        ).all()
+        for lab in labs:
+            used = self.course_usage_seconds(db, user.id, lab)
+            if used >= lab.quota_seconds:
+                raise BillingError(
+                    f"course quota exhausted: {used}/{lab.quota_seconds}s used "
+                    f"(lab {lab.id[:8]})"
+                )
+
     def course_usage_seconds(self, db: Session, user_id: str, lab: Lab) -> int:
         """该学生在 lab.template_id 下所有（非 tombstone）workspace 的累计 GPU 秒数。
 

@@ -7,7 +7,7 @@
 import uuid
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,7 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.db import Base
 from app.deps import get_current_user, get_db, orchestrator
-from app.models import CourseMember, Role, Submission, Template, User
+from app.models import CourseMember, Role, Submission, Template, User, Workspace
 from app.routers.courses import router
 
 
@@ -30,6 +30,19 @@ def new_user(db: Session, user_id: str, username: str) -> User:
     db.add(user)
     db.commit()
     return user
+
+
+def new_workspace(db: Session, workspace_id: str, owner_id: str, template_id: str) -> Workspace:
+    ws = Workspace(
+        id=workspace_id,
+        name=f"ws-{workspace_id}",
+        template_id=template_id,
+        provider="mock",
+        user_id=owner_id,
+    )
+    db.add(ws)
+    db.commit()
+    return ws
 
 
 def make_client(db: Session, user: User) -> TestClient:
@@ -200,6 +213,9 @@ def test_submit_is_idempotent(
     ).json()
     assert student_client.post(f"/courses/{course['id']}/join").status_code == 200
 
+    new_workspace(db_session, "ws-1", student.id, template.id)
+    new_workspace(db_session, "ws-2", student.id, template.id)
+
     resp = student_client.post(
         f"/assignments/{assignment['id']}/submit", json={"workspace_id": "ws-1"}
     )
@@ -222,6 +238,113 @@ def test_submit_is_idempotent(
     assert subs[0].status == "completed"
     assert subs[0].completed_at is not None
     assert subs[0].workspace_id == "ws-2"
+
+
+def _make_submittable_assignment(
+    db_session: Session,
+    template: Template,
+    teacher_client: TestClient,
+    student_client: TestClient,
+    slug_prefix: str,
+) -> dict:
+    course = create_course(teacher_client, f"{slug_prefix}-{uuid.uuid4().hex[:8]}")
+    lab = teacher_client.post(
+        f"/courses/{course['id']}/labs",
+        json={"template_id": template.id, "name": "Lab"},
+    ).json()
+    assignment = teacher_client.post(
+        f"/labs/{lab['id']}/assignments", json={"name": "A1"}
+    ).json()
+    assert student_client.post(f"/courses/{course['id']}/join").status_code == 200
+    return assignment
+
+
+def test_submit_owned_workspace_ok(
+    db_session, template, teacher_client, student_client, student
+):
+    assignment = _make_submittable_assignment(
+        db_session, template, teacher_client, student_client, "own"
+    )
+    new_workspace(db_session, "ws-own", student.id, template.id)
+    resp = student_client.post(
+        f"/assignments/{assignment['id']}/submit", json={"workspace_id": "ws-own"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["workspace_id"] == "ws-own"
+
+
+def test_submit_cross_tenant_workspace_404(
+    db_session, template, teacher_client, student_client, student, stranger
+):
+    assignment = _make_submittable_assignment(
+        db_session, template, teacher_client, student_client, "cross"
+    )
+    new_workspace(db_session, "ws-stranger", stranger.id, template.id)
+    resp = student_client.post(
+        f"/assignments/{assignment['id']}/submit", json={"workspace_id": "ws-stranger"}
+    )
+    assert resp.status_code == 404
+
+
+def test_submit_missing_workspace_404(
+    db_session, template, teacher_client, student_client
+):
+    assignment = _make_submittable_assignment(
+        db_session, template, teacher_client, student_client, "missing"
+    )
+    resp = student_client.post(
+        f"/assignments/{assignment['id']}/submit", json={"workspace_id": "no-such-ws"}
+    )
+    assert resp.status_code == 404
+
+
+def test_submit_admin_can_link_any_workspace(
+    db_session, template, teacher_client, student_client, stranger
+):
+    """admin 豁免归属校验（与项目其它函数一致）。"""
+    assignment = _make_submittable_assignment(
+        db_session, template, teacher_client, student_client, "admin"
+    )
+    new_workspace(db_session, "ws-admin-link", stranger.id, template.id)
+    admin = new_user(db_session, "u-admin", "admin")
+    admin.role = Role.ADMIN.value
+    db_session.commit()
+    admin_client = make_client(db_session, admin)
+    resp = admin_client.post(
+        f"/assignments/{assignment['id']}/submit",
+        json={"workspace_id": "ws-admin-link"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["workspace_id"] == "ws-admin-link"
+
+
+def test_create_course_duplicate_slug_409(teacher_client):
+    slug = f"dup-{uuid.uuid4().hex[:8]}"
+    create_course(teacher_client, slug)  # 首次成功
+    resp = teacher_client.post(
+        "/courses", json={"name": "Course 2", "description": "x", "slug": slug}
+    )
+    assert resp.status_code == 409
+
+
+def test_create_course_db_conflict_maps_to_409(db_session, teacher, monkeypatch):
+    """绕过先查（select 未命中）后插入触发 DB 唯一约束 → 409（§S-5）。"""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.schemas import CourseCreate
+    from app.services import course as course_service
+
+    def _raise_integrity():
+        raise IntegrityError(
+            "INSERT INTO courses ...", {}, Exception("UNIQUE constraint failed: courses.slug")
+        )
+
+    monkeypatch.setattr(db_session, "commit", _raise_integrity)
+    with pytest.raises(HTTPException) as exc_info:
+        course_service.create_course(
+            db_session, CourseCreate(name="C", description="d", slug="dup"), teacher
+        )
+    assert exc_info.value.status_code == 409
 
 
 def test_completions_include_student_submission(

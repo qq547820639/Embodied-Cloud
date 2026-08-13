@@ -170,5 +170,54 @@ def test_production_provider_requires_explicit_credential_key():
         validate_credential_configuration(provider="k8s", credential_key="")
     # mock 允许（开发/演示）
     validate_credential_configuration(provider="mock", credential_key="")
-    # 生产 + 显式密钥 → 允许
-    validate_credential_configuration(provider="docker", credential_key="explicit-key")
+    # 生产 + 显式密钥 + 显式 pepper → 允许
+    validate_credential_configuration(
+        provider="docker", credential_key="explicit-key",
+        password_pepper="pepper",  # noqa: S106 测试 pepper，非真实密码
+    )
+
+
+def test_production_requires_explicit_password_pepper():
+    """§S-1：provider != mock 且 password_pepper 为空 → 拒绝启动（fail-closed）。"""
+    with pytest.raises(RuntimeError, match="PASSWORD_PEPPER"):
+        validate_credential_configuration(
+            provider="docker", credential_key="explicit-key", password_pepper=""
+        )
+    with pytest.raises(RuntimeError, match="PASSWORD_PEPPER"):
+        validate_credential_configuration(
+            provider="k8s", credential_key="explicit-key", password_pepper=""
+        )
+    # mock + 空 pepper → 不拒绝（开发/演示）
+    validate_credential_configuration(
+        provider="mock", credential_key="", password_pepper=""
+    )
+    # 生产 + 显式 pepper → 允许
+    validate_credential_configuration(
+        provider="docker", credential_key="explicit-key",
+        password_pepper="pepper",  # noqa: S106 测试 pepper，非真实密码
+    )
+
+
+def test_auto_create_tables_warns_but_does_not_reject(caplog):
+    """§S-1：生产 auto_create_tables=true → 仅 logger.warning，不拒绝启动。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="embodiedcloud"):
+        validate_credential_configuration(
+            provider="docker",
+            credential_key="explicit-key",
+            password_pepper="pepper",  # noqa: S106 测试 pepper，非真实密码
+            auto_create_tables=True,
+        )
+    assert any("auto_create_tables" in r.message for r in caplog.records)
+
+    # auto_create_tables=false → 不产生告警
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="embodiedcloud"):
+        validate_credential_configuration(
+            provider="docker",
+            credential_key="explicit-key",
+            password_pepper="pepper",  # noqa: S106 测试 pepper，非真实密码
+            auto_create_tables=False,
+        )
+    assert all("auto_create_tables" not in r.message for r in caplog.records)

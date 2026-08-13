@@ -8,6 +8,7 @@
 import base64
 import hashlib
 import hmac
+import logging
 import secrets
 from datetime import UTC, datetime
 
@@ -166,14 +167,39 @@ def _derive_key(secret: str) -> bytes:
     return base64.urlsafe_b64encode(digest)
 
 
-def validate_credential_configuration(provider: str, credential_key: str) -> None:
-    """§13 生产安全：provider != mock 且未显式配置凭据密钥 → 拒绝启动。
+def validate_credential_configuration(
+    provider: str,
+    credential_key: str,
+    password_pepper: str = "",
+    auto_create_tables: bool = True,
+) -> None:
+    """§13/§S-1 生产启动安全校验（fail-closed）。
 
-    禁止生产使用开发默认密钥（加密形同虚设）。
+    仅对非 mock provider 生效；mock（本地/演示）跳过全部生产校验。规则：
+    - 未显式配置 workspace 凭据密钥 → 拒绝启动（禁止开发默认密钥，加密形同虚设）
+    - password_pepper 为空 → 拒绝启动（生产必须配置密码 pepper，禁止退化空盐前缀）
+    - auto_create_tables=true → 仅 logger.warning（不做拒绝：docker 单机 SQLite
+      是合法组合，拒绝会破坏该场景；生产 compose 应显式关闭走 alembic）
     """
-    if provider.lower() not in {"mock"} and not credential_key:
+    if provider.lower() in {"mock"}:
+        return
+    if not credential_key:
         raise RuntimeError(
             "EMBODIEDCLOUD_WORKSPACE_CREDENTIAL_KEY must be explicitly configured "
             f"when provider={provider!r} (refusing to run production with the "
             "dev fallback key)"
+        )
+    if not password_pepper:
+        raise RuntimeError(
+            "EMBODIEDCLOUD_PASSWORD_PEPPER must be explicitly configured "
+            f"when provider={provider!r} (refusing to run production with an "
+            "empty password pepper)"
+        )
+    if auto_create_tables:
+        logging.getLogger("embodiedcloud").warning(
+            "auto_create_tables=true with provider=%r: tables will be created "
+            "via SQLAlchemy metadata instead of alembic migrations; for "
+            "production prefer auto_create_tables=false (docker single-host "
+            "SQLite is an accepted exception)",
+            provider,
         )

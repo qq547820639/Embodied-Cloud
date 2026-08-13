@@ -156,6 +156,9 @@ class WorkspaceOrchestrator:
             user = db.get(User, workspace.user_id)
             if user is not None:
                 self.billing.check_launch_eligible(db, user, template)
+                # §S-3：provision 重试路径补 course quota 门禁（无 lab 上下文，
+                # 按 template 匹配所有 lab 检查；首次执行后配额耗尽 → 重试被拦截）
+                self.billing.check_course_quota(db, user, template)
         # 失败重试前将状态置回 QUEUED（上次失败已置 FAILED）
         workspace.status = WorkspaceStatus.QUEUED.value
         workspace.error_message = None

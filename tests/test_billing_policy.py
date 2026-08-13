@@ -22,14 +22,17 @@ from app.models import (
     GpuAllocation,
     Lab,
     LedgerType,
+    OperationStatus,
+    OperationType,
     Organization,
     Role,
     Template,
     User,
     Workspace,
+    WorkspaceOperation,
     WorkspaceStatus,
 )
-from app.services.billing import BillingPolicy
+from app.services.billing import BillingError, BillingPolicy
 from app.services.ledger import CreditLedgerService
 from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
@@ -212,6 +215,64 @@ def test_course_quota_enforced():
         with pytest.raises(Exception) as exc_info:
             billing.check_launch_eligible(db, user, template, lab=lab)
         assert "quota exhausted" in str(exc_info.value)
+
+
+def test_provision_retry_path_enforces_course_quota():
+    """§S-3：provision 重试路径同样过 course quota 门禁。
+
+    首次执行时配额未耗尽（门禁放行）；随后配额耗尽，重试 execute_operation 应被
+    门禁拦截，且 workspace 未被置为 QUEUED（拦截发生在 provision 之前）。
+    """
+    orchestrator, billing = _orchestrator_with_billing()
+    with Factory() as db:
+        template = _seed_gpu_template(db)
+        student = _make_user(db, user_id="student-q", role=Role.STUDENT.value)
+        _make_user(db, user_id="teacher-q", role=Role.INSTRUCTOR.value)
+        course = Course(id="c-q", owner_id="teacher-q", name="c", slug="course-q")
+        db.add(course)
+        db.flush()
+        db.add(
+            CourseMember(
+                id="cm-q", course_id="c-q", user_id="student-q", role=Role.STUDENT.value
+            )
+        )
+        db.add(
+            Lab(
+                id="lab-q", course_id="c-q", template_id="cartpole",
+                name="lab", quota_seconds=100,
+            )
+        )
+        db.commit()
+
+        # 首次执行门禁：配额未耗尽 → 放行
+        billing.check_course_quota(db, student, template)  # 不抛
+
+        ws = orchestrator.create(db, template, user_id="student-q")
+        op = WorkspaceOperation(
+            id="op-q",
+            workspace_id=ws.id,
+            operation_type=OperationType.PROVISION.value,
+            status=OperationStatus.RUNNING.value,
+            attempts=1,
+        )
+        db.add(op)
+        db.commit()
+
+        # 配额耗尽：另一 workspace 累计用量 100s（= 配额）
+        db.add(
+            Workspace(
+                id="ws-prior-q", name="prior", template_id="cartpole",
+                provider="mock", user_id="student-q",
+                status=WorkspaceStatus.STOPPED.value, accumulated_seconds=100,
+            )
+        )
+        db.commit()
+
+        with pytest.raises(BillingError, match="quota exhausted"):
+            orchestrator.execute_operation(db, op)
+
+        # 门禁在 provision 之前拦截：workspace 仍为 CREATED（未被置 QUEUED）
+        assert db.get(Workspace, ws.id).status == WorkspaceStatus.CREATED.value
 
 
 # ---------------------------------------------------------------------------

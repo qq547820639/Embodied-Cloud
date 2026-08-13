@@ -261,6 +261,34 @@ def test_destroy_raises_when_daemon_unavailable(monkeypatch, tmp_path):
         provider.destroy(ws)
 
 
+def test_destroy_releases_port_even_when_run_raises(monkeypatch, tmp_path):
+    """docker daemon 不可用导致 destroy 上抛时，finally 仍释放登记的 IDE 端口。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = DockerProvider(settings)
+    ws = make_workspace()
+    ws.container_name = "ec-test"
+    ws.ide_port = 38101
+    provider._allocated_ide_ports[ws.id] = 38101
+
+    released: list[int] = []
+    monkeypatch.setattr(
+        "app.services.providers.docker.release_tcp_port", lambda port: released.append(port)
+    )
+
+    def fake_run(args, *, check=True):
+        if args[:2] in (["docker", "rm"], ["docker", "inspect"]):
+            return CompletedProcess(
+                args=args, returncode=1, stdout="", stderr="Cannot connect to the Docker daemon"
+            )
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="docker command failed"):
+        provider.destroy(ws)
+    assert released == [38101]
+    assert ws.id not in provider._allocated_ide_ports
+
+
 def test_stop_idempotent_when_no_such_container(monkeypatch, tmp_path):
     """docker stop 对不存在的容器也应幂等成功（不因静默失败遗留错误状态）。"""
     settings = Settings(eula_accepted=True, workspace_root=tmp_path)

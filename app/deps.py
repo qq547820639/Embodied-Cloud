@@ -30,8 +30,14 @@ from .services.worker import OperationWorker
 
 settings = Settings()
 settings.ensure_dirs()
-# §13：生产（非 mock provider）必须显式配置凭据密钥，否则拒绝启动
-validate_credential_configuration(settings.provider, settings.workspace_credential_key)
+# §13/§S-1：生产（非 mock provider）必须显式配置凭据密钥 + 密码 pepper，否则拒绝启动；
+# auto_create_tables 仅告警（docker 单机 SQLite 是合法组合，不做拒绝）。
+validate_credential_configuration(
+    settings.provider,
+    settings.workspace_credential_key,
+    password_pepper=settings.password_pepper,
+    auto_create_tables=settings.auto_create_tables,
+)
 engine = make_engine(settings)
 SessionFactory: sessionmaker[Session] = make_session_factory(engine)
 get_db = session_dependency(SessionFactory)

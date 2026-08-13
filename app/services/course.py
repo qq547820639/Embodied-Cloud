@@ -8,6 +8,7 @@ import uuid
 
 from fastapi import HTTPException
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -140,7 +141,13 @@ def create_course(db: Session, payload: CourseCreate, user: User) -> Course:
             role=Role.INSTRUCTOR.value,
         )
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # §S-5：并发下「先查再插」可能双写同一 slug —— DB 唯一约束兜底，
+        # 冲突统一回滚并映射为 409（不泄露内部错误）。
+        db.rollback()
+        raise HTTPException(409, "course slug already exists") from exc
     db.refresh(course)
     return course
 
@@ -340,6 +347,14 @@ def launch_lab(
 def upsert_submission(
     db: Session, assignment: Assignment, user: User, workspace_id: str | None
 ) -> Submission:
+    # SECURITY.md T1：workspace 归属校验——不存在或跨租户一律 404（不泄露存在性）；
+    # admin 豁免归属校验（与项目其它函数一致）。
+    if workspace_id is not None:
+        workspace = db.get(Workspace, workspace_id)
+        if workspace is None or (
+            user.role != Role.ADMIN.value and workspace.user_id != user.id
+        ):
+            raise HTTPException(404, "workspace not found")
     sub = db.scalar(
         select(Submission).where(
             Submission.assignment_id == assignment.id, Submission.user_id == user.id

@@ -55,6 +55,10 @@ Reliability > Reproducibility > **Security** > Observability > DX > Performance 
 
 - `.env` 不入库（.gitignore）；示例为 `.env.example`。
 - 生产 secret 建议外部 secret manager（K8s Secret/云 KMS）；本轮不内置 vault。
+- 生产启动 fail-closed 校验（`app/security.py`）：provider 非 mock 时，
+  `EMBODIEDCLOUD_WORKSPACE_CREDENTIAL_KEY` 与 `EMBODIEDCLOUD_PASSWORD_PEPPER` 均必须
+  显式配置，否则拒绝启动；`EMBODIEDCLOUD_AUTO_CREATE_TABLES=true` 仅告警不拒绝
+  （docker 单机 SQLite 是合法组合，生产多实例应显式关闭并走 alembic）。
 
 ## 9. 发布安全
 

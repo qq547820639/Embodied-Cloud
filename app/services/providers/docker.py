@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ...config import Settings
 from ...models import Template, Workspace
-from ..ports import allocate_tcp_port, is_port_free
+from ..ports import allocate_tcp_port, is_port_free, release_tcp_port
 from .base import ProvisionResult, ResourceReservation, RuntimeState
 
 
@@ -33,6 +33,9 @@ class DockerProvider:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        # 进程内 IDE 端口分配登记（workspace_id → ide_port）：destroy 时释放回
+        # ports 池，消除异步 docker run 期间的串行 TOCTOU 重复分配。
+        self._allocated_ide_ports: dict[str, int] = {}
 
     def _run(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
         # S603: 仅执行受控常量参数（docker CLI），不包含用户输入。
@@ -177,6 +180,8 @@ class DockerProvider:
         # GPU 绑定完全来自 reservation（scheduler 唯一决策），不再自行选择
         gpu_index = reservation.gpu_index
         ide_port = allocate_tcp_port(self.settings.ide_port_start, self.settings.ide_port_end)
+        # 记录分配，destroy 时释放（含 provision 中途失败的补偿销毁路径）
+        self._allocated_ide_ports[workspace.id] = ide_port
         signal_port = self.WEBRTC_SIGNAL_PORT if template.requires_streaming else None
         media_port = self.WEBRTC_MEDIA_PORT if template.requires_streaming else None
 
@@ -250,7 +255,20 @@ class DockerProvider:
         """删除容器（幂等）。container_name 未持久化（如 provision 中途失败）时
         按命名约定 ec-{workspace.id[:12]} 推导，保证补偿清理可达。"""
         container_name = workspace.container_name or f"ec-{workspace.id[:12]}"
-        self._run_checked(["docker", "rm", "-f", container_name], container_name=container_name)
+        try:
+            self._run_checked(["docker", "rm", "-f", container_name], container_name=container_name)
+        finally:
+            # 释放 IDE 端口回进程内端口池。放在 finally：即使 docker daemon 不可用
+            # 导致 _run_checked 上抛（并被上层 suppress 吞掉），也释放登记，避免
+            # _allocated_tcp 残留长期占用进程内端口池。释放后若 OS 端口仍被容器占用，
+            # allocate_tcp_port 的 is_port_free 探测会继续跳过该端口（双保险）。
+            # 优先取 provision 时登记的端口（覆盖中途失败未持久化到 workspace.ide_port 的
+            # 场景）；否则回退到已持久化的 workspace.ide_port（跨进程/重启后的 destroy）。
+            port = self._allocated_ide_ports.pop(workspace.id, None)
+            if port is None and workspace.ide_port is not None:
+                port = workspace.ide_port
+            if port is not None:
+                release_tcp_port(port)
 
     def pull_artifact(self, workspace: Workspace, source_path: str) -> Path:
         """docker cp 把容器内文件拉到控制面本地临时路径并返回。

@@ -263,7 +263,7 @@ class Workspace(Base):
     media_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ide_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     stream_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
-    password: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    password: Mapped[str | None] = mapped_column(String(512), nullable=True)
     container_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
