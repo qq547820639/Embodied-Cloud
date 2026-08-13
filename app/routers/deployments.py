@@ -6,28 +6,15 @@ owner 隔离与越权 404 语义与 workspaces router 一致 (SECURITY.md T1).
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
 
-from ..config import Settings
-from ..db import make_engine, make_session_factory, session_dependency
-from ..models import DeploymentRecord, EdgeAgent, Role, User, Workspace
+from ..deps import DB, CurrentUser, deployment_service
+from ..models import DeploymentRecord, EdgeAgent, Role, Workspace
 from ..schemas import DeploymentCreate, DeploymentOut
-from ..security import make_session_dependency
-from ..services.deployment import DeploymentService
-
-# 本地构造与本项目 deps 容器等价的依赖 (deps 模块存在既有 mypy 错误且不在本任务
-# 修改范围, 故不直接导入; 运行时配置同源, SQLAlchemy 按 URL 共享连接池).
-_settings = Settings()
-_settings.ensure_dirs()
-_session_factory = make_session_factory(make_engine(_settings))
-DB = Annotated[Session, Depends(session_dependency(_session_factory))]
-CurrentUser = Annotated[User, Depends(make_session_dependency(_session_factory, _settings))]
+from ..services.edge import get_agent_from_header
 
 router = APIRouter(prefix="/deployments", tags=["deployments"])
-
-deployment_service = DeploymentService(_session_factory, _settings.workspace_root)
 
 
 class DeploymentRunIn(BaseModel):
@@ -45,6 +32,33 @@ def _get_owned_deployment(db, user, deployment_id: str) -> DeploymentRecord:
         raise HTTPException(404, "deployment not found")
     workspace = db.get(Workspace, deployment.workspace_id)
     if workspace is None or (user.role != Role.ADMIN.value and workspace.user_id != user.id):
+        raise HTTPException(404, "deployment not found")
+    return deployment
+
+
+def agent_from_header(request: Request, db: DB) -> EdgeAgent:
+    """X-Agent-Token → EdgeAgent；缺失/不匹配抛 401（见 services.edge）。"""
+    return get_agent_from_header(request, db)
+
+
+Agent = Annotated[EdgeAgent, Depends(agent_from_header)]
+
+
+def _get_deployment_for_agent(db, agent: EdgeAgent, deployment_id: str) -> DeploymentRecord:
+    """Edge agent 上报用的 deployment 归属校验（§10）。
+
+    仅校验租户所有权（agent.owner_user_id == workspace.user_id）；admin 豁免
+    不适用于 agent（agent 无 role 概念）。越权一律 404，不泄露资源存在性
+    （SECURITY.md T1）。
+    """
+    deployment = db.get(DeploymentRecord, deployment_id)
+    if deployment is None:
+        raise HTTPException(404, "deployment not found")
+    workspace = db.get(Workspace, deployment.workspace_id)
+    if workspace is None or agent.owner_user_id != workspace.user_id:
+        raise HTTPException(404, "deployment not found")
+    # 已绑定执行 agent（run 阶段设置 edge_agent_id）时，仅该 agent 可上报。
+    if deployment.edge_agent_id is not None and deployment.edge_agent_id != agent.id:
         raise HTTPException(404, "deployment not found")
     return deployment
 
@@ -119,12 +133,13 @@ class EdgeChecksumIn(BaseModel):
 
 @router.post("/{deployment_id}/report-checksum", response_model=DeploymentOut)
 def report_edge_checksum(
-    deployment_id: str, payload: EdgeChecksumIn, db: DB, user: CurrentUser
+    deployment_id: str, payload: EdgeChecksumIn, db: DB, agent: Agent
 ):
     """§10：Edge 上报本地计算的 actual_sha256 —— **唯一** edge→server 校验路径。
 
+    上报方是 Edge agent，用 X-Agent-Token 认证（缺失/不匹配 401）。
     server 比较 actual == expected（deployment.checksum）：
     MATCH → VERIFIED；MISMATCH → FAILED。客户端**不能**直接提交 status=VERIFIED。
     """
-    deployment = _get_owned_deployment(db, user, deployment_id)
+    deployment = _get_deployment_for_agent(db, agent, deployment_id)
     return deployment_service.report_checksum(db, deployment, payload.actual_sha256)

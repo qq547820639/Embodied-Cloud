@@ -15,6 +15,7 @@ from .models import User
 from .security import WorkspaceCredentialCipher, make_session_dependency, validate_credential_configuration
 from .seed import seed_templates
 from .services.billing import BillingPolicy
+from .services.deployment import DeploymentService
 from .services.edge import EdgeService
 from .services.ledger import CreditLedgerService
 from .services.orchestrator import WorkspaceOrchestrator
@@ -98,6 +99,8 @@ if settings.warm_pool_enabled and not provider.supports_credential_rotation:
     settings.warm_pool_enabled = False
 warm_pool = WarmPoolManager(SessionFactory, orchestrator, settings)
 edge_service = EdgeService(SessionFactory)
+# deployment 服务统一在此装配（组合根），router 不再自建第二套 DI。
+deployment_service = DeploymentService(SessionFactory, settings.workspace_root)
 
 
 def bootstrap_db() -> None:
