@@ -1,15 +1,15 @@
 {
-  "version": "0.3.0",
-  "generated_at": "2026-08-12T04:35:10.346731+00:00",
+  "version": "0.4.0",
+  "generated_at": "2026-08-13T23:10:40.370655+00:00",
   "overall": "PASS_WITH_PHYSICAL_PENDING",
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 227
+      "count": 329
     },
     "test_run": {
       "status": "PASS",
-      "passed": 226,
+      "passed": 328,
       "skipped": 1,
       "failed": 0
     },

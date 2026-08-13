@@ -65,3 +65,33 @@ def test_demo_workspace_requires_auth_and_owner_scope():
         # admin 可访问任意 workspace → 200
         _promote_to_admin("demo-b@example.com")
         assert client.get(f"/demo-workspace/{wid}", headers=_auth(token_b)).status_code == 200
+
+
+def test_demo_workspace_escapes_user_content():
+    """workspace.name / template.launch_command 均为可控内容 → 必须 HTML 转义
+    （admin 打开他人 workspace 的演示页时不得执行任意脚本）。"""
+    from app.deps import SessionFactory
+    from app.models import Template, Workspace
+
+    with TestClient(app) as client:
+        token = _register(client, "demo-xss@example.com", "demo-xss")
+        payload = '"><script>window.__xss=1</script>'
+        created = client.post(
+            "/api/workspaces",
+            json={"template_id": "cartpole", "auto_start": False},
+            headers=_auth(token),
+        )
+        assert created.status_code == 201
+        wid = created.json()["id"]
+        with SessionFactory() as db:
+            ws = db.get(Workspace, wid)
+            assert ws is not None
+            ws.name = payload
+            template = db.get(Template, ws.template_id)
+            assert template is not None
+            template.launch_command = payload
+            db.commit()
+        resp = client.get(f"/demo-workspace/{wid}", headers=_auth(token))
+        assert resp.status_code == 200
+        assert "<script>window.__xss=1</script>" not in resp.text
+        assert "&lt;script&gt;" in resp.text

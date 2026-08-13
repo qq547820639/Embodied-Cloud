@@ -74,3 +74,66 @@ def test_admin_adjustment_missing_target_returns_404():
                 amount=1, description="x", user=admin, db=db, target_user_id="no-such-user",
             )
         assert exc_info.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# HTTP 层（此前 admin_adjustment 只测函数直调，403 门禁/参数绑定/序列化零覆盖）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def http_app(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.deps import get_current_user, get_db
+
+    app = FastAPI()
+    app.include_router(usage_router.router)
+    monkeypatch.setattr(usage_router, "ledger", CreditLedgerService(Factory))
+    # 会话级 db：整个测试用同一个 session
+    factory = Factory
+    holder = {"db": None}
+
+    def _db_override():
+        if holder["db"] is None:
+            holder["db"] = factory()
+        return holder["db"]
+
+    def _user_override():
+        return holder["current_user"]
+
+    app.dependency_overrides[get_db] = _db_override
+    app.dependency_overrides[get_current_user] = _user_override
+    client = TestClient(app)
+    yield client, holder
+    if holder["db"] is not None:
+        holder["db"].close()
+
+
+def test_admin_adjustment_http_non_admin_403(http_app):
+    client, holder = http_app
+    with Factory() as db:
+        holder["current_user"] = _user(db, "plain-user", role=Role.USER.value)
+    resp = client.post(
+        "/admin/ledger/adjustment",
+        params={"amount": 50, "description": "x"},
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 403
+
+
+def test_admin_adjustment_http_admin_200(http_app):
+    client, holder = http_app
+    with Factory() as db:
+        holder["current_user"] = _user(db, "admin-h", role=Role.ADMIN.value)
+    resp = client.post(
+        "/admin/ledger/adjustment",
+        params={"amount": 50, "description": "bonus"},
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["type"] == LedgerType.ADJUSTMENT.value
+    assert body["amount"] == 50
+    assert body["user_id"] == "admin-h"

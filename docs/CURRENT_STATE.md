@@ -1,55 +1,51 @@
 # CURRENT_STATE — EmbodiedCloud
 
-> 版本：**0.3.0 → v0.3.1 Security & Integrity Hotfix 软件面完成**（2026-08-12）。
+> 版本：**0.4.0 Product UX Iteration 软件面完成**（2026-08-14）。
 > 数据来源：`docs/VALIDATION.json`（`make validate` 自动生成，JUnit 稳定计数）。
 
 ## 1. 本次真实验证（实测，非复制旧文档）
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（226 passed + 1 skipped[k8s_integration]，JUnit 计数）** |
-| Lint / Type / compileall | PASS（ruff 0 / mypy 39 files / compileall） |
-| Migration | PASS（clean DB empty→head 10 级链 + downgrade 循环） |
-| Build / Smoke | PASS（embodiedcloud-0.3.0 / SMOKE_OK） |
-| OpenAPI / VALIDATION freshness | PASS（make api-docs / make validate） |
-| Release | PASS（lint/type/test/build + archive 清洁） |
+| Test | **PASS（328 passed + 1 skipped[k8s_integration]）** |
+| Lint / Type | PASS（ruff 0 / mypy 40 files） |
+| Migration | PASS（clean DB empty→head 11 文件链 + schema 落地校验 + downgrade 循环） |
+| OpenAPI / VALIDATION freshness | PASS（make api-docs / make validate 无 diff） |
+| 前端冒烟 | PASS（六视图 SPA 静态资源 200；课程/部署/Edge/流全链路 API 冒烟 OK） |
 
-## 2. v0.3.1 本轮修复（全部有 regression test）
+## 2. v0.4.0 本轮交付
 
-| § | 内容 | 测试 |
+| § | 内容 | 验证 |
 |---|---|---|
-| §5 P0 | **Deployment checksum bypass 移除**：download 端点不再自动 VERIFIED（删除无校验 verify() 方法）；唯一 VERIFIED 路径 = Edge 下载 → 本地 SHA256 → report-checksum → server 比较 | test_deployment_bypass.py（7 用例） |
-| §6 P0 | **EdgeAgent 租户所有权**：owner_user_id/organization_id + migration；register 必须认证（匿名 401）；list/get/部署派发全部 tenant scope；edge router 统一走 app.deps | test_edge_ownership.py（6 用例） |
-| §7 P0 | **Warm pool rotation 失败资源泄漏修复**：完整补偿（streaming terminate → runtime destroy → GPU release → 清凭据/owner/端口 → DRAINING/FAILED）；providers 增加 supports_credential_rotation（Docker False → warm pool 自动禁用） | test_warmpool_claim.py（4 新用例） |
-| §8 P0 | **BillingPolicy settings 真实接线**（deps 注入 minimum_launch_minutes/enforce，不再 constructor default） | test_billing_policy.py（3 新用例） |
-| §9 P0 | **Runtime readiness contract**：provider.wait_ready（Mock/Docker[TCP+HTTP+healthcheck exec]/K8s[Deployment+Pod Ready+endpoints]）；未就绪 → 回滚 → FAILED；_fail 清 GPU 字段 | test_runtime_readiness.py（4 用例） |
-| §12 P0 | **Durable STOP/DESTROY**：端点 enqueue operation + fast-path tick；worker 全覆盖 5 种 operation；重启不丢 cleanup | test_durable_ops.py（5 用例） |
-| §13 P0 | **Active operation 数据库级唯一性**：部分唯一索引 uq_ops_active_per_workspace（SQLite/PostgreSQL where 均生效）；enqueue 依赖 DB 拒绝并发 | test_worker_fencing.py 并发用例 |
-| §11 P0 | **Worker 外部副作用 fencing**：operation_id/fencing_token 注入 reservation → Docker labels；provision 幂等 adopt（容器存在复用）；lost lease 后旧 worker 不能写终态 | test_worker_fencing.py（3 新用例） |
-| §10 P0 | **K8s reservation→node 真相**：ResourceReservation.node_name 明确字段；真实模式禁 reservation=None；nodeSelector 由 node_name 构造；reconcile 检测 pod nodeName ≠ reserved → FAILED | test_k8s_node_truth.py（5 用例） |
-| §14 | **K8s manifest 修复**：Pod labels 增加 embodiedcloud.workspace:true（NetworkPolicy selector 真实命中，消除假安全） | test_pod_labels_hit_network_policy_selector |
-| §15 | **版本单一来源**：pyproject 事实源；UI 版本动态（/api/health）；manifest 0.3.0 | test_version_consistency.py（6 用例） |
-| §16 | **VALIDATION 可信化**：JUnit XML 稳定计数；物理 gate NOT_RUN（不永久 hardcode PENDING） | make validate |
-| §19/§21 | **配额监控 + warm pool maintain 接入 worker 周期调度**（每 10/30 tick） | test_worker_runs_periodic_tasks |
+| UX-1 | **前端重构为六视图 SPA**（概览/用量账单/课程/部署·Sim2Real/边缘设备/GPU 管理），此前 68 行 JS 只覆盖登录+模板+工作区，后端 9 组路由大部分能力前端零入口 | 手动 + API 冒烟；`test_version_consistency`（UI 版本 pill 动态） |
+| UX-2 | 用量页（per-workspace 明细/账本明细/演示充值/口径说明）、课程页（slug 邀请码加入/教师全班矩阵/学生进度与提交）、部署页（状态机操作 + checksum）、边缘设备页（token 一次性）、流会话面板、GPU 管理页 | `test_course_onboarding.py`（6 用例）、`test_demo_checkpoint.py`（3 用例）、`test_gpu_admin.py`（2 用例） |
+| UX-3 | 状态反馈：瞬态自动轮询（终态即停/页面隐藏暂停）、状态中文映射、按状态渲染操作（修复「非 running 一律显示启动」）、破坏性操作确认弹窗 + in-flight 防重 | 手动 + 现有 lifecycle 测试 |
+| SEC-1 | **前端 XSS 全面转义**（workspace 名/错误信息/模板字段/日志标题）；`/demo-workspace` 后端同步转义 name/launch_command + 按真实状态渲染徽标（不再无条件 RUNNING）；IDE 密码改「复制密码」按钮 | `test_demo_workspace.py` 转义回归（name + launch_command 双断言） |
+| SEC-2 | 认证盲区补齐：login/logout/me + `verify_password` 边界（pepper 变化/畸形格式）+ token 仅存哈希 | `test_auth.py`（5 用例） |
+| API-1 | 新端点：`POST /api/courses/join-by-slug`、`GET /api/courses/{id}/my-progress`、`POST /api/workspaces/{id}/demo-checkpoint`（mock 专用，非 mock 400）；labs/assignments 列表对 member 可读 | `test_course_onboarding.py`、`test_demo_checkpoint.py` |
+| T-1 | 修正伪覆盖：deployment「恒真 VERIFIED」改为「PENDING 直接 verify 409 防绕过」；迁移测试校验 22 张关键表落地/移除；admin_adjustment 补 HTTP 403/200；GPU 释放补真实断言 | `test_deployment_verification.py`、`test_migrations.py`、`test_usage_admin_adjustment.py`、`test_gpu_admin.py` |
+| D-1 | 文档对齐：API.md 重写为全量端点参考；ARCHITECTURE 对齐代码；ACCEPTANCE_GATES 去重 + 数字刷新；四份 08-13 review 报告加「已修复」历史快照头；模板 slug 修正（GPU_HOST/ACCEPTANCE）；版本标号统一 0.4.0 | grep 校验 |
+| D-2 | 死代码清理：WorkspaceStatusLegacy / require_admin / release_all_for_workspaces / ledger.history / warmpool.drain/mark_failed / new_request_id / workspace_log_context | ruff F401 全绿 |
 
 ## 3. 分项状态
 
 ### VERIFIED PASS
-226 tests 全绿；lint/type/migration/build/smoke/release 全链路；migration 10 级链。
+328 tests 全绿；lint/type/migration/build/smoke/release 全链路；前端六视图 + 全链路 API 冒烟。
 
 ### PHYSICAL_VALIDATION_PENDING / NOT_RUN（不假装 PASS）
-GPU（G1–G4 脚本就绪）· K8s（pytest -m k8s_integration 正确 skip）· Streaming · Robot · Warm pool SLA。
+GPU（G1–G4 脚本就绪）· K8s（pytest -m k8s_integration 正确 skip）· Streaming 媒体面 · Robot 真机 · Warm pool SLA。
 
 ### BLOCKED_EXTERNAL_DEPENDENCY
 NGC 凭据（镜像 digest 回填）· PostgreSQL 生产验证/容器测试（无 docker daemon）· S3 凭据 · 物理机器人 · 真实 K8s 集群。
 
-### TECH DEBT
-BillingAccount 重构（§17，当前 user/org 双 FK 聚合视角）· CreditHold 预授权（§18）· edge agent 独立包（§25）· SQLite FK 约束（§30，batch migration 待做）· lockfile/SBOM。
+### TECH DEBT（已知、有意延后）
+BillingAccount 重构（§17，当前 user/org 双 FK 聚合视角）· CreditHold 预授权（§18）· edge agent 独立包（§25）· SQLite FK 约束（§30）· lockfile/SBOM · 并发语义测试迁移到 PostgreSQL · `default_idle_timeout_minutes`（缺 runtime 活动信号，标注预留）· 前端无自动化浏览器测试（当前以 API 冒烟 + 转义回归覆盖）。
 
 ## 4. 结论
 
-v0.3.1 Security & Integrity Hotfix 软件面完成：三个最高严重度问题
-（checksum bypass / EdgeAgent 租户 / warm pool 资源泄漏）已修复并由
-regression tests 证明；billing wiring、readiness、durable ops、worker
-fencing、K8s node truth、版本/验证可信化、manifest 修复全部落地。
+v0.4.0 Product UX Iteration 软件面完成：前端从"演示级原型"升级为覆盖
+**全部后端能力**的六视图控制台（用量账本/课程/部署/Edge/流/GPU），状态反馈、
+确认/防重、XSS 转义、可达性、移动端按审计 H1–H3 清单逐项落地；后端补齐学生端
+课程闭环（slug 邀请码/我的进度/member 可见）与演示模式 Sim2Real 闭环（mock
+checkpoint），并清理死代码、修正 4 处伪覆盖测试、补齐认证盲区测试。
 剩余工作依赖真实硬件/凭据（GPU/K8s/机器人/S3/PostgreSQL 容器）。

@@ -124,20 +124,20 @@ def test_expired_failed_deployment_cannot_reverify(tmp_path):
         assert again.status == DeploymentStatus.FAILED.value
 
 
-def test_verify_checksum_only_path_to_verified(tmp_path):
-    """verify_checksum 是 PENDING/DOWNLOADING → VERIFIED 的唯一真实校验路径。"""
+def test_verify_rejects_pending_bypass(tmp_path):
+    """PENDING 直接 verify = 绕过（§23 防绕过）：状态机拒绝（409），唯一路径是
+    download → DOWNLOADING → verify。"""
     with Factory() as db:
         svc, owner, ws, _ = _setup(db, tmp_path)
         artifact = svc.create_artifact(db, owner, ws, "checkpoint.pt")
         d = svc.deploy(db, owner, ws, artifact, "franka")
-        # 模拟错误实现（直接置 VERIFIED）被状态机拒绝
-        svc.download(db, d)
-        d.status = DeploymentStatus.VERIFIED.value
-        db.commit()
+        assert d.status == DeploymentStatus.PENDING.value
+        # 未 download 直接校验 → 409（bad transition），绝不进入 VERIFIED
+        with pytest.raises(Exception) as exc_info:
+            svc.verify_checksum(db, d)
+        assert getattr(exc_info.value, "status_code", None) == 409
         db.refresh(d)
-        # 已 VERIFIED 的记录保持（幂等），不重复计算
-        again = svc.verify_checksum(db, d)
-        assert again.status == DeploymentStatus.VERIFIED.value
+        assert d.status == DeploymentStatus.PENDING.value
 
 
 class MemoryStore:
