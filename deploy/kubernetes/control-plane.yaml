@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: embodiedcloud/control-plane:0.3.0
+          image: embodiedcloud/control-plane:0.4.0
           ports:
             - {containerPort: 8000}
           env:

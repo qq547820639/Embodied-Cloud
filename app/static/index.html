@@ -3,47 +3,209 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>EmbodiedCloud</title>
+  <title>EmbodiedCloud · 具身智能云</title>
+  <meta name="description" content="打开浏览器，就能开始训练你自己的机器人。" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
   <header class="topbar">
-    <div>
-      <strong>EmbodiedCloud</strong><span class="pill" id="version-pill">v0.3</span>
+    <div class="brand">
+      <div class="brand-row">
+        <strong>EmbodiedCloud</strong><span class="pill" id="version-pill">v0.4</span>
+      </div>
       <div class="tagline">让物理世界的 AI 开发，像 Web 开发一样简单。</div>
     </div>
-    <div id="authbar">
-      <input id="auth-email" type="email" placeholder="邮箱" autocomplete="username" />
-      <input id="auth-username" type="text" placeholder="用户名（注册）" style="display:none" />
-      <input id="auth-password" type="password" placeholder="密码" autocomplete="current-password" />
-      <button id="auth-login" onclick="doLogin()">登录</button>
-      <button id="auth-register" class="secondary" onclick="doRegister()">注册</button>
-      <button id="auth-logout" style="display:none" onclick="doLogout()">退出</button>
-      <span id="auth-user" class="muted" style="display:none"></span>
-    </div>
-    <div id="health" class="health">检查中…</div>
-  </header>
-  <main>
-    <section class="hero">
-      <div>
-        <div class="eyebrow">ISAAC LAB CLOUD WORKSPACE</div>
-        <h1>选择实验，启动工作区，直接改代码。</h1>
-        <p>把 GPU、Isaac Lab 环境和可运行实验模板封装成浏览器工作区。每个工作区独占 GPU，按实际运行秒数计费。</p>
+
+    <nav class="nav" id="nav" aria-label="主导航">
+      <button class="nav-item" data-view="overview" aria-current="page">概览</button>
+      <button class="nav-item" data-view="usage">用量与账单</button>
+      <button class="nav-item" data-view="courses">课程</button>
+      <button class="nav-item" data-view="deploy">部署 · Sim2Real</button>
+      <button class="nav-item" data-view="edge">边缘设备</button>
+      <button class="nav-item" data-view="gpus" id="nav-gpus" hidden>GPU 管理</button>
+    </nav>
+
+    <div class="auth-area">
+      <form id="auth-form" class="auth-form" autocomplete="on">
+        <div class="auth-tabs" role="tablist" aria-label="登录或注册">
+          <button type="button" class="auth-tab active" id="tab-login" role="tab" aria-selected="true" aria-controls="auth-fields">登录</button>
+          <button type="button" class="auth-tab" id="tab-register" role="tab" aria-selected="false" aria-controls="auth-fields">注册</button>
+        </div>
+        <div id="auth-fields" class="auth-fields" role="tabpanel">
+          <input id="auth-email" name="email" type="email" placeholder="邮箱" aria-label="邮箱" autocomplete="username" required />
+          <input id="auth-username" name="username" type="text" placeholder="用户名" aria-label="用户名" autocomplete="username" minlength="2" maxlength="64" hidden />
+          <input id="auth-password" name="password" type="password" placeholder="密码" aria-label="密码" minlength="8" maxlength="128" autocomplete="current-password" required />
+          <button type="submit" class="primary" id="auth-submit">登录</button>
+        </div>
+      </form>
+      <div id="userbar" hidden>
+        <span id="auth-user" class="user-chip"></span>
+        <button id="auth-logout" class="secondary">退出</button>
       </div>
-      <div class="metrics" id="metrics"></div>
+      <div id="health" class="health" role="status">检查中…</div>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- 概览 -->
+    <section id="view-overview" class="view" data-view-name="overview">
+      <section class="hero">
+        <div>
+          <div class="eyebrow">ISAAC LAB CLOUD WORKSPACE</div>
+          <h1>选择实验，启动工作区，直接改代码。</h1>
+          <p>把 GPU、Isaac Lab 环境和可运行实验模板封装成浏览器工作区。每个工作区独占 GPU，按实际运行秒数计费（演示模式为模拟，不消耗真实 GPU）。</p>
+        </div>
+        <div class="metrics" id="metrics" aria-live="polite"></div>
+      </section>
+
+      <section>
+        <div class="section-title">
+          <h2>实验模板</h2>
+          <span>版本锁定 · 开箱可跑 · 验收标准明确</span>
+        </div>
+        <div id="templates" class="cards"></div>
+      </section>
+
+      <section>
+        <div class="section-title">
+          <h2>我的工作区</h2>
+          <div class="title-actions">
+            <span class="muted" id="workspace-count"></span>
+            <button class="secondary" onclick="refreshOverview()">刷新</button>
+          </div>
+        </div>
+        <div id="workspaces" class="workspace-list"></div>
+      </section>
     </section>
 
-    <section>
-      <div class="section-title"><h2>实验模板</h2><span>Template 才是产品，GPU 是资源</span></div>
-      <div id="templates" class="cards"></div>
+    <!-- 用量与账单 -->
+    <section id="view-usage" class="view" data-view-name="usage" hidden>
+      <div class="section-title"><h2>用量与账单</h2><span>不可变账本 · 逐笔可查 · 同一运行段绝不重复扣费</span></div>
+      <div class="metrics" id="usage-metrics" aria-live="polite"></div>
+      <p class="muted note" id="usage-note"></p>
+
+      <div class="split">
+        <section>
+          <div class="section-title"><h3>按工作区明细</h3></div>
+          <div id="usage-workspaces" class="table-wrap"></div>
+        </section>
+        <section>
+          <div class="section-title"><h3>充值（演示）</h3></div>
+          <form id="recharge-form" class="inline-form">
+            <input type="number" id="recharge-amount" min="1" step="1" placeholder="金额（credits）" aria-label="充值金额" required />
+            <button type="submit" class="primary">充值</button>
+          </form>
+          <p class="muted note">演示语义：直接记账，不接入真实支付。1 credit = 1 GPU 秒。</p>
+        </section>
+      </div>
+
+      <section>
+        <div class="section-title"><h3>账本明细（最近 200 条）</h3></div>
+        <div id="ledger" class="table-wrap"></div>
+      </section>
     </section>
 
-    <section>
-      <div class="section-title"><h2>我的工作区</h2><button class="secondary" onclick="refreshAll()">刷新</button></div>
-      <div id="workspaces" class="workspace-list"></div>
+    <!-- 课程 -->
+    <section id="view-courses" class="view" data-view-name="courses" hidden>
+      <div class="section-title"><h2>课程</h2><span>老师管任务看完成度，学生一键启动实验</span></div>
+      <div class="course-layout">
+        <aside class="course-side">
+          <div class="section-title"><h3>我的课程</h3></div>
+          <div id="course-list" class="course-list"></div>
+          <form id="join-course-form" class="inline-form stacked">
+            <label for="join-slug">凭邀请码加入（slug）</label>
+            <div class="row">
+              <input type="text" id="join-slug" placeholder="例如 intro-rl-2026" aria-label="课程邀请码" required />
+              <button type="submit" class="primary">加入</button>
+            </div>
+          </form>
+          <details>
+            <summary>创建课程（成为老师）</summary>
+            <form id="create-course-form" class="inline-form stacked">
+              <label for="course-name">课程名称</label>
+              <input type="text" id="course-name" placeholder="机器人强化学习导论" required maxlength="120" />
+              <label for="course-slug">slug（邀请码，唯一）</label>
+              <input type="text" id="course-slug" placeholder="intro-rl-2026" required maxlength="64" />
+              <label for="course-desc">简介（可选）</label>
+              <input type="text" id="course-desc" placeholder="一句话说明" maxlength="500" />
+              <button type="submit" class="primary">创建课程</button>
+            </form>
+          </details>
+        </aside>
+        <section class="course-detail">
+          <div id="course-empty" class="empty">选择左侧课程，或凭邀请码加入。</div>
+          <div id="course-detail" hidden>
+            <div class="section-title">
+              <h3 id="course-title"></h3>
+              <span class="pill" id="course-slug-pill"></span>
+            </div>
+            <p class="muted" id="course-desc"></p>
+            <div id="course-role"></div>
+
+            <div id="course-progress-block"></div>
+            <div id="course-labs-block"></div>
+            <div id="course-members-block"></div>
+            <div id="course-completions-block"></div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- 部署 -->
+    <section id="view-deploy" class="view" data-view-name="deploy" hidden>
+      <div class="section-title"><h2>部署 · Sim2Real</h2><span>checkpoint → artifact → checksum → 边缘校验 → 真机运行</span></div>
+      <form id="deploy-form" class="inline-form stacked card-form">
+        <div class="grid-2">
+          <div>
+            <label for="deploy-workspace">工作区</label>
+            <select id="deploy-workspace" required></select>
+          </div>
+          <div>
+            <label for="deploy-robot">目标机器人</label>
+            <select id="deploy-robot">
+              <option value="franka">Franka 机械臂</option>
+              <option value="ur5">UR5</option>
+              <option value="custom">自定义</option>
+            </select>
+          </div>
+        </div>
+        <label for="deploy-path">artifact 路径（相对工作区目录）</label>
+        <div class="row">
+          <input type="text" id="deploy-path" value="outputs/run_0/checkpoint.pt" required />
+          <button type="button" class="secondary" id="deploy-demo-checkpoint" hidden title="仅演示模式：在工作区生成一份模拟 checkpoint">生成演示 checkpoint</button>
+        </div>
+        <button type="submit" class="primary">创建部署</button>
+      </form>
+      <div class="section-title"><h3>部署记录</h3></div>
+      <div id="deployments" class="table-wrap"></div>
+    </section>
+
+    <!-- 边缘设备 -->
+    <section id="view-edge" class="view" data-view-name="edge" hidden>
+      <div class="section-title"><h2>边缘设备</h2><span>注册即绑定账号 · token 仅返回一次 · 上报即校验</span></div>
+      <form id="agent-form" class="inline-form stacked card-form">
+        <label for="agent-name">设备名称</label>
+        <input type="text" id="agent-name" placeholder="实验室 Franka 01" required maxlength="120" />
+        <label for="agent-device">设备信息（JSON，可选）</label>
+        <input type="text" id="agent-device" placeholder='{"robot":"franka","lab":"A-301"}' />
+        <button type="submit" class="primary">注册设备</button>
+      </form>
+      <div class="section-title"><h3>我的设备</h3></div>
+      <div id="agents" class="table-wrap"></div>
+    </section>
+
+    <!-- GPU 管理 -->
+    <section id="view-gpus" class="view" data-view-name="gpus" hidden>
+      <div class="section-title"><h2>GPU 管理</h2><span>管理员：inventory / 状态 / 维护</span></div>
+      <div id="gpu-hosts" class="table-wrap"></div>
+      <div class="section-title"><h3>GPU 明细</h3></div>
+      <div id="gpus" class="table-wrap"></div>
     </section>
   </main>
-  <div id="toast" class="toast"></div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="dialog-root"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

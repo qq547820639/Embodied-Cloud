@@ -1,6 +1,6 @@
 PYTHON ?= .venv/bin/python
 UV ?= uv
-VERSION ?= 0.3.0
+VERSION ?= 0.4.0
 
 .PHONY: install dev test lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \

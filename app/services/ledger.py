@@ -109,13 +109,3 @@ class CreditLedgerService:
             gpu_seconds=seconds,
             idempotency_key=f"usage:{workspace.id}:{started_at_iso}",
         )
-
-    def history(self, db: Session, user_id: str, limit: int = 100) -> list[CreditLedger]:
-        return list(
-            db.scalars(
-                select(CreditLedger)
-                .where(CreditLedger.user_id == user_id)
-                .order_by(CreditLedger.created_at.desc())
-                .limit(limit)
-            )
-        )

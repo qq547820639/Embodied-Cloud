@@ -8,7 +8,6 @@
 import json
 import logging
 import re
-import secrets
 import sys
 import time
 import uuid
@@ -16,7 +15,6 @@ import uuid
 from fastapi import Request
 
 from .config import Settings
-from .models import Workspace
 
 REDACT_KEYS = {"password", "token", "secret", "key", "authorization", "ide_password"}
 
@@ -117,17 +115,3 @@ class RequestIDMiddleware:
             context["status"] = status_holder["status"]
             context["duration_ms"] = round(elapsed * 1000, 2)
             logger.info("request end", extra={"request": context})
-
-
-def new_request_id() -> str:
-    return secrets.token_hex(8)
-
-
-def workspace_log_context(workspace: Workspace) -> dict:
-    return {
-        "workspace_id": workspace.id,
-        "template_id": workspace.template_id,
-        "user_id": workspace.user_id,
-        "provider": workspace.provider,
-        "gpu_id": workspace.gpu_id,
-    }

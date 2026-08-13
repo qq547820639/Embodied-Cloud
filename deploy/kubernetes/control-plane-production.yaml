@@ -52,7 +52,7 @@ spec:
       serviceAccountName: embodiedcloud-control-plane
       initContainers:
         - name: migrate
-          image: embodiedcloud/control-plane:0.3.0
+          image: embodiedcloud/control-plane:0.4.0
           command: ["alembic", "upgrade", "head"]
           env:
             - name: EMBODIEDCLOUD_DATABASE_URL
@@ -62,7 +62,7 @@ spec:
                   key: DATABASE_URL
       containers:
         - name: api
-          image: embodiedcloud/control-plane:0.3.0
+          image: embodiedcloud/control-plane:0.4.0
           ports:
             - {containerPort: 8000}
           env:

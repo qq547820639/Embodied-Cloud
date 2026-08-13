@@ -104,6 +104,8 @@ def metrics():
 
 @app.get("/demo-workspace/{workspace_id}", response_class=HTMLResponse, include_in_schema=False)
 def demo_workspace(workspace_id: str, db: DB, user: CurrentUser, view: str | None = None):
+    import html
+
     from .models import Template
     from .models import Workspace as W
 
@@ -115,7 +117,29 @@ def demo_workspace(workspace_id: str, db: DB, user: CurrentUser, view: str | Non
         return HTMLResponse("workspace not found", status_code=404)
     template = db.get(Template, workspace.template_id)
     mode = "仿真流演示" if view == "stream" else "浏览器 IDE 演示"
-    command = template.launch_command if template else ""
+    # 页面内插值全部为用户/模板可控内容 → html.escape 防存储型 XSS（admin 访问他人
+    # workspace 时不可在 admin 浏览器执行任意脚本）。
+    command = html.escape(template.launch_command) if template else ""
+    safe_name = html.escape(workspace.name)
+    # §UX：按真实状态渲染徽标（不再无条件 RUNNING，停止/失败状态如实呈现）
+    status_label = {
+        WorkspaceStatus.RUNNING.value: ("RUNNING", "ok"),
+        WorkspaceStatus.STOPPED.value: ("STOPPED", "bad"),
+        WorkspaceStatus.FAILED.value: ("FAILED", "bad"),
+        WorkspaceStatus.QUEUED.value: ("QUEUED", "warn"),
+        WorkspaceStatus.PROVISIONING.value: ("PROVISIONING", "warn"),
+        WorkspaceStatus.STOPPING.value: ("STOPPING", "warn"),
+        WorkspaceStatus.CREATED.value: ("CREATED", "warn"),
+    }.get(workspace.status, (workspace.status.upper(), "warn"))
+    running_note = (
+        ""
+        if workspace.status == WorkspaceStatus.RUNNING.value
+        else f"<p class='warn'>工作区当前状态：{status_label[0]}（不是运行中）。回到控制台启动后再进入。</p>"
+    )
+    header_html = (
+        f"<header>EmbodiedCloud / {mode} · "
+        f"<span class='{status_label[1]}'>{status_label[0]}</span></header>"
+    )
     return f"""
     <!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>
     <title>{mode}</title><style>
@@ -126,11 +150,12 @@ def demo_workspace(workspace_id: str, db: DB, user: CurrentUser, view: str | Non
     main{{padding:24px}}
     code,pre{{background:#050913;border:1px solid #273455;border-radius:10px;padding:16px;display:block}}
     code,pre{{white-space:pre-wrap}}
-    .ok{{color:#5be49b}} .muted{{color:#7e90b8}}
-    </style></head><body><header>EmbodiedCloud / {mode} · <span class='ok'>RUNNING</span></header>
+    .ok{{color:#5be49b}} .muted{{color:#7e90b8}} .warn{{color:#f2c94c}} .bad{{color:#ff8f8f}}
+    </style></head><body>{header_html}
     <div class='grid'><aside>Explorer<br><br>project/<br>├── README.md<br>└── experiments/</aside><main>
-    <h2>{workspace.name}</h2><p class='muted'>这是 mock provider 的可交互产品演示页，不消耗真实 GPU。</p>
+    <h2>{safe_name}</h2><p class='muted'>这是 mock provider 的可交互产品演示页，不消耗真实 GPU。</p>
     <p>真实 GPU 模式会在同一位置打开 code-server；Streaming 模板会返回 Isaac Sim WebRTC 端点。</p>
+    {running_note}
     <pre>$ cd /workspace/IsaacLab\n$ {command}\n\n[EmbodiedCloud] workspace {workspace.id[:8]} ready.</pre>
     </main></div></body></html>
     """

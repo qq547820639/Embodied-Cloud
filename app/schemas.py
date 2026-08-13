@@ -114,6 +114,14 @@ class WorkspaceAccessOut(BaseModel):
     media_port: int | None
 
 
+class DemoCheckpointOut(BaseModel):
+    """mock 演示模式的模拟训练产出：供 Sim2Real 部署流程端到端演示。"""
+
+    path: str
+    size_bytes: int
+    sha256: str
+
+
 # ---------------------------------------------------------------------------
 # GPU
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from ..deps import DB, CurrentUser, billing, credential_cipher, orchestrator, warm_pool, worker
 from ..models import OperationType, Role, Template, Workspace, WorkspaceStatus
-from ..schemas import WorkspaceAccessOut, WorkspaceCreate, WorkspaceOut
+from ..schemas import DemoCheckpointOut, WorkspaceAccessOut, WorkspaceCreate, WorkspaceOut
 from ..services.billing import BillingError
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
@@ -126,6 +126,41 @@ def workspace_logs(workspace_id: str, db: DB, user: CurrentUser, tail: int = 200
     tail = max(1, min(tail, 2000))
     logs = orchestrator.provider.logs(workspace, tail=tail)
     return {"workspace_id": workspace.id, "logs": logs or ""}
+
+
+@router.post("/{workspace_id}/demo-checkpoint", response_model=DemoCheckpointOut)
+def create_demo_checkpoint(workspace_id: str, db: DB, user: CurrentUser):
+    """mock 演示模式专用：在 workspace 目录生成一份演示 checkpoint。
+
+    真实训练产出需要 GPU runtime；演示环境用该端点模拟「训练完成」，
+    让 Sim2Real 部署流程（artifact → checksum → deploy → edge 校验）可端到端走通。
+    非 mock provider 拒绝（真实环境必须用真实产出，不得伪造）。
+    """
+    import hashlib
+    import json as _json
+
+    workspace = _get_owned(db, workspace_id, user)
+    if orchestrator.provider.name != "mock":
+        raise HTTPException(400, "demo checkpoint is only available in mock mode")
+    out_dir = orchestrator.workspace_root / workspace.id / "outputs" / "run_0"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = _json.dumps(
+        {
+            "demo": True,
+            "workspace_id": workspace.id,
+            "template_id": workspace.template_id,
+            "note": "演示 checkpoint：真实训练产出由 Isaac Lab 写入 outputs/",
+        },
+        indent=2,
+        ensure_ascii=False,
+    ).encode()
+    path = out_dir / "checkpoint.pt"
+    path.write_bytes(payload)
+    return DemoCheckpointOut(
+        path="outputs/run_0/checkpoint.pt",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
 
 
 @router.delete("/{workspace_id}", status_code=204)

@@ -5,7 +5,7 @@
 """
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..deps import DB, CurrentUser, billing, orchestrator
 from ..models import Role
@@ -34,6 +34,10 @@ class SubmitIn(BaseModel):
     workspace_id: str | None = None
 
 
+class JoinBySlugIn(BaseModel):
+    slug: str = Field(min_length=1, max_length=64)
+
+
 # ---------------------------------------------------------------------------
 # 课程（教师 + 学生）
 # ---------------------------------------------------------------------------
@@ -58,6 +62,12 @@ def get_course(course_id: str, db: DB, user: CurrentUser):
 def join_course(course_id: str, db: DB, user: CurrentUser):
     course = course_service.get_course_or_404(db, course_id, user, require_member=False)
     return course_service.join_course(db, course, user)
+
+
+@router.post("/courses/join-by-slug", response_model=CourseMemberOut)
+def join_course_by_slug(payload: JoinBySlugIn, db: DB, user: CurrentUser):
+    """按 slug（邀请码）加入课程：老师分享 slug，学生输入即可加入。"""
+    return course_service.join_course_by_slug(db, payload.slug, user)
 
 
 @router.post("/courses/{course_id}/members", response_model=CourseMemberOut, status_code=201)
@@ -86,8 +96,16 @@ def create_lab(course_id: str, payload: LabCreate, db: DB, user: CurrentUser):
 
 @router.get("/courses/{course_id}/labs", response_model=list[LabOut])
 def list_labs(course_id: str, db: DB, user: CurrentUser):
-    course = course_service.get_course_for_teacher(db, course_id, user)
+    """labs 列表对 member 可见（学生要看到实验才能 launch）；创建仍限 teacher。"""
+    course = course_service.get_course_or_404(db, course_id, user)
     return course_service.list_labs(db, course)
+
+
+@router.get("/courses/{course_id}/my-progress")
+def get_my_progress(course_id: str, db: DB, user: CurrentUser):
+    """当前用户在课程中的作业进度（member 可见；教师另用 /completions 看全班）。"""
+    course = course_service.get_course_or_404(db, course_id, user)
+    return course_service.my_progress(db, course, user)
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +121,8 @@ def create_assignment(lab_id: str, payload: AssignmentCreate, db: DB, user: Curr
 
 @router.get("/labs/{lab_id}/assignments", response_model=list[AssignmentOut])
 def list_assignments(lab_id: str, db: DB, user: CurrentUser):
-    lab = course_service.get_lab_for_teacher(db, lab_id, user)
+    """assignments 列表对 member 可见（学生要看到作业才能提交）；创建仍限 teacher。"""
+    lab = course_service.get_lab_or_404(db, lab_id, user)
     return course_service.list_assignments(db, lab)
 
 

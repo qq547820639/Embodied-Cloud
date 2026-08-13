@@ -176,14 +176,6 @@ class GpuScheduler:
     def list_gpus(self, db: Session) -> list[Gpu]:
         return list(db.scalars(select(Gpu).order_by(Gpu.host_id, Gpu.gpu_uuid)))
 
-    # ------------------------------------------------------------------
-    # crash recovery
-    # ------------------------------------------------------------------
-    def release_all_for_workspaces(self, db: Session, workspace_ids: list[str]) -> None:
-        """恢复期调用：释放一批 workspace 的全部 GPU 绑定（幂等）。"""
-        for wid in workspace_ids:
-            self.release(db, wid)
-
 
 def recover_stuck_gpu_allocations(db: Session) -> None:
     """释放所有非占用 workspace 的孤儿 GPU 绑定（幂等）。

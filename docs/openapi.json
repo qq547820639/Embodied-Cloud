@@ -3,7 +3,7 @@
   "info": {
     "title": "EmbodiedCloud API",
     "description": "Browser-first Isaac Lab workspace control plane",
-    "version": "0.3.0"
+    "version": "0.4.0"
   },
   "paths": {
     "/api/auth/register": {
@@ -495,6 +495,49 @@
                   "type": "object",
                   "additionalProperties": true,
                   "title": "Response Workspace Logs Api Workspaces  Workspace Id  Logs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{workspace_id}/demo-checkpoint": {
+      "post": {
+        "tags": [
+          "workspaces"
+        ],
+        "summary": "Create Demo Checkpoint",
+        "description": "mock \u6f14\u793a\u6a21\u5f0f\u4e13\u7528\uff1a\u5728 workspace \u76ee\u5f55\u751f\u6210\u4e00\u4efd\u6f14\u793a checkpoint\u3002\n\n\u771f\u5b9e\u8bad\u7ec3\u4ea7\u51fa\u9700\u8981 GPU runtime\uff1b\u6f14\u793a\u73af\u5883\u7528\u8be5\u7aef\u70b9\u6a21\u62df\u300c\u8bad\u7ec3\u5b8c\u6210\u300d\uff0c\n\u8ba9 Sim2Real \u90e8\u7f72\u6d41\u7a0b\uff08artifact \u2192 checksum \u2192 deploy \u2192 edge \u6821\u9a8c\uff09\u53ef\u7aef\u5230\u7aef\u8d70\u901a\u3002\n\u975e mock provider \u62d2\u7edd\uff08\u771f\u5b9e\u73af\u5883\u5fc5\u987b\u7528\u771f\u5b9e\u4ea7\u51fa\uff0c\u4e0d\u5f97\u4f2a\u9020\uff09\u3002",
+        "operationId": "create_demo_checkpoint_api_workspaces__workspace_id__demo_checkpoint_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoCheckpointOut"
                 }
               }
             }
@@ -1151,6 +1194,48 @@
         }
       }
     },
+    "/api/courses/join-by-slug": {
+      "post": {
+        "tags": [
+          "courses"
+        ],
+        "summary": "Join Course By Slug",
+        "description": "\u6309 slug\uff08\u9080\u8bf7\u7801\uff09\u52a0\u5165\u8bfe\u7a0b\uff1a\u8001\u5e08\u5206\u4eab slug\uff0c\u5b66\u751f\u8f93\u5165\u5373\u53ef\u52a0\u5165\u3002",
+        "operationId": "join_course_by_slug_api_courses_join_by_slug_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinBySlugIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CourseMemberOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/courses/{course_id}/members": {
       "post": {
         "tags": [
@@ -1343,6 +1428,7 @@
           "courses"
         ],
         "summary": "List Labs",
+        "description": "labs \u5217\u8868\u5bf9 member \u53ef\u89c1\uff08\u5b66\u751f\u8981\u770b\u5230\u5b9e\u9a8c\u624d\u80fd launch\uff09\uff1b\u521b\u5efa\u4ecd\u9650 teacher\u3002",
         "operationId": "list_labs_api_courses__course_id__labs_get",
         "parameters": [
           {
@@ -1367,6 +1453,47 @@
                   },
                   "title": "Response List Labs Api Courses  Course Id  Labs Get"
                 }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/courses/{course_id}/my-progress": {
+      "get": {
+        "tags": [
+          "courses"
+        ],
+        "summary": "Get My Progress",
+        "description": "\u5f53\u524d\u7528\u6237\u5728\u8bfe\u7a0b\u4e2d\u7684\u4f5c\u4e1a\u8fdb\u5ea6\uff08member \u53ef\u89c1\uff1b\u6559\u5e08\u53e6\u7528 /completions \u770b\u5168\u73ed\uff09\u3002",
+        "operationId": "get_my_progress_api_courses__course_id__my_progress_get",
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Course Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           },
@@ -1439,6 +1566,7 @@
           "courses"
         ],
         "summary": "List Assignments",
+        "description": "assignments \u5217\u8868\u5bf9 member \u53ef\u89c1\uff08\u5b66\u751f\u8981\u770b\u5230\u4f5c\u4e1a\u624d\u80fd\u63d0\u4ea4\uff09\uff1b\u521b\u5efa\u4ecd\u9650 teacher\u3002",
         "operationId": "list_assignments_api_labs__lab_id__assignments_get",
         "parameters": [
           {
@@ -2120,7 +2248,7 @@
           "deployments"
         ],
         "summary": "Report Edge Checksum",
-        "description": "\u00a710\uff1aEdge \u4e0a\u62a5\u672c\u5730\u8ba1\u7b97\u7684 actual_sha256 \u2014\u2014 **\u552f\u4e00** edge\u2192server \u6821\u9a8c\u8def\u5f84\u3002\n\nserver \u6bd4\u8f83 actual == expected\uff08deployment.checksum\uff09\uff1a\nMATCH \u2192 VERIFIED\uff1bMISMATCH \u2192 FAILED\u3002\u5ba2\u6237\u7aef**\u4e0d\u80fd**\u76f4\u63a5\u63d0\u4ea4 status=VERIFIED\u3002",
+        "description": "\u00a710\uff1aEdge \u4e0a\u62a5\u672c\u5730\u8ba1\u7b97\u7684 actual_sha256 \u2014\u2014 **\u552f\u4e00** edge\u2192server \u6821\u9a8c\u8def\u5f84\u3002\n\n\u4e0a\u62a5\u65b9\u662f Edge agent\uff0c\u7528 X-Agent-Token \u8ba4\u8bc1\uff08\u7f3a\u5931/\u4e0d\u5339\u914d 401\uff09\u3002\nserver \u6bd4\u8f83 actual == expected\uff08deployment.checksum\uff09\uff1a\nMATCH \u2192 VERIFIED\uff1bMISMATCH \u2192 FAILED\u3002\u5ba2\u6237\u7aef**\u4e0d\u80fd**\u76f4\u63a5\u63d0\u4ea4 status=VERIFIED\u3002",
         "operationId": "report_edge_checksum_api_deployments__deployment_id__report_checksum_post",
         "parameters": [
           {
@@ -2411,6 +2539,30 @@
           "created_at"
         ],
         "title": "CourseOut"
+      },
+      "DemoCheckpointOut": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "size_bytes",
+          "sha256"
+        ],
+        "title": "DemoCheckpointOut",
+        "description": "mock \u6f14\u793a\u6a21\u5f0f\u7684\u6a21\u62df\u8bad\u7ec3\u4ea7\u51fa\uff1a\u4f9b Sim2Real \u90e8\u7f72\u6d41\u7a0b\u7aef\u5230\u7aef\u6f14\u793a\u3002"
       },
       "DeploymentCompleteIn": {
         "properties": {
@@ -2806,6 +2958,21 @@
           "version"
         ],
         "title": "HealthOut"
+      },
+      "JoinBySlugIn": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Slug"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug"
+        ],
+        "title": "JoinBySlugIn"
       },
       "LabCreate": {
         "properties": {

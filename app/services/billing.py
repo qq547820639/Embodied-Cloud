@@ -6,6 +6,8 @@
 - 结算本身保持 append-only CreditLedger + 幂等 key（restart-safe、无双重扣费）
 """
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -107,8 +109,6 @@ class BillingPolicy:
                 Workspace.deleted_at.is_(None),
             )
         )
-        from datetime import UTC, datetime
-
         now = datetime.now(UTC)
         total = 0
         for w in workspaces:

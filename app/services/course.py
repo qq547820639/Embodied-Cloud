@@ -162,6 +162,17 @@ def list_courses(db: Session, user: User) -> list[Course]:
     return list(db.scalars(stmt))
 
 
+def join_course_by_slug(db: Session, slug: str, user: User) -> CourseMember:
+    """按 slug（邀请码）加入课程；不存在 → 404（不泄露课程是否存在）。
+
+    slug 即老师分享给学生的邀请码，免去学生手动输入 uuid。
+    """
+    course = db.scalar(select(Course).where(Course.slug == slug))
+    if course is None:
+        raise HTTPException(404, "course not found")
+    return join_course(db, course, user)
+
+
 def add_member(db: Session, course: Course, user_id: str, role: str) -> CourseMember:
     if db.get(User, user_id) is None:
         raise HTTPException(404, "user not found")
@@ -297,6 +308,53 @@ def course_completions(db: Session, course: Course) -> list[dict]:
                     "submissions": rows,
                 }
             )
+    return result
+
+
+def my_progress(db: Session, course: Course, user: User) -> list[dict]:
+    """当前用户的课程进度：每个 assignment + 我的 submission 状态（member 可见）。
+
+    学生端「我的进度」：作业列表 + 提交状态/时间/关联 workspace；
+    教师端也可用（看到自己的提交记录）。
+    """
+    labs = list_labs(db, course)
+    lab_ids = [lab.id for lab in labs]
+    assignments: list[Assignment] = []
+    if lab_ids:
+        assignments = list(
+            db.scalars(
+                select(Assignment)
+                .where(Assignment.lab_id.in_(lab_ids))
+                .order_by(Assignment.created_at)
+            )
+        )
+    assignment_ids = [a.id for a in assignments]
+    submissions: dict[str, Submission] = {}
+    if assignment_ids:
+        for row in db.scalars(
+            select(Submission).where(
+                Submission.assignment_id.in_(assignment_ids),
+                Submission.user_id == user.id,
+            )
+        ):
+            submissions[row.assignment_id] = row
+    lab_names = {lab.id: lab.name for lab in labs}
+    result: list[dict] = []
+    for assignment in assignments:
+        submission = submissions.get(assignment.id)
+        result.append(
+            {
+                "lab_id": assignment.lab_id,
+                "lab_name": lab_names.get(assignment.lab_id, ""),
+                "assignment_id": assignment.id,
+                "assignment_name": assignment.name,
+                "description": assignment.description,
+                "due_at": assignment.due_at,
+                "status": submission.status if submission is not None else "not_submitted",
+                "completed_at": submission.completed_at if submission is not None else None,
+                "workspace_id": submission.workspace_id if submission is not None else None,
+            }
+        )
     return result
 
 

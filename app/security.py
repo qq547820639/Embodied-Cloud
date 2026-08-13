@@ -100,14 +100,6 @@ def make_session_dependency(session_factory, settings: Settings):
     return get_current_user
 
 
-def require_admin(user: User) -> User:
-    from .models import Role
-
-    if user.role != Role.ADMIN.value:
-        raise HTTPException(403, "admin role required")
-    return user
-
-
 # ---------------------------------------------------------------------------
 # Workspace 凭据保护：控制面不长期保存可直接登录的明文密码（§20/§13）
 # ---------------------------------------------------------------------------

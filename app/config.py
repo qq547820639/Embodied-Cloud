@@ -32,6 +32,8 @@ class Settings(BaseSettings):
 
     eula_accepted: bool = False
     privacy_consent: bool = False
+    # 预留：当前未启用（缺 runtime 活动信号，无法区分「空闲」与「长训练」），
+    # 后续接入 IDE/流连接活动检测后生效。
     default_idle_timeout_minutes: int = 60
     # §9：provision readiness 等待超时（秒）
     provision_ready_timeout_seconds: int = 120
@@ -43,7 +45,9 @@ class Settings(BaseSettings):
 
     # --- auth ---
     session_ttl_hours: int = 168  # 7 天
-    password_pepper: str = ""  # 生产建议配置；未配置时退化为空盐前缀
+    # 密码 pepper：生产（provider != mock）**必须**显式配置，否则 fail-closed 拒绝启动
+    # （见 security.validate_credential_configuration）；mock/本地开发可留空。
+    password_pepper: str = ""
     # workspace 凭据加密密钥（§20）：未配置时使用开发默认密钥（仅本地/mock）
     workspace_credential_key: str = ""
 

@@ -283,21 +283,6 @@ class WarmPoolManager:
         return workspace
 
     # ------------------------------------------------------------------
-    def drain(self, db: Session, workspace_id: str) -> None:
-        """把 warm workspace 移出池（DRAINING → 停用/释放）。"""
-        workspace = db.get(Workspace, workspace_id)
-        if workspace is None or workspace.warm_pool_state is None:
-            return
-        workspace.warm_pool_state = WarmPoolState.DRAINING.value
-        db.commit()
-
-    def mark_failed(self, db: Session, workspace_id: str) -> None:
-        workspace = db.get(Workspace, workspace_id)
-        if workspace is None:
-            return
-        workspace.warm_pool_state = WarmPoolState.FAILED.value
-        db.commit()
-
     def pool_metrics(self, db: Session) -> dict[str, dict[str, int]]:
         """warm pool 真实数量：按 template × state 聚合（COUNT(*)，非存在性标志）。"""
         from sqlalchemy import func

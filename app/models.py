@@ -572,7 +572,3 @@ class TelemetryEvent(Base):
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
-
-
-# 向后兼容别名（早期代码引用）
-WorkspaceStatusLegacy = WorkspaceStatus
