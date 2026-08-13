@@ -183,3 +183,26 @@ def test_benchmark_launch_missing_template_raises(db_factory):
         manager = _make_manager(db_factory)
         with pytest.raises(ValueError):
             manager.benchmark_launch(db, "no-such-template", iterations=1)
+
+
+def test_count_legacy_pool_excludes_user_workspaces(db_factory):
+    """legacy 计数只纳无归属（user_id IS NULL）的 workspace，普通用户 QUEUED 不计入。"""
+    with db_factory() as db:
+        _make_template(db, "cartpole")
+        # 无归属（warm pool legacy）→ 计入
+        db.add(
+            Workspace(
+                id="w-legacy", name="w", template_id="cartpole", provider="mock",
+                status=WorkspaceStatus.QUEUED.value, user_id=None,
+            )
+        )
+        # 普通用户 workspace（有 user_id）→ 不计入
+        db.add(
+            Workspace(
+                id="w-user", name="w2", template_id="cartpole", provider="mock",
+                status=WorkspaceStatus.QUEUED.value, user_id="u1",
+            )
+        )
+        db.commit()
+        manager = _make_manager(db_factory)
+        assert manager._count_legacy_pool(db, "cartpole") == 1

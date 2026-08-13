@@ -248,16 +248,31 @@ class WorkspaceOrchestrator:
         db.commit()
 
     def _fail(self, db: Session, workspace: Workspace, message: str) -> None:
+        """置 FAILED 并尽力释放 GPU。
+
+        FAILED 置位必须持久化：release 异常时回滚只撤销 release 的局部修改，
+        随后重新置位 FAILED + error_message + 清 GPU 字段；GPU 残留由 reconcile 补做。
+        """
         workspace.status = WorkspaceStatus.FAILED.value
         workspace.error_message = message
+        # 先 flush：release 成功时其内部 commit 会连同 FAILED 置位一并落库
+        db.flush()
         try:
             self.scheduler.release(db, workspace.id)
-        except Exception:
+        except Exception as exc:
             db.rollback()
+            # 不得因 release 失败回滚 FAILED 置位：重新置位（release 失败可被 reconcile 补做）
+            logger.warning(
+                "workspace %s GPU release failed during fail: %s (will be reconciled)",
+                workspace.id[:8], exc,
+            )
+            workspace.status = WorkspaceStatus.FAILED.value
+            workspace.error_message = message
         # FAILED 的 workspace 不得声称占有 GPU（字段一并清除）
         workspace.gpu_id = None
         workspace.gpu_index = None
         workspace.gpu_name = None
+        db.flush()
 
     # ------------------------------------------------------------------
     # stop / destroy（同步 API 语义）
@@ -496,18 +511,16 @@ class WorkspaceOrchestrator:
         """
         stats = {"stopped": 0, "scanned": 0, "notified": 0}
         with self.session_factory() as db:
+            # 复用注入的 BillingPolicy（构造属性），无 policy 时整段跳过（如测试/无计费环境）
+            if self.billing is None:
+                logger.debug("quota monitor skipped: no billing policy configured")
+                return stats
             running = db.scalars(
                 select(Workspace).where(
                     Workspace.status == WorkspaceStatus.RUNNING.value,
                     Workspace.deleted_at.is_(None),
                 )
             ).all()
-            from .billing import BillingPolicy
-
-            policy = BillingPolicy(
-                self.session_factory, self.ledger,
-                minimum_launch_minutes=5, enforce_preauthorization=False,
-            )
             for w in running:
                 if w.user_id is None:
                     continue  # warm pool（无归属）不监控计费
@@ -522,13 +535,19 @@ class WorkspaceOrchestrator:
                     if started.tzinfo is None:
                         started = started.replace(tzinfo=UTC)
                     live = max(0, int((utcnow() - started).total_seconds()))
-                projected = self.ledger.balance(db, user.id) - live
+                # 口径对齐 billing.check_launch_eligible：个人 + 组织 合并余额
+                org_balance = (
+                    self.ledger.organization_balance(db, user.organization_id)
+                    if user.organization_id
+                    else 0
+                )
+                projected = self.ledger.balance(db, user.id) + org_balance - live
                 # course quota 检查
                 labs = db.scalars(
                     select(Lab).where(Lab.template_id == w.template_id)
                 ).all()
                 quota_exceeded = any(
-                    policy.course_usage_seconds(db, user.id, lab) >= lab.quota_seconds
+                    self.billing.course_usage_seconds(db, user.id, lab) >= lab.quota_seconds
                     for lab in labs
                 )
                 if projected < 0 or quota_exceeded:

@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from ..deps import DB, CurrentUser, ledger
-from ..models import CreditLedger, LedgerType, Role, Template, Workspace, WorkspaceStatus
+from ..models import CreditLedger, LedgerType, Role, Template, User, Workspace, WorkspaceStatus
 from ..schemas import LedgerEntryOut, RechargeIn, UsageOut
 
 router = APIRouter(tags=["usage"])
@@ -78,14 +78,33 @@ def recharge(payload: RechargeIn, db: DB, user: CurrentUser):
 
 
 @router.post("/admin/ledger/adjustment", response_model=LedgerEntryOut, include_in_schema=False)
-def admin_adjustment(amount: int, description: str, user: CurrentUser, db: DB):
+def admin_adjustment(
+    amount: int,
+    description: str,
+    user: CurrentUser,
+    db: DB,
+    target_user_id: str | None = None,
+):
+    """账务调整：可调整指定用户余额；不指定 target 时向后兼容记 admin 自己。"""
     if user.role != Role.ADMIN.value:
         raise HTTPException(403, "admin role required")
+    if target_user_id is None:
+        # 向后兼容：记 admin 自己（organization 与旧实现一致，不写入）
+        target_id = user.id
+        organization_id: str | None = None
+    else:
+        target = db.scalar(select(User).where(User.id == target_user_id))
+        if target is None:
+            raise HTTPException(404, "target user not found")
+        target_id = target.id
+        organization_id = target.organization_id
     return ledger.record(
         db,
         type=LedgerType.ADJUSTMENT,
         amount=amount,
-        user_id=user.id,
+        user_id=target_id,
+        organization_id=organization_id,
         description=description,
-        idempotency_key=f"adj:{user.id}:{uuid.uuid4()}",
+        # idempotency_key 含目标用户 id，两种模式下均保持唯一语义
+        idempotency_key=f"adj:{target_id}:{uuid.uuid4()}",
     )

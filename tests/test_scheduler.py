@@ -200,6 +200,21 @@ def test_recover_preserves_nonterminal_allocations(status):
         assert alloc is not None and alloc.released_at is None
 
 
+def test_recover_releases_queued_orphan_allocation():
+    """QUEUED 阶段尚未分配 GPU，持卡即孤儿 → 必须释放（无 active op）。"""
+    scheduler = _setup_two_gpus()
+    with Factory() as db:
+        _workspace(db, "w-queued-orphan")  # 默认 queued
+        gpu = scheduler.allocate(db, "w-queued-orphan", gpu_requirement_gb=8)
+        assert db.get(Gpu, gpu.id).status == GpuStatus.ALLOCATED.value
+
+        recover_stuck_gpu_allocations(db)
+        gpu = db.get(Gpu, gpu.id)
+        assert gpu.status == GpuStatus.AVAILABLE.value
+        assert gpu.workspace_id is None
+        assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == "w-queued-orphan")) is None
+
+
 def test_recover_preserves_workspace_with_active_operation():
     """终态 workspace 但存在 active operation（如 DESTROY 重试中）：分配必须保留。"""
     scheduler = _setup_two_gpus()

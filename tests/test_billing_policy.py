@@ -22,6 +22,7 @@ from app.models import (
     GpuAllocation,
     Lab,
     LedgerType,
+    Organization,
     Role,
     Template,
     User,
@@ -382,6 +383,73 @@ def test_runtime_quota_monitor_idempotent():
             select(CreditLedger).where(CreditLedger.workspace_id == wid)
         ).all()
         assert len([e for e in usage if e.type == LedgerType.USAGE.value]) == 1  # 只结算一次
+
+
+def test_runtime_quota_monitor_org_credit_covers_personal_overdraft():
+    """个人透支但组织余额充足 → 合并口径（个人+组织）不停止。"""
+    from datetime import UTC, datetime, timedelta
+
+    orchestrator, ledger = _make_orchestrator_for_monitor()
+    with Factory() as db:
+        _seed_gpu_template(db)
+        db.add(Organization(id="org-1", name="org"))
+        db.commit()
+        user = _make_user(db, user_id="u-org")
+        user.organization_id = "org-1"
+        db.commit()
+        ws = orchestrator.create(db, db.get(Template, "cartpole"), user_id=user.id)
+        wid = ws.id
+        orchestrator._start(wid)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.RUNNING.value
+        # 个人 -50（透支），组织 +1000 → 合并 +950，live 60s 后仍 ≥ 0
+        ledger.record(db, type=LedgerType.USAGE, amount=-50, user_id="u-org", idempotency_key="p-over")
+        ledger.record(db, type=LedgerType.RECHARGE, amount=1000, organization_id="org-1", idempotency_key="o-topup")
+        ws.started_at = datetime.now(UTC) - timedelta(seconds=60)
+        db.commit()
+
+    stats = orchestrator.monitor_runtime_quotas()
+    assert stats["stopped"] == 0
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.RUNNING.value
+
+
+def test_runtime_quota_monitor_combined_overdraft_stops():
+    """个人+组织合计透支 → 优雅停止。"""
+    from datetime import UTC, datetime, timedelta
+
+    orchestrator, ledger = _make_orchestrator_for_monitor()
+    with Factory() as db:
+        _seed_gpu_template(db)
+        db.add(Organization(id="org-2", name="org"))
+        db.commit()
+        user = _make_user(db, user_id="u-over")
+        user.organization_id = "org-2"
+        db.commit()
+        ws = orchestrator.create(db, db.get(Template, "cartpole"), user_id=user.id)
+        wid = ws.id
+        orchestrator._start(wid)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.RUNNING.value
+        # 个人 30，组织 -80 → 合并 -50，live 60s → -110 < 0 → 停止
+        ledger.record(db, type=LedgerType.RECHARGE, amount=30, user_id="u-over", idempotency_key="p-30")
+        ledger.record(db, type=LedgerType.USAGE, amount=-80, organization_id="org-2", idempotency_key="o-debt")
+        ws.started_at = datetime.now(UTC) - timedelta(seconds=60)
+        db.commit()
+
+    stats = orchestrator.monitor_runtime_quotas()
+    assert stats["stopped"] == 1
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.STOPPED.value
+        assert "quota monitor" in ws.error_message
 
 
 def _policy_from_settings(minutes: int, enforce: bool) -> BillingPolicy:

@@ -206,7 +206,10 @@ def recover_stuck_gpu_allocations(db: Session) -> None:
     """释放所有非占用 workspace 的孤儿 GPU 绑定（幂等）。
 
     占用判据（避免误释放进行中生命周期，防止同一物理 GPU 被二次分配 → 一卡双跑）：
-    - workspace 状态属于非终态 {QUEUED, PROVISIONING, RUNNING, STOPPING}
+    - workspace 状态属于非终态 {PROVISIONING, RUNNING, STOPPING}
+      （QUEUED 阶段尚未进入分配环节，GPU 分配只发生在 PROVISIONING 阶段，
+       QUEUED 却持有分配属于孤儿残留，故不保护；PROVISIONING/STOPPING 的
+       runtime 状态未知，保守保留）
     - 或存在 active operation（workspace_operations.status ∈ {PENDING, RUNNING, RETRYING}）
     其余（workspace 不存在、终态 workspace 且无 active operation）的 GPU 绑定
     视为孤儿，予以释放。
@@ -218,7 +221,6 @@ def recover_stuck_gpu_allocations(db: Session) -> None:
             select(Workspace.id).where(
                 Workspace.status.in_(
                     [
-                        WorkspaceStatus.QUEUED.value,
                         WorkspaceStatus.PROVISIONING.value,
                         WorkspaceStatus.RUNNING.value,
                         WorkspaceStatus.STOPPING.value,

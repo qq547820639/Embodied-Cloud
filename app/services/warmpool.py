@@ -319,7 +319,11 @@ class WarmPoolManager:
         return int(n or 0)
 
     def _count_legacy_pool(self, db: Session, template_id: str) -> int:
-        """旧语义：CREATED/QUEUED 且未标记 warm_pool_state 的 workspace 计入池。"""
+        """旧语义：CREATED/QUEUED 且未标记 warm_pool_state 的 workspace 计入池。
+
+        仅统计无归属（user_id IS NULL）的 workspace —— warm pool workspace 无 user_id，
+        普通用户创建的 QUEUED workspace 有归属，不得误计入池。
+        """
         from sqlalchemy import func
 
         n = db.scalar(
@@ -330,6 +334,7 @@ class WarmPoolManager:
                     [WorkspaceStatus.CREATED.value, WorkspaceStatus.QUEUED.value]
                 ),
                 Workspace.deleted_at.is_(None),
+                Workspace.user_id.is_(None),
             )
         )
         return int(n or 0)

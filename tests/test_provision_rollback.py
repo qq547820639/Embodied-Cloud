@@ -262,3 +262,42 @@ def test_mock_provision_failure_still_releases_gpu(monkeypatch, tmp_path):
         assert db.scalar(select(Gpu)).status == GpuStatus.AVAILABLE.value
     # 补偿 destroy 被统一调用（mock 为幂等 no-op），不得抛错
     assert provider.destroy_calls == 1
+
+
+def test_fail_persists_failed_state_when_release_raises(monkeypatch, tmp_path):
+    """release 抛异常：FAILED + error_message 仍持久化，GPU 字段已清除（release 可被 reconcile 补做）。"""
+    provider = MockProvider("http://127.0.0.1:8000")
+    with Factory() as db:
+        _seed_gpu(db)
+        _make_template(db)
+        orchestrator = WorkspaceOrchestrator(Factory, provider, Path(tmp_path))
+        workspace = orchestrator.create(db, db.get(Template, "cartpole"), user_id="u1")
+        wid = workspace.id
+        # 模拟 _fail 调用前的状态：PROVISIONING 且已持有 GPU（与 _execute_provision 失败前一致）
+        gpu = db.scalar(select(Gpu))
+        gpu.status = GpuStatus.ALLOCATED.value
+        gpu.workspace_id = wid
+        ws = db.get(Workspace, wid)
+        ws.status = WorkspaceStatus.PROVISIONING.value
+        ws.gpu_id = gpu.id
+        ws.gpu_index = gpu.gpu_index
+        ws.gpu_name = gpu.model
+        db.commit()
+
+    def _boom_release(db, workspace_id):
+        raise RuntimeError("simulated release failure")
+
+    monkeypatch.setattr(orchestrator.scheduler, "release", _boom_release)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        orchestrator._fail(db, ws, "boom")
+        db.commit()
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.FAILED.value
+        assert ws.error_message == "boom"
+        assert ws.gpu_id is None
+        assert ws.gpu_index is None
+        assert ws.gpu_name is None
