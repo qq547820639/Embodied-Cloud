@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.4.0 — 2026-08-14（Product UX Iteration）
+
+### 前端重构（多视图 SPA，仍为无构建工具链的静态资源）
+- 概览 / 用量与账单 / 课程 / 部署·Sim2Real / 边缘设备 / GPU 管理 六视图 + hash 路由；
+  此前前端仅 68 行 JS 只覆盖登录+模板+工作区，后端 9 组路由大部分能力（账本/课程/
+  部署/Edge/流/GPU）前端零入口。
+- 用量页：per-workspace 明细（已结算+live 秒、按模板费率估算 ¥）、不可变账本明细表、
+  充值（演示语义）、口径说明（1 credit = 1 GPU 秒）。
+- 课程页：slug 邀请码加入、老师建课/成员/实验/作业/全班完成矩阵，学生一键启动实验、
+  查看我的进度、提交作业。
+- 部署页：工作区 → artifact 路径 → 创建部署，download/verify/run/complete 状态机操作 +
+  checksum 展示；演示模式可一键生成模拟 checkpoint 端到端走通。
+- 边缘设备页：注册（token 一次性展示+复制，本地保存供心跳/遥测代发）、心跳、遥测。
+- 流会话：工作区卡片内联会话面板（start/connect/disconnect/reconnect 状态机）。
+- GPU 管理页（admin）：inventory/hosts、维护/异常流转。
+- 状态反馈：工作区瞬态自动轮询（终态即停、页面隐藏暂停）、进行中 spinner、
+  状态→中文映射、按状态渲染可用操作（修复「非 running 一律显示启动」）。
+- 破坏性操作确认弹窗 + in-flight 防重（防双击重复创建/误删）。
+- 安全：所有用户可控内容渲染前 HTML 转义（消除存储型 XSS：workspace 名/错误信息/
+  模板字段/日志标题）；/demo-workspace 后端同步转义 name/launch_command 并按真实
+  状态渲染徽标（不再无条件 RUNNING）；IDE 密码改为「复制密码」按钮而非明文 toast。
+- 可用性：登录/注册 tab、表单回车提交、autocomplete 语义、刷新页面后 /api/auth/me
+  校验真实用户（修复 token 前缀 + undefined 角色）、模板匿名可浏览、逐区块错误态+
+  重试、toast 定时器清理、aria-live/焦点环/skip-link、对比度调优、移动端响应式。
+
+### 后端（UX 支撑 + 清理）
+- 新增端点：`POST /api/courses/join-by-slug`（邀请码加入）、
+  `GET /api/courses/{id}/my-progress`（我的作业进度）、
+  `POST /api/workspaces/{id}/demo-checkpoint`（mock 专用演示产出；非 mock 400）。
+- 权限修正：labs/assignments 列表对 member 可读（学生此前无法看到要 launch 的实验）。
+- /demo-workspace：鉴权（owner/admin）+ HTML 转义 + 真实状态徽标 + 非运行中提示。
+- 清理死代码：WorkspaceStatusLegacy、require_admin、scheduler.release_all_for_workspaces、
+  ledger.history、warmpool.drain/mark_failed、logging_setup.new_request_id/workspace_log_context。
+- config/.env.example 对齐：password_pepper 注释修正（生产 fail-closed）、
+  PROVISION_READY_TIMEOUT_SECONDS、K8S_GPU_MEMORY_MB；idle timeout 标注为预留。
+
+### 测试
+- 新增：test_auth.py（login/logout/me + verify_password 边界 + token 仅存哈希）、
+  test_course_onboarding.py（slug 加入/member 可见/progress/launch 402）、
+  test_demo_checkpoint.py、test_gpu_admin.py（admin inventory + GPU 分配→释放真实断言）、
+  demo 页 XSS 转义回归。
+- 修正伪覆盖：deployment_verification「恒真 VERIFIED」改为「PENDING 直接 verify 409 防绕过」；
+  迁移测试校验关键表落地/移除；admin_adjustment 补 HTTP 层 403/200。
+
+### 文档
+- API.md 重写为全量端点参考；ARCHITECTURE.md 对齐代码（Provider 协议/routers/数据模型/
+  reconcile 语义）；ACCEPTANCE_GATES 去重与数字刷新；CURRENT_STATE 重写；
+  过时模板 slug（GPU_HOST/ACCEPTANCE）修正；四份 08-13 review 报告加「已修复」免责头；
+  版本标号统一 0.4.0。
+
 ## 0.3.0 — 2026-08-12（Acceptance Hardening）
 
 ### Correctness（P0）

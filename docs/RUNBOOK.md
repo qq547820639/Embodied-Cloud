@@ -1,6 +1,6 @@
 # RUNBOOK — EmbodiedCloud
 
-> 版本：0.2.0（2026-08-12）。面向 SRE/值班工程师；先看 `docs/ACCEPTANCE_GATES.md` 了解验证分级。
+> 版本：0.4.0（2026-08-14）。面向 SRE/值班工程师；先看 `docs/ACCEPTANCE_GATES.md` 了解验证分级。
 
 ## 1. 本地开发（Mock）
 
@@ -21,8 +21,9 @@ make migrate-downgrade
 EMBODIEDCLOUD_DATABASE_URL=postgresql+psycopg://... make migrate-up   # 生产
 ```
 
-首次启动控制面时若表不存在会自动 `Base.metadata.create_all`（开发便利），
-正式环境请显式执行迁移并开启 `EMBODIEDCLOUD_AUTO_CREATE_TABLES=false`（默认关闭）。
+首次启动控制面时若表不存在会自动 `Base.metadata.create_all`（开发便利，
+默认 `EMBODIEDCLOUD_AUTO_CREATE_TABLES=true`）；正式环境请显式执行迁移并设为
+`EMBODIEDCLOUD_AUTO_CREATE_TABLES=false`（生产多实例必须走 alembic）。
 
 ## 3. 启动/停止
 
@@ -60,10 +61,10 @@ GPU 验收 Gate 见 `docs/GPU_HOST.md` 与 `docs/ACCEPTANCE_GATES.md`。
 
 | 症状 | 检查 |
 |---|---|
-| Workspace 卡 QUEUED/PROVISIONING | 查 DB `workspaces.status`；启动时 crash recovery 会置 FAILED 并归还 GPU |
+| Workspace 卡 QUEUED/PROVISIONING | 查 DB `workspaces.status`；启动时 reconcile 会按 runtime 事实收敛（PROVISIONING 缺失 → 重新入队；RUNNING 缺失 → 结算置 FAILED 并归还 GPU） |
 | FAILED 无错误 | `GET /api/workspaces/{id}` 的 `error_message` |
 | 端口冲突 | `ss -ltn` / 查 `ide_port`；streaming 固定 49100/47998 |
-| GPU 未释放 | `gpu_allocations` 表；手动 `DELETE` 后状态回 AVAILABLE |
+| GPU 未释放 | `gpu_allocations` 表 + `gpus.workspace_id`；正常由 stop/destroy/reconcile 自动释放（`gpus.status → available` 且 `workspace_id=NULL`），勿只删 allocation 行 |
 | 日志无 request_id | 确认经过 RequestIDMiddleware（生产开启 `EMBODIEDCLOUD_LOG_JSON=true`） |
 
 ## 7. 备份

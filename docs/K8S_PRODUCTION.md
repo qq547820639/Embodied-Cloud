@@ -1,6 +1,6 @@
 # Kubernetes 生产迁移设计
 
-当前仓库交付的是单机 Docker MVP；Kubernetes 是下一阶段替换 Provider，不重写 API/UI。
+Kubernetes Provider 已实现（`app/services/providers/k8s.py`：Deployment/Service/PVC 全生命周期 + readiness + 凭据轮换 + reconcile），并已接线 GPU inventory（`deps._sync_k8s_gpus`）；待真实集群物理验收（`pytest -m k8s_integration`，无集群时标记 K8S_PHYSICAL_VALIDATION_PENDING）。本文描述生产迁移设计，不重写 API/UI。
 
 ## 目标映射
 

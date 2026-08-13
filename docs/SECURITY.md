@@ -1,6 +1,6 @@
 # SECURITY — EmbodiedCloud
 
-> 版本：0.2.0（2026-08-12）。先读本文再改任何安全相关代码。
+> 版本：0.4.0（2026-08-14）。先读本文再改任何安全相关代码。
 
 ## 1. 安全原则
 
@@ -36,7 +36,7 @@ Reliability > Reproducibility > **Security** > Observability > DX > Performance 
 
 ## 5. 授权与隔离
 
-- 角色：user / admin（预留 org_admin / instructor / student）。
+- 角色：user / admin / org_admin / instructor / student（课程模块按 instructor/org_admin 判定教师权限）。
 - Workspace / Course / Deployment 查询必须校验 `owner_id == current_user.id` 或 admin。
 - 隔离测试：`tests/test_isolation.py` 必须保持全绿。
 

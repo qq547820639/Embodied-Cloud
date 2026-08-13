@@ -1,5 +1,8 @@
 # EmbodiedCloud 全仓库系统性代码走读 · 架构评审报告
 
+> **⚠️ 历史快照**：本文是 2026-08-13 对 v0.3.0 的审查记录。文中所列 P0/P1/P2 缺陷绝大多数已在后续提交（b02811a → 05a2643 以及 v0.4.0 迭代）修复并附回归测试；行号也已漂移。作为当时审查的历史证据保留，最新状态以代码、`docs/CURRENT_STATE.md` 与 `docs/ACCEPTANCE_GATES.md` 为准。
+
+
 > 审查日期：2026-08-13
 > 审查人：高见远（软件架构师）
 > 审查对象：`/Volumes/Extra/CodeProj/Embodied Cloud`（v0.3.0，FastAPI 单体控制面）

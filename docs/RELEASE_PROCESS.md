@@ -1,6 +1,6 @@
 # RELEASE_PROCESS — EmbodiedCloud
 
-> 版本：0.2.0（2026-08-12）。语义化版本；每一 release 必须产出规定的 artifacts 与验证矩阵。
+> 版本：0.4.0（2026-08-14）。语义化版本；每一 release 必须产出规定的 artifacts 与验证矩阵。
 
 ## 1. 版本策略
 

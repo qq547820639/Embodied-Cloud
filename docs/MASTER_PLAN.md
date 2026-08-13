@@ -1,6 +1,6 @@
 # MASTER_PLAN — EmbodiedCloud
 
-> 版本：0.2.0（2026-08-12）。滚动更新；每完成一个 milestone 同步 `docs/CURRENT_STATE.md` 与 `docs/ACCEPTANCE_GATES.md`。
+> 版本：0.4.0（2026-08-14）。滚动更新；每完成一个 milestone 同步 `docs/CURRENT_STATE.md` 与 `docs/ACCEPTANCE_GATES.md`。
 
 ## 目标
 

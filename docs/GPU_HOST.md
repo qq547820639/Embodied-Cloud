@@ -53,15 +53,15 @@ EMBODIEDCLOUD_HOST_PUBLIC_IP=<GPU主机IP> ./scripts/run_gpu_controlplane.sh
 
 ### Gate G1：Newton smoke
 
-启动 `newton-cartpole-smoke`，打开 IDE，运行 README 中命令。验收：5 iterations 正常结束，没有 CUDA/runtime import error。
+启动 `cartpole`，打开 IDE，运行 README 中命令。验收：5 iterations 正常结束，没有 CUDA/runtime import error。
 
 ### Gate G2：Franka headless
 
-启动 `franka-lift-cube`。验收：环境成功创建并开始训练；记录显存峰值和第一次 asset/cache 时间。
+启动 `franka-lift`。验收：环境成功创建并开始训练；记录显存峰值和第一次 asset/cache 时间。
 
 ### Gate G3：WebRTC smoke
 
-先停止其它 streaming workspace，再启动 `webrtc-streaming-smoke`，在 IDE 内运行模板命令。验收：49100/TCP 与 47998/UDP 监听，客户端能看到 0.5m 立方体。
+先停止其它 streaming workspace，再启动 `franka-pick-place（WebRTC 模板）`，在 IDE 内运行模板命令。验收：49100/TCP 与 47998/UDP 监听，客户端能看到 0.5m 立方体。
 
 ## 防火墙
 

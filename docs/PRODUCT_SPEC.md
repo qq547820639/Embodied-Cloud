@@ -1,6 +1,6 @@
 # PRODUCT_SPEC — EmbodiedCloud
 
-> 版本：0.2.0（2026-08-12）。取代早期 `docs/PRODUCT_SCOPE.md` 的定位描述，保留其边界并固化为规范。
+> 版本：0.4.0（2026-08-14）。取代早期 `docs/PRODUCT_SCOPE.md` 的定位描述，保留其边界并固化为规范。
 
 ## 1. 产品使命
 
@@ -31,7 +31,7 @@
 
 | 对象 | 说明 |
 |---|---|
-| User / Organization / Role | user, admin；后续 org_admin, instructor, student |
+| User / Organization / Role | user / admin / org_admin / instructor / student（课程模块已实现并接线） |
 | Template | slug/version/image/gpu_requirement/entrypoints/outputs/streaming/healthcheck/metadata |
 | Workspace | 生命周期 CREATED→QUEUED→PROVISIONING→RUNNING→STOPPING→STOPPED/FAILED/DELETED |
 | GpuHost / Gpu | inventory：AVAILABLE/ALLOCATED/UNHEALTHY/DRAINING |
