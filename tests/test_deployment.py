@@ -13,6 +13,7 @@ from app.db import Base
 from app.models import DeploymentRecord, Template, User, Workspace
 from app.services.deployment import DeploymentService
 from app.services.edge import EdgeService
+from app.services.providers.mock import MockProvider
 
 CHECKPOINT_BYTES = b"model-bytes-v1"
 
@@ -235,3 +236,131 @@ def test_list_filters_by_owner(db, tmp_path):
     assert svc.list(db, intruder) == []
     assert svc.list(db, owner, workspace_id=ws.id) == [d]
     assert svc.list(db, owner, workspace_id="other-ws") == []
+
+
+# ---------------------------------------------------------------------------
+# create_artifact：本地缺失时经 provider.pull_artifact 拉取（K8s PVC 场景）
+# ---------------------------------------------------------------------------
+
+
+class PullRecordingProvider(MockProvider):
+    """记录 pull_artifact 返回的临时路径，验证「调用方负责清理」。"""
+
+    def __init__(self, public_base_url: str, workspace_root):
+        super().__init__(public_base_url, workspace_root=workspace_root)
+        self.source_paths: list[str] = []
+        self.pulled: list = []
+
+    def pull_artifact(self, workspace, source_path: str):
+        tmp = super().pull_artifact(workspace, source_path)
+        self.source_paths.append(source_path)
+        self.pulled.append(tmp)
+        return tmp
+
+
+def _setup_pull(db, tmp_path):
+    """构造：控制面本地无文件、runtime 侧有文件（模拟 K8s workspace Pod PVC）。"""
+    _template(db)
+    owner = _user(db)
+    ws = _workspace(db, owner)
+    db.commit()
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / ws.id).mkdir(parents=True)
+    return owner, ws, control_root, runtime_root
+
+
+def test_create_artifact_pulls_when_local_missing_and_cleans_tmp(db, tmp_path):
+    owner, ws, control_root, runtime_root = _setup_pull(db, tmp_path)
+    (runtime_root / ws.id / "checkpoint.pt").write_bytes(CHECKPOINT_BYTES)
+
+    provider = PullRecordingProvider("http://127.0.0.1:8000", workspace_root=runtime_root)
+    svc = DeploymentService(None, control_root, provider=provider)
+
+    artifact = svc.create_artifact(db, owner, ws, "checkpoint.pt")
+    assert artifact.name == "checkpoint.pt"
+    assert artifact.path == "checkpoint.pt"
+    assert artifact.checksum == hashlib.sha256(CHECKPOINT_BYTES).hexdigest()
+    assert artifact.size_bytes == len(CHECKPOINT_BYTES)
+    # 经 provider.pull_artifact 拉取
+    assert provider.source_paths == ["checkpoint.pt"]
+    assert len(provider.pulled) == 1
+    # 临时文件与其父目录（mkdtemp 建的临时目录）均被 finally 清理
+    assert not provider.pulled[0].exists()
+    assert not provider.pulled[0].parent.exists()
+
+
+def test_create_artifact_pull_cleans_tmp_dir_on_store_failure(db, tmp_path):
+    """store.put 抛异常路径：pull 的临时目录仍被 finally 清理（不泄漏空目录）。"""
+    owner, ws, control_root, runtime_root = _setup_pull(db, tmp_path)
+    (runtime_root / ws.id / "checkpoint.pt").write_bytes(CHECKPOINT_BYTES)
+
+    provider = PullRecordingProvider("http://127.0.0.1:8000", workspace_root=runtime_root)
+
+    class FailingStore:
+        name = "failing"
+
+        def put(self, object_key, data, content_type="application/octet-stream"):
+            raise RuntimeError("store write failed")
+
+        def get(self, object_key):
+            raise RuntimeError("not implemented")
+
+        def exists(self, object_key):
+            return False
+
+        def delete(self, object_key):
+            return None
+
+    svc = DeploymentService(None, control_root, store=FailingStore(), provider=provider)
+
+    with pytest.raises(RuntimeError, match="store write failed"):
+        svc.create_artifact(db, owner, ws, "checkpoint.pt")
+    assert len(provider.pulled) == 1
+    assert not provider.pulled[0].parent.exists()  # 异常路径也清理临时目录
+
+
+def test_create_artifact_uses_local_when_present(db, tmp_path):
+    """本地文件存在 → 现状路径，不触发 provider.pull_artifact。"""
+    _template(db)
+    owner = _user(db)
+    ws = _workspace(db, owner)
+    db.commit()
+    ws_dir = tmp_path / ws.id
+    ws_dir.mkdir(parents=True)
+    (ws_dir / "checkpoint.pt").write_bytes(CHECKPOINT_BYTES)
+
+    provider = PullRecordingProvider("http://127.0.0.1:8000", workspace_root=tmp_path / "runtime")
+    svc = DeploymentService(None, tmp_path, provider=provider)
+
+    artifact = svc.create_artifact(db, owner, ws, "checkpoint.pt")
+    assert artifact.checksum == hashlib.sha256(CHECKPOINT_BYTES).hexdigest()
+    assert provider.source_paths == []  # 本地存在 → 不拉取
+
+
+def test_create_artifact_pull_missing_file_404(db, tmp_path):
+    owner, ws, control_root, runtime_root = _setup_pull(db, tmp_path)
+    # runtime 侧也无文件 → pull 抛 FileNotFoundError → 404
+    provider = MockProvider("http://127.0.0.1:8000", workspace_root=runtime_root)
+    svc = DeploymentService(None, control_root, provider=provider)
+
+    with pytest.raises(HTTPException) as exc:
+        svc.create_artifact(db, owner, ws, "missing.pt")
+    assert exc.value.status_code == 404
+
+
+def test_create_artifact_pull_failure_500(db, tmp_path):
+    owner, ws, control_root, runtime_root = _setup_pull(db, tmp_path)
+
+    class FailingPullProvider(MockProvider):
+        def pull_artifact(self, workspace, source_path: str):
+            raise RuntimeError("kubectl cp failed")
+
+    provider = FailingPullProvider("http://127.0.0.1:8000", workspace_root=runtime_root)
+    svc = DeploymentService(None, control_root, provider=provider)
+
+    with pytest.raises(HTTPException) as exc:
+        svc.create_artifact(db, owner, ws, "checkpoint.pt")
+    assert exc.value.status_code == 500
+    assert "failed to pull artifact" in exc.value.detail

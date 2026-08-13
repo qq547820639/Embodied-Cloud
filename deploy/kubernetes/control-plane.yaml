@@ -1,5 +1,6 @@
 # Development skeleton only. For production, replace SQLite with PostgreSQL
 # before increasing replicas, and add authenticated ingress + secrets.
+# 生产部署见 control-plane-production.yaml（PostgreSQL + alembic 迁移 + PVC）。
 apiVersion: apps/v1
 kind: Deployment
 metadata:

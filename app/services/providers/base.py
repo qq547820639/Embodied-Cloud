@@ -73,6 +73,16 @@ class WorkspaceProvider(Protocol):
     def inspect(self, workspace: Workspace) -> dict: ...
     def logs(self, workspace: Workspace, tail: int = 200) -> str: ...
     def reconcile(self, workspace: Workspace) -> RuntimeState: ...
+    def pull_artifact(self, workspace: Workspace, source_path: str) -> Path:
+        """把 workspace runtime 内的文件拉到控制面本地临时路径并返回。
+
+        契约：
+        - source_path 是 workspace 运行时内的相对路径（相对其工作目录/挂载点）；
+        - 返回控制面本地**临时**文件的 Path（内容为 source_path 指向文件的拷贝）；
+        - 调用方负责在消费完毕后清理该临时文件（用 try/finally 保证不泄漏）；
+        - 源文件不存在 / 拉取失败：上抛异常（如 RuntimeError / FileNotFoundError），
+          由调用方（DeploymentService.create_artifact）转换为 404/500 语义。
+        """
     def wait_ready(
         self,
         workspace: Workspace,

@@ -20,6 +20,7 @@ from app.security import WorkspaceCredentialCipher
 from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
 from app.services.warmpool import WarmPoolManager
+from app.services.worker import OperationWorker
 
 ENGINE = create_engine("sqlite:///./test-warmpool-claim.db", connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
@@ -89,10 +90,26 @@ def _claim(manager, db, template_id: str, user_id: str):
     return manager.claim(db, template_id, user, credential_cipher=CIPHER)
 
 
+def _drain(manager) -> None:
+    """驱动 worker 执行完 maintain 异步入队的 PROVISION operation。"""
+    worker = OperationWorker(Factory, manager.orchestrator)
+    for _ in range(20):
+        if worker.tick_once() == 0:
+            return
+    raise AssertionError("operations did not drain")
+
+
 def _warm_pool(db, manager) -> Workspace:
-    """maintain 出一个 READY warm runtime。"""
+    """maintain → 异步 provision（worker 驱动）→ 再 maintain 收割 → READY warm runtime。"""
     manager.maintain(db)
-    ws = db.scalars(select(Workspace)).one()
+    ws_id = db.scalars(select(Workspace.id)).one()
+    _drain(manager)
+    with Factory() as reap_db:
+        manager.maintain(reap_db)
+    # 结束 db 会话事务，避免读到 drain/reap 之前的旧快照
+    db.rollback()
+    ws = db.get(Workspace, ws_id)
+    assert ws is not None
     assert ws.warm_pool_state == WarmPoolState.READY.value
     assert ws.status == WorkspaceStatus.RUNNING.value
     assert ws.user_id is None  # READY 没有用户归属
@@ -202,9 +219,7 @@ def test_claim_rotation_failure_not_delivered():
         _make_template(db)
         _seed_gpu(db)
         _make_user(db, "user-1")
-        manager.maintain(db)
-        ws = db.scalars(select(Workspace)).one()
-        assert ws.warm_pool_state == WarmPoolState.READY.value
+        ws = _warm_pool(db, manager)
 
         result = manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER)
         assert result is None  # 未交付
@@ -239,8 +254,7 @@ def test_claim_rotates_runtime_credential_before_delivery():
         _make_template(db)
         _seed_gpu(db)
         _make_user(db, "user-1")
-        manager.maintain(db)
-        ws = db.scalars(select(Workspace)).one()
+        ws = _warm_pool(db, manager)
         old_password = ws.password
 
         claimed = manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER)
@@ -254,30 +268,43 @@ def test_claim_rotates_runtime_credential_before_delivery():
 
 
 def test_api_launch_prefers_warm_pool_claim():
-    """§6：POST /api/workspaces 走 WarmPool claim 真实产品路径（mock 池 READY 时命中）。"""
+    """§6：POST /api/workspaces 走 WarmPool claim 真实产品路径（池 READY 时命中）。
+
+    隔离：直接预置 READY warm runtime（不触发 PROVISION / 不驱动后台 worker），
+    避免与全局 worker 并发建池、消耗 mock GPU，污染其它用例（保证全量任意顺序全绿）。
+    """
+    import uuid
+
     from fastapi.testclient import TestClient
 
     from app.deps import SessionFactory
+    from app.deps import orchestrator as global_orch
     from app.deps import settings as deps_settings
     from app.main import app as fastapi_app
 
-    # 打开 warm pool（设置全局开关；测试后还原）
-    old = deps_settings.warm_pool_enabled
+    old_enabled = deps_settings.warm_pool_enabled
+    old_size = deps_settings.warm_pool_size
     deps_settings.warm_pool_enabled = True
-    deps_settings.warm_pool_size = 2
+    deps_settings.warm_pool_size = 1
+    seeded_id = f"wp-ready-api-{uuid.uuid4().hex[:12]}"
     try:
-        # 预热一个 READY runtime
-        from app.services.orchestrator import WorkspaceOrchestrator as O
-        from app.services.providers.mock import MockProvider as M
-        from app.services.warmpool import WarmPoolManager
-
-        wp_orch = O(SessionFactory, M("http://127.0.0.1:8000"), Path("/tmp/test-wp-api"))  # noqa: S108
-        wp = WarmPoolManager(SessionFactory, wp_orch, deps_settings)
-
         with TestClient(fastapi_app) as client:
-            # lifespan 已 bootstrap 全局 DB；先预热再请求
+            # lifespan bootstrap 已建表 + seed；直接预置一个 READY warm runtime
+            # （无 GPU、无 PROVISION，纯 claim 路径）
             with SessionFactory() as db:
-                wp.maintain(db)
+                db.add(
+                    Workspace(
+                        id=seeded_id,
+                        name="warm-ready",
+                        template_id="cartpole",
+                        provider="mock",
+                        status=WorkspaceStatus.RUNNING.value,
+                        warm_pool_state=WarmPoolState.READY.value,
+                        user_id=None,
+                    )
+                )
+                db.commit()
+
             resp = client.post(
                 "/api/auth/register",
                 json={"email": "wp@example.com", "username": "wpu", "password": "password123"},
@@ -290,35 +317,28 @@ def test_api_launch_prefers_warm_pool_claim():
             )
             assert created.status_code == 201
             workspace_id = created.json()["id"]
+            # claim 命中预置的 READY workspace（而非新建普通 workspace）
+            assert workspace_id == seeded_id
 
-            # claim 命中：workspace 直接 RUNNING（无需等待 provision），且绑定当前用户
             state = client.get(f"/api/workspaces/{workspace_id}", headers=headers).json()
             assert state["status"] == "running"
-            # warm pool 池已减少（该 workspace 不再是 READY）
-            from app.models import Workspace as W
-
             with SessionFactory() as db:
-                claimed = db.get(W, workspace_id)
+                claimed = db.get(Workspace, workspace_id)
                 assert claimed is not None
                 assert claimed.user_id is not None
     finally:
-        deps_settings.warm_pool_enabled = old
-        # 清理：释放 warm pool 占用的全局 GPU（tombstone warm workspaces）
-        from sqlalchemy import select as _select
-
-        from app.models import Workspace as W
-
+        deps_settings.warm_pool_enabled = old_enabled
+        deps_settings.warm_pool_size = old_size
+        # 清理：销毁预置/claim 的 warm workspace（释放占位，不污染其它用例）
         with SessionFactory() as db:
             warm_ids = [
-                w.id for w in db.scalars(_select(W).where(W.warm_pool_state.is_not(None)))
+                w.id for w in db.scalars(select(Workspace).where(Workspace.warm_pool_state.is_not(None)))
             ]
-        if warm_ids:
-            orch = wp_orch
-            for wid in warm_ids:
-                with SessionFactory() as db:
-                    w = db.get(W, wid)
-                    if w is not None:
-                        orch.destroy(db, w)
+        for wid in warm_ids:
+            with SessionFactory() as db:
+                w = db.get(Workspace, wid)
+                if w is not None:
+                    global_orch.destroy(db, w)
 
 
 def test_pool_metrics_uses_real_counts():
@@ -332,26 +352,21 @@ def test_pool_metrics_uses_real_counts():
     with Factory() as db:
         _make_template(db)
         _seed_gpu(db)
-        manager.maintain(db)
-        # 只 1 张 GPU → 恰好 1 个 READY
-        metrics = manager.pool_metrics(db)
-        assert metrics["cartpole"][WarmPoolState.READY.value] == 1  # 1 张 GPU → 1 个 READY
-        assert metrics["cartpole"][WarmPoolState.PREWARMING.value] == 0
-        assert metrics["cartpole"][WarmPoolState.FAILED.value] == 2  # 池不足：2 个预热失败
-        # 手动再加 1 个 READY（直接置状态）→ 计数为 2（COUNT 语义）
-        db.scalars(select(Workspace)).first()
-        ws2 = Workspace(
-            id="ws-extra",
-            name="warm-extra",
-            template_id="cartpole",
-            provider="mock",
-            status=WorkspaceStatus.RUNNING.value,
-            warm_pool_state=WarmPoolState.READY.value,
-        )
-        db.add(ws2)
+        # 直接构造同状态多个 workspace：验证 COUNT(*) 语义（同状态计数 >1，非 0/1 标志）
+        for i, state in enumerate(
+            [WarmPoolState.READY.value, WarmPoolState.READY.value, WarmPoolState.PREWARMING.value]
+        ):
+            db.add(
+                Workspace(
+                    id=f"ws-{i}", name=f"warm-{i}", template_id="cartpole", provider="mock",
+                    status=WorkspaceStatus.RUNNING.value, warm_pool_state=state,
+                )
+            )
         db.commit()
-        metrics2 = manager.pool_metrics(db)
-        assert metrics2["cartpole"][WarmPoolState.READY.value] == 2
+        metrics = manager.pool_metrics(db)
+        assert metrics["cartpole"][WarmPoolState.READY.value] == 2  # 2 个 READY，非 1
+        assert metrics["cartpole"][WarmPoolState.PREWARMING.value] == 1
+        assert metrics["cartpole"][WarmPoolState.FAILED.value] == 0
 
 
 class CleanupTrackingProvider(MockProvider):
@@ -380,8 +395,7 @@ def test_warm_pool_rotation_failure_cleans_runtime():
         _make_template(db)
         _seed_gpu(db)
         _make_user(db, "user-1")
-        manager.maintain(db)
-        ws = db.scalars(select(Workspace)).one()
+        ws = _warm_pool(db, manager)
         result = manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER)
         assert result is None
         # provider.destroy 被调用（runtime 已清理）
@@ -405,8 +419,7 @@ def test_warm_pool_rotation_failure_releases_gpu():
         _make_template(db)
         _seed_gpu(db)
         _make_user(db, "user-1")
-        manager.maintain(db)
-        ws = db.scalars(select(Workspace)).one()
+        ws = _warm_pool(db, manager)
         manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER)
         # GPU 释放：无 allocation、GPU 回 AVAILABLE
         assert db.scalar(select(GA).where(GA.workspace_id == ws.id)) is None
@@ -427,8 +440,7 @@ def test_failed_claim_can_not_be_reclaimed():
         _make_template(db)
         _seed_gpu(db)
         _make_user(db, "user-1")
-        manager.maintain(db)
-        ws = db.scalars(select(Workspace)).one()
+        ws = _warm_pool(db, manager)
         assert manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER) is None
         # 再次 claim：不命中 DRAINING/FAILED 的 workspace → None（无 READY）
         assert manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER) is None

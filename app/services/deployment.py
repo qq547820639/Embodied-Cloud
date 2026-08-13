@@ -6,6 +6,7 @@
 """
 
 import hashlib
+import shutil
 import uuid
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from ..models import (
     Workspace,
 )
 from .artifact_store import ArtifactStore, LocalArtifactStore
+from .providers.base import WorkspaceProvider
 
 
 def _sha256_file(path: Path) -> str:
@@ -39,6 +41,7 @@ class DeploymentService:
         session_factory: sessionmaker[Session],
         workspace_root: Path,
         store: "ArtifactStore | None" = None,
+        provider: "WorkspaceProvider | None" = None,
     ) -> None:
         self.session_factory = session_factory
         self.workspace_root = workspace_root
@@ -46,6 +49,11 @@ class DeploymentService:
         # object_key 即 workspace 目录文件，零行为变化）；生产注入
         # S3CompatibleArtifactStore —— 控制面不直接 mount Workspace PVC。
         self.store = store or LocalArtifactStore(workspace_root)
+        # WorkspaceProvider（可选）：控制面本地读不到 workspace 产出文件时，
+        # 经 provider.pull_artifact 从 runtime 拉取（K8s 下数据在 workspace Pod
+        # 的 PVC，控制面 Pod 读不到）。None = 仅走本地文件系统（现状行为，
+        # mock/docker 单机 workspace_root 共享时可用）。
+        self.provider = provider
 
     # ------------------------------------------------------------------
     # 资源访问（owner 隔离；越权一律 404）
@@ -77,34 +85,61 @@ class DeploymentService:
         """把 Workspace 产出登记为 Artifact：读文件 → ArtifactStore.put → DB 记录。
 
         path 相对于 workspace_root/{workspace.id}/; 文件必须存在, 且不得逃逸出该目录.
+
+        读取来源二选一：
+        1) 本地文件存在（mock/docker 单机，workspace_root 共享）→ 直接读；
+        2) 本地不存在 → provider.pull_artifact 从 workspace runtime 拉取临时文件
+           （K8s 下数据在 workspace Pod PVC，控制面本地读不到）→ 校验后入 store，
+           finally 清理临时文件。
         """
         self._ensure_owner(db, user, workspace)
         base = (self.workspace_root / workspace.id).resolve()
         full = (base / path).resolve()
         if not full.is_relative_to(base):
             raise HTTPException(400, "artifact path escapes workspace directory")
-        if not full.is_file():
+        tmp_file: Path | None = None
+        if full.is_file():
+            source: Path = full
+        elif self.provider is not None:
+            try:
+                tmp_file = self.provider.pull_artifact(workspace, path)
+            except FileNotFoundError as exc:
+                raise HTTPException(404, f"artifact file not found: {path}") from exc
+            except Exception as exc:
+                raise HTTPException(500, f"failed to pull artifact from workspace: {exc}") from exc
+            if not tmp_file.is_file() or tmp_file.stat().st_size <= 0:
+                shutil.rmtree(tmp_file.parent, ignore_errors=True)
+                tmp_file = None
+                raise HTTPException(404, f"artifact file not found: {path}")
+            source = tmp_file
+        else:
             raise HTTPException(404, f"artifact file not found: {path}")
-        object_key = self._object_key(workspace, path)
-        # 写入对象存储（生产 S3；开发 Local）。Local 下 object_key 即原文件，
-        # 写入内容与原文件一致（幂等覆盖）。
-        self.store.put(object_key, full.read_bytes())
-        artifact = Artifact(
-            id=str(uuid.uuid4()),
-            workspace_id=workspace.id,
-            name=Path(path).name,
-            path=path,
-            object_key=object_key,
-            content_type="application/octet-stream",
-            store_name=self.store.name,
-            checksum=_sha256_file(full),
-            size_bytes=full.stat().st_size,
-            model_version=self._template_version(db, workspace),
-        )
-        db.add(artifact)
-        db.commit()
-        db.refresh(artifact)
-        return artifact
+        try:
+            object_key = self._object_key(workspace, path)
+            # 写入对象存储（生产 S3；开发 Local）。Local 下 object_key 即原文件，
+            # 写入内容与原文件一致（幂等覆盖）。
+            self.store.put(object_key, source.read_bytes())
+            artifact = Artifact(
+                id=str(uuid.uuid4()),
+                workspace_id=workspace.id,
+                name=Path(path).name,
+                path=path,
+                object_key=object_key,
+                content_type="application/octet-stream",
+                store_name=self.store.name,
+                checksum=_sha256_file(source),
+                size_bytes=source.stat().st_size,
+                model_version=self._template_version(db, workspace),
+            )
+            db.add(artifact)
+            db.commit()
+            db.refresh(artifact)
+            return artifact
+        finally:
+            # 拉取的临时文件由调用方负责清理（Provider 契约）：
+            # pull_artifact 用 mkdtemp 建目录，清理时连父目录一并移除，避免空目录泄漏。
+            if tmp_file is not None:
+                shutil.rmtree(tmp_file.parent, ignore_errors=True)
 
     def deploy(
         self,

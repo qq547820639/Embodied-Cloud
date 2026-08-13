@@ -9,6 +9,9 @@
 
 import logging
 import secrets
+import shutil
+import subprocess
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -94,6 +97,15 @@ class KubernetesProvider:
         if self._client is None:
             raise RuntimeError(self._config_error or "kubernetes client 未初始化（kube config 加载失败）")
         return self._client
+
+    def _run(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """执行 kubectl CLI 命令（pull_artifact 用）。
+
+        仅受控常量参数（kubectl cp / namespace / pod / path），不包含用户可控
+        的 shell 拼接；与 docker provider 的 _run 语义一致。
+        """
+        # S603: 仅执行受控常量参数（kubectl CLI），不包含用户输入。
+        return subprocess.run(args, text=True, capture_output=True, check=check)  # noqa: S603
 
     @staticmethod
     def _describe(exc: BaseException) -> str:
@@ -379,6 +391,44 @@ class KubernetesProvider:
             )
         except Exception:
             return ""
+
+    def pull_artifact(self, workspace: Workspace, source_path: str) -> Path:
+        """kubectl cp 把 workspace Pod 内文件拉到控制面本地临时路径并返回。
+
+        实现说明：本类 provision/inspect 通过 kubernetes client 与集群交互；拉文件
+        本可用 stream exec，但 `kubernetes.stream` 必须在真实集群路径 import SDK，
+        会破坏「offline 零 SDK 依赖」设计（见 test_offline_provision_never_imports_
+        kubernetes_sdk）。故采用 kubectl cp（CLI）兜底：
+        - 先用 client 列 Pod（与 logs() 一致，label_selector 定位 Deployment 的 Pod）
+        - 再 kubectl cp -n {ns} {pod}:{path} {tmp}；returncode != 0 或目标缺失 → 上抛
+        - 返回的临时文件由调用方负责清理（try/finally）
+
+        单元测试覆盖命令构造；真实集群执行待物理验证。
+        """
+        deployment_name = workspace.container_name or self._deployment_name(workspace)
+        api = self._require_client()
+        core = api.CoreV1Api()
+        ns = self.settings.k8s_namespace
+        pods = core.list_namespaced_pod(namespace=ns, label_selector=f"app={deployment_name}")
+        if not pods.items:
+            raise FileNotFoundError(f"no pod found for deployment {deployment_name}")
+        pod_name = pods.items[0].metadata.name
+        tmp_dir = Path(tempfile.mkdtemp(prefix="embodiedcloud-artifact-"))
+        dest = tmp_dir / Path(source_path).name
+        result = self._run(
+            ["kubectl", "cp", "-n", ns, f"{pod_name}:{source_path}", str(dest)], check=False
+        )
+        if result.returncode != 0:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            output = f"{result.stdout or ''}\n{result.stderr or ''}"
+            raise RuntimeError(
+                f"kubectl cp failed: {pod_name}:{source_path} "
+                f"(rc={result.returncode}): {output.strip()[:400]}"
+            )
+        if not dest.is_file():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise FileNotFoundError(f"artifact file not found in pod: {source_path}")
+        return dest
 
     def wait_ready(self, workspace, template, timeout_seconds: int = 120) -> bool:
         """§9 readiness：Deployment available_replicas>=1 + Pod Ready + Service 端点。"""

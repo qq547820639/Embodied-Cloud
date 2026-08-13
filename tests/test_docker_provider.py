@@ -1,3 +1,4 @@
+from pathlib import Path
 from subprocess import CompletedProcess
 
 import pytest
@@ -276,3 +277,69 @@ def test_stop_idempotent_when_no_such_container(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider, "_run", fake_run)
     provider.stop(ws)  # 不应抛错
+
+
+# ---------------------------------------------------------------------------
+# pull_artifact：命令构造（真实 docker daemon 路径待物理验证）
+# ---------------------------------------------------------------------------
+
+
+def _fake_cp_run(commands: list):
+    """模拟 docker cp 成功：把内容写到目标路径（目标文件由 docker cp 产生）。"""
+
+    def fake_run(args, *, check=True):
+        commands.append(args)
+        if args[:2] == ["docker", "cp"]:
+            dest = Path(args[-1])
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"artifact-bytes")
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    return fake_run
+
+
+def test_pull_artifact_constructs_docker_cp(monkeypatch, tmp_path):
+    """docker cp {container}:{path} {tmp} 命令参数正确，返回临时文件。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = DockerProvider(settings)
+    ws = make_workspace()
+    ws.container_name = "ec-11111111-222"
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(provider, "_run", _fake_cp_run(commands))
+    result = provider.pull_artifact(ws, "outputs/checkpoint.pt")
+
+    assert commands[0][:2] == ["docker", "cp"]
+    assert commands[0][2] == "ec-11111111-222:outputs/checkpoint.pt"
+    assert commands[0][3] == str(result)
+    assert result.read_bytes() == b"artifact-bytes"
+
+
+def test_pull_artifact_derives_container_name_when_missing(monkeypatch, tmp_path):
+    """container_name 缺失时按 ec-{id[:12]} 推导（与 destroy 一致）。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = DockerProvider(settings)
+    ws = make_workspace()  # container_name 为 None
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(provider, "_run", _fake_cp_run(commands))
+    provider.pull_artifact(ws, "checkpoint.pt")
+
+    assert commands[0][2] == "ec-11111111-222:checkpoint.pt"
+
+
+def test_pull_artifact_raises_on_docker_cp_failure(monkeypatch, tmp_path):
+    """docker cp 非零 returncode → 上抛 RuntimeError。"""
+    settings = Settings(eula_accepted=True, workspace_root=tmp_path)
+    provider = DockerProvider(settings)
+    ws = make_workspace()
+    ws.container_name = "ec-test"
+
+    def fake_run(args, *, check=True):
+        return CompletedProcess(
+            args=args, returncode=1, stdout="", stderr="Error: No such container: ec-test"
+        )
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="docker cp failed"):
+        provider.pull_artifact(ws, "checkpoint.pt")

@@ -1,5 +1,7 @@
 """KubernetesProvider 单元测试: 全部使用 fake kubernetes client, 不连接真实集群."""
 
+from pathlib import Path
+from subprocess import CompletedProcess
 from types import SimpleNamespace
 
 import pytest
@@ -333,3 +335,90 @@ def test_offline_provision_never_imports_kubernetes_sdk(tmp_path, monkeypatch):
     provider, _ = make_provider()
     result = provider.provision(make_workspace(), make_template(), tmp_path / "ws", make_reservation())
     assert result.container_name == DEPLOYMENT_NAME
+
+
+# ---------------------------------------------------------------------------
+# pull_artifact：kubectl cp 命令构造（真实集群执行待物理验证）
+# ---------------------------------------------------------------------------
+
+
+def test_pull_artifact_kubectl_cp(tmp_path, monkeypatch):
+    """先用 client 列 Pod（定位 Deployment 的 Pod），再 kubectl cp 到临时目录。"""
+    provider, fake = make_provider()
+    ws = running_workspace()
+    commands: list[list[str]] = []
+
+    def fake_run(args, *, check=True):
+        commands.append(args)
+        if args[:2] == ["kubectl", "cp"]:
+            dest = Path(args[-1])
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"artifact-bytes")
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    result = provider.pull_artifact(ws, "outputs/checkpoint.pt")
+
+    # 1) list pod：label_selector 定位 Deployment 的 Pod
+    kinds = [c[0] for c in fake.calls]
+    assert "list_pods" in kinds
+    _, ns, selector = next(c for c in fake.calls if c[0] == "list_pods")
+    assert ns == "embodiedcloud"
+    assert selector == "app=ec-11111111-222"
+
+    # 2) kubectl cp -n {ns} {pod}:{path} {tmp}
+    assert commands[0][:2] == ["kubectl", "cp"]
+    assert commands[0][2] == "-n"
+    assert commands[0][3] == "embodiedcloud"
+    assert commands[0][4] == "ec-pod-1:outputs/checkpoint.pt"
+    assert commands[0][5] == str(result)
+    assert result.read_bytes() == b"artifact-bytes"
+
+
+def test_pull_artifact_derives_deployment_name_when_container_missing(tmp_path, monkeypatch):
+    """container_name 缺失时按 ec-{id[:12]} 推导（与 destroy 一致）。"""
+    provider, fake = make_provider()
+    ws = make_workspace()  # container_name 为 None
+    commands: list[list[str]] = []
+
+    def fake_run(args, *, check=True):
+        commands.append(args)
+        if args[:2] == ["kubectl", "cp"]:
+            Path(args[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(args[-1]).write_bytes(b"x")
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    provider.pull_artifact(ws, "checkpoint.pt")
+
+    _, _, selector = next(c for c in fake.calls if c[0] == "list_pods")
+    assert selector == "app=ec-11111111-222"
+
+
+def test_pull_artifact_no_pod_raises(tmp_path, monkeypatch):
+    """Deployment 无 Pod → FileNotFoundError（调用方转 404）。"""
+    provider, _ = make_provider()
+
+    class EmptyPodsCore:
+        def list_namespaced_pod(self, namespace, label_selector=None, **kwargs):
+            return SimpleNamespace(items=[])
+
+    class EmptyClient:
+        def CoreV1Api(self):
+            return EmptyPodsCore()
+
+    monkeypatch.setattr(provider, "_require_client", lambda: EmptyClient())
+    with pytest.raises(FileNotFoundError, match="no pod found"):
+        provider.pull_artifact(running_workspace(), "checkpoint.pt")
+
+
+def test_pull_artifact_raises_on_kubectl_cp_failure(tmp_path, monkeypatch):
+    """kubectl cp 非零 returncode → 上抛 RuntimeError。"""
+    provider, _ = make_provider()
+
+    def fake_run(args, *, check=True):
+        return CompletedProcess(args=args, returncode=1, stdout="", stderr="Error from kubectl")
+
+    monkeypatch.setattr(provider, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="kubectl cp failed"):
+        provider.pull_artifact(running_workspace(), "checkpoint.pt")

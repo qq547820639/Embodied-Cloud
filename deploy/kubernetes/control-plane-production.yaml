@@ -1,0 +1,108 @@
+# Production control-plane deployment（生产就绪清单）。
+#
+# 与开发骨架 control-plane.yaml 的差异（P1-8）：
+#   - EMBODIEDCLOUD_DATABASE_URL 指向外部 PostgreSQL（Secret 注入），替代 SQLite 文件
+#   - EMBODIEDCLOUD_AUTO_CREATE_TABLES=false（主容器不 auto-create）
+#   - initContainer 执行 `alembic upgrade head`（迁移先行，schema 由迁移管理）
+#   - workspace_root 使用 PVC 持久卷（替代 emptyDir，重启不丢数据）
+#
+# 未覆盖项（生产落地前仍需补齐，见 docs/K8S_PRODUCTION.md）：
+#   - 控制面 RBAC（k8s provider 创建 Deployment/Service/PVC 所需权限）
+#   - authenticated Ingress / TLS、对象存储（S3）artifact store、密钥管理
+#
+# 依赖说明：DATABASE_URL 使用 postgresql+psycopg://，需控制面镜像安装 postgres extra
+# （psycopg 驱动）。runtime/Dockerfile.control-plane 已改为 `pip install ".[postgres]"`。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: embodiedcloud-postgres
+  namespace: embodiedcloud
+type: Opaque
+stringData:
+  # 占位示例：生产由外部密钥管理（Vault / SealedSecret / KMS / ExternalSecrets）
+  # 注入，严禁把明文连接串提交到仓库。
+  DATABASE_URL: "postgresql+psycopg://embodiedcloud:CHANGE_ME@postgres.embodiedcloud.svc.cluster.local:5432/embodiedcloud"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: embodiedcloud-workspaces
+  namespace: embodiedcloud
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  # storageClassName: 生产建议显式指定高性能存储类（NFS/CephFS/云盘等）
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embodiedcloud-control-plane
+  namespace: embodiedcloud
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: embodiedcloud-control-plane}
+  template:
+    metadata:
+      labels: {app: embodiedcloud-control-plane}
+    spec:
+      serviceAccountName: embodiedcloud-control-plane
+      initContainers:
+        - name: migrate
+          image: embodiedcloud/control-plane:0.3.0
+          command: ["alembic", "upgrade", "head"]
+          env:
+            - name: EMBODIEDCLOUD_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: embodiedcloud-postgres
+                  key: DATABASE_URL
+      containers:
+        - name: api
+          image: embodiedcloud/control-plane:0.3.0
+          ports:
+            - {containerPort: 8000}
+          env:
+            - {name: EMBODIEDCLOUD_PROVIDER, value: "k8s"}
+            - name: EMBODIEDCLOUD_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: embodiedcloud-postgres
+                  key: DATABASE_URL
+            - {name: EMBODIEDCLOUD_AUTO_CREATE_TABLES, value: "false"}
+            - {name: EMBODIEDCLOUD_WORKSPACE_ROOT, value: "/workspaces"}
+            - {name: EMBODIEDCLOUD_LOG_JSON, value: "true"}
+            - {name: EMBODIEDCLOUD_WARM_POOL_ENABLED, value: "false"}
+          livenessProbe:
+            httpGet: {path: /api/health, port: 8000}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: {path: /api/health, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: "0.5", memory: "512Mi"}
+            limits: {cpu: "2", memory: "2Gi"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+          volumeMounts:
+            - {name: workspaces, mountPath: /workspaces}
+      volumes:
+        - name: workspaces
+          persistentVolumeClaim:
+            claimName: embodiedcloud-workspaces
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embodiedcloud-control-plane
+  namespace: embodiedcloud
+spec:
+  selector: {app: embodiedcloud-control-plane}
+  ports:
+    - {port: 80, targetPort: 8000}

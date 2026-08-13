@@ -1,4 +1,6 @@
 import secrets
+import shutil
+import tempfile
 from pathlib import Path
 
 from ...models import Template, Workspace
@@ -8,8 +10,10 @@ from .base import ProvisionResult, ResourceReservation, RuntimeState
 class MockProvider:
     name = "mock"
 
-    def __init__(self, public_base_url: str):
+    def __init__(self, public_base_url: str, workspace_root: Path | None = None):
         self.public_base_url = public_base_url.rstrip("/")
+        # mock 无真实 runtime；workspace_root 供 pull_artifact 模拟「从 runtime 拉文件」
+        self.workspace_root = workspace_root
 
     def health(self) -> tuple[bool, str]:
         return True, "mock provider ready"
@@ -45,6 +49,22 @@ class MockProvider:
     def inspect(self, workspace: Workspace) -> dict:
         # mock 无真实 runtime；返回会话中可见的静态信息
         return {"provider": self.name, "runtime": "mock", "container_name": workspace.container_name}
+
+    def pull_artifact(self, workspace: Workspace, source_path: str) -> Path:
+        """模拟真实拉取：从 workspace_root/{workspace.id}/{source_path} 复制到临时目录。
+
+        - 源文件不存在 → FileNotFoundError（调用方转 404）
+        - 返回的临时文件由调用方负责清理（try/finally）
+        """
+        if self.workspace_root is None:
+            raise FileNotFoundError(f"mock workspace_root not configured: {source_path}")
+        source = (self.workspace_root / workspace.id / source_path).resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"artifact file not found in workspace runtime: {source_path}")
+        tmp_dir = Path(tempfile.mkdtemp(prefix="embodiedcloud-artifact-"))
+        dest = tmp_dir / Path(source_path).name
+        shutil.copy2(source, dest)
+        return dest
 
     def logs(self, workspace: Workspace, tail: int = 200) -> str:
         return ""

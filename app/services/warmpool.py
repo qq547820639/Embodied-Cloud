@@ -26,7 +26,7 @@ from ..metrics import (
     WARM_POOL_CLAIM_TOTAL,
     WARM_POOL_READY,
 )
-from ..models import Template, User, WarmPoolState, Workspace, WorkspaceStatus
+from ..models import OperationType, Template, User, WarmPoolState, Workspace, WorkspaceStatus
 
 if TYPE_CHECKING:
     from .orchestrator import WorkspaceOrchestrator
@@ -34,6 +34,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger("embodiedcloud.warmpool")
 
 _WARM_STATES = {state.value for state in WarmPoolState}
+
+# PREWARMING 占位在「收割」阶段被收敛为 FAILED 的终态/错误态集合：
+# 这些状态的 workspace 既不可能再被 claim，也不应继续占用池位。
+_TERMINAL_STATUSES = {
+    WorkspaceStatus.FAILED.value,
+    WorkspaceStatus.STOPPED.value,
+    WorkspaceStatus.DELETED.value,
+}
 
 
 def utcnow() -> datetime:
@@ -50,24 +58,50 @@ class WarmPoolManager:
         self.session_factory = session_factory
         self.orchestrator = orchestrator
         self.settings = settings
+        # 补位冷却退避：本轮刚 reap 为 FAILED 的池位，本轮补位跳过（下一轮恢复），
+        # 避免容量不足时「reap FAILED → 立即重建 → PROVISION 再失败」的无限 churn。
+        self._fail_cooldown: dict[str, int] = {}
 
     # ------------------------------------------------------------------
-    # maintain：补齐并预热 READY runtime
+    # maintain：两步异步补齐 warm runtime（不阻塞 worker 循环）
     # ------------------------------------------------------------------
     def maintain(self, db: Session) -> dict[str, int]:
-        """为每个 enabled 模板补齐 warm runtime（PREWARMING → READY）。"""
+        """为每个 enabled 模板补齐 warm runtime（PREWARMING → READY）。
+
+        三步异步模式：
+        1) 收割（先做）：把每个模板的 PREWARMING workspace 收敛——
+           RUNNING → READY；终态/错误态 → FAILED（不残留 PREWARMING 占位）；
+        2) 清理：为已 FAILED 且无 active operation 的 warm workspace 补入队
+           DESTROY（异步释放占位与资源，不残留 tombstone 累积）；
+        3) 补位：missing = warm_pool_size - (ready + prewarming + legacy)，
+           每个缺失位只 create + 置 PREWARMING + start_async（入队 durable
+           PROVISION operation，由 worker 异步执行）；本轮刚 reap 失败的池位
+           因冷却退避跳过补位（容量恢复后下一轮收敛回目标 size）。
+
+        不再同步调用 orchestrator._start（其内含 wait_ready 120s 门禁，
+        同步预热会长时间阻塞 worker 循环，期间 STOP/DESTROY/PROVISION 无法处理）。
+        """
         if not self.settings.warm_pool_enabled:
-            return {"created": 0, "ready": 0}
-        stats = {"created": 0, "ready": 0}
-        for template in db.scalars(select(Template).where(Template.enabled.is_(True))):
+            return {"created": 0, "ready": 0, "destroyed": 0}
+        stats = {"created": 0, "ready": 0, "destroyed": 0}
+        templates = list(db.scalars(select(Template).where(Template.enabled.is_(True))))
+        # 1) 收割（先做）：PREWARMING → READY/FAILED，保证池位不残留占位
+        for template in templates:
+            self._reap_prewarming(db, template.id, stats)
+        # 2) 清理：FAILED warm workspace 入队 DESTROY（有 active op 则下轮再试）
+        for template in templates:
+            self._cleanup_failed(db, template.id, stats)
+        # 3) 补位：只创建 + 入队异步 PROVISION，带冷却退避
+        for template in templates:
             ready = self._count_state(db, template.id, WarmPoolState.READY)
             prewarming = self._count_state(db, template.id, WarmPoolState.PREWARMING)
             # 兼容旧语义：CREATED/QUEUED 且未标记 warm_pool_state 的 workspace 视为池内
             legacy = self._count_legacy_pool(db, template.id)
             missing = self.settings.warm_pool_size - (ready + prewarming + legacy)
-            if missing <= 0:
-                continue
-            for _ in range(missing):
+            # 冷却仅作用一轮：本轮 reap 失败的池位跳过补位，下一轮恢复
+            cooldown = self._fail_cooldown.pop(template.id, 0)
+            fillable = max(0, missing - cooldown)
+            for _ in range(fillable):
                 workspace = self.orchestrator.create(
                     db,
                     template,
@@ -78,19 +112,65 @@ class WarmPoolManager:
                 workspace.warm_pool_state = WarmPoolState.PREWARMING.value
                 db.commit()
                 stats["created"] += 1
-                # 预热（同步）：成功后 READY
-                self.orchestrator._start(workspace.id)
-                with self.session_factory() as fresh:
-                    w = fresh.get(Workspace, workspace.id)
-                    if w is not None and w.status == WorkspaceStatus.RUNNING.value:
-                        w.warm_pool_state = WarmPoolState.READY.value
-                        fresh.commit()
-                        stats["ready"] += 1
-                    elif w is not None:
-                        w.warm_pool_state = WarmPoolState.FAILED.value
-                        fresh.commit()
+                # 异步预热：入队 durable PROVISION operation（worker 异步执行），
+                # 不再同步 _start（避免 wait_ready 120s 阻塞 worker 循环）。
+                self.orchestrator.start_async(workspace.id)
         self._refresh_gauge(db)
         return stats
+
+    def _reap_prewarming(self, db: Session, template_id: str, stats: dict[str, int]) -> None:
+        """收割 PREWARMING 占位：RUNNING → READY；终态/错误态 → FAILED。
+
+        PREWARMING 是「已创建但尚未确认预热完成」的中间态。worker 异步 provision
+        完成后 workspace 变 RUNNING（但仍标 PREWARMING），下一次 maintain 收割成
+        READY；provision 失败/被停/删除则收割成 FAILED，释放池位供补位重建。
+        收割为 FAILED 的池位计入冷却，本轮补位跳过（防止容量不足时无限 churn）。
+        """
+        prewarming = db.scalars(
+            select(Workspace).where(
+                Workspace.template_id == template_id,
+                Workspace.warm_pool_state == WarmPoolState.PREWARMING.value,
+                Workspace.deleted_at.is_(None),
+            )
+        ).all()
+        failed_this_round = 0
+        for workspace in prewarming:
+            if workspace.status == WorkspaceStatus.RUNNING.value:
+                workspace.warm_pool_state = WarmPoolState.READY.value
+                stats["ready"] += 1
+            elif workspace.status in _TERMINAL_STATUSES:
+                workspace.warm_pool_state = WarmPoolState.FAILED.value
+                failed_this_round += 1
+        if prewarming:
+            db.commit()
+        if failed_this_round:
+            self._fail_cooldown[template_id] = (
+                self._fail_cooldown.get(template_id, 0) + failed_this_round
+            )
+
+    def _cleanup_failed(self, db: Session, template_id: str, stats: dict[str, int]) -> None:
+        """为已 FAILED 且无 active operation 的 warm workspace 补入队 DESTROY。
+
+        收割把 PREWARMING 收敛为 FAILED 后，这里入队 durable DESTROY operation
+        异步清理（释放占位/资源、tombstone）。若 PROVISION operation 仍 active
+        （RETRYING 未到终态），DB 唯一约束会拒绝 DESTROY 入队——本轮先跳过，
+        下轮重试，保证 FAILED 池位最终被清理、不残留累积。
+        """
+        from .worker import enqueue_operation
+
+        failed = db.scalars(
+            select(Workspace).where(
+                Workspace.template_id == template_id,
+                Workspace.warm_pool_state == WarmPoolState.FAILED.value,
+                Workspace.deleted_at.is_(None),
+            )
+        ).all()
+        for workspace in failed:
+            if self.orchestrator._has_active_operation(db, workspace.id):
+                continue
+            op = enqueue_operation(self.session_factory, workspace.id, OperationType.DESTROY)
+            if op is not None:
+                stats["destroyed"] += 1
 
     # ------------------------------------------------------------------
     # claim：原子抢占 READY runtime

@@ -32,3 +32,5 @@
 ## 重要说明
 
 `deploy/kubernetes/control-plane.yaml` 只是**控制面骨架**，当前使用 1 replica + SQLite 便于验证镜像，不是生产数据库架构。生产前先切 PostgreSQL，再扩 replicas。
+
+生产就绪清单见 `deploy/kubernetes/control-plane-production.yaml`：PostgreSQL（Secret 注入）+ `alembic upgrade head` 迁移 initContainer + `AUTO_CREATE_TABLES=false` + workspace_root PVC 持久卷。

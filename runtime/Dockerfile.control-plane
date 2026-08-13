@@ -4,7 +4,9 @@ COPY pyproject.toml alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
 COPY scripts ./scripts
-RUN pip install --no-cache-dir .
+# 生产镜像安装 postgres extra（psycopg 驱动）：alembic 迁移 + 运行时连接 PostgreSQL 必需。
+# 默认（无 extra）仍可跑 SQLite/mock；见 deploy/kubernetes/control-plane-production.yaml。
+RUN pip install --no-cache-dir ".[postgres]"
 ENV EMBODIEDCLOUD_BIND_HOST=0.0.0.0 \
     EMBODIEDCLOUD_BIND_PORT=8000 \
     EMBODIEDCLOUD_AUTO_CREATE_TABLES=true

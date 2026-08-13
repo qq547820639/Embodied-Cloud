@@ -56,7 +56,7 @@ def make_provider() -> WorkspaceProvider:
         return DockerProvider(settings)
     if settings.provider.lower() == "k8s" or settings.provider.lower() == "kubernetes":
         return KubernetesProvider(settings)
-    return MockProvider(settings.public_base_url)
+    return MockProvider(settings.public_base_url, workspace_root=settings.workspace_root)
 
 
 def _warm_pool_maintain() -> None:
@@ -100,7 +100,8 @@ if settings.warm_pool_enabled and not provider.supports_credential_rotation:
 warm_pool = WarmPoolManager(SessionFactory, orchestrator, settings)
 edge_service = EdgeService(SessionFactory)
 # deployment 服务统一在此装配（组合根），router 不再自建第二套 DI。
-deployment_service = DeploymentService(SessionFactory, settings.workspace_root)
+# provider 注入：控制面本地读不到 workspace 产出时经 provider.pull_artifact 拉取（K8s PVC）。
+deployment_service = DeploymentService(SessionFactory, settings.workspace_root, provider=provider)
 
 
 def bootstrap_db() -> None:

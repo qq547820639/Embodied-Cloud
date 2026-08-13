@@ -3,6 +3,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import tempfile
 from pathlib import Path
 
 from ...config import Settings
@@ -250,6 +251,33 @@ class DockerProvider:
         按命名约定 ec-{workspace.id[:12]} 推导，保证补偿清理可达。"""
         container_name = workspace.container_name or f"ec-{workspace.id[:12]}"
         self._run_checked(["docker", "rm", "-f", container_name], container_name=container_name)
+
+    def pull_artifact(self, workspace: Workspace, source_path: str) -> Path:
+        """docker cp 把容器内文件拉到控制面本地临时路径并返回。
+
+        - container_name 缺失时按 ec-{id[:12]} 推导（与 destroy 一致）
+        - 失败（非零 returncode / 目标文件未生成）上抛，并清理临时目录
+        - 返回的临时文件由调用方负责清理（try/finally）
+
+        单元测试覆盖命令构造；真实环境（docker daemon + 运行中容器）待物理验证。
+        """
+        container_name = workspace.container_name or f"ec-{workspace.id[:12]}"
+        tmp_dir = Path(tempfile.mkdtemp(prefix="embodiedcloud-artifact-"))
+        dest = tmp_dir / Path(source_path).name
+        result = self._run(
+            ["docker", "cp", f"{container_name}:{source_path}", str(dest)], check=False
+        )
+        if result.returncode != 0:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            output = f"{result.stdout or ''}\n{result.stderr or ''}"
+            raise RuntimeError(
+                f"docker cp failed: {container_name}:{source_path} "
+                f"(rc={result.returncode}): {output.strip()[:400]}"
+            )
+        if not dest.is_file():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise FileNotFoundError(f"artifact file not found in container: {source_path}")
+        return dest
 
     def inspect(self, workspace: Workspace) -> dict:
         """读取容器实况：running/restarting/exited/absent。"""
