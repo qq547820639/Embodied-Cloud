@@ -7,7 +7,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（332 passed + 1 skipped[k8s_integration]）** |
+| Test | **PASS（334 passed + 1 skipped[k8s_integration]）** |
 | Lint / Type | PASS（ruff 0 / mypy 40 files） |
 | Migration | PASS（clean DB empty→head 11 文件链 + schema 落地校验 + downgrade 循环） |
 | OpenAPI / VALIDATION freshness | PASS（make api-docs / make validate 无 diff） |
@@ -30,7 +30,7 @@
 ## 3. 分项状态
 
 ### VERIFIED PASS
-332 tests 全绿；lint/type/migration/build/smoke/release 全链路；前端六视图 + 全链路 API 冒烟。
+334 tests 全绿；lint/type/migration/build/smoke/release 全链路；前端六视图 + 全链路 API 冒烟。
 
 ### PHYSICAL_VALIDATION_PENDING / NOT_RUN（不假装 PASS）
 GPU（G1–G4 脚本就绪）· K8s（pytest -m k8s_integration 正确 skip）· Streaming 媒体面 · Robot 真机 · Warm pool SLA。
