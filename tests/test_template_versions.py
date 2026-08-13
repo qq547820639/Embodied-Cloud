@@ -62,32 +62,34 @@ def test_seed_creates_released_versions_for_all_templates():
 
 def test_seed_never_overwrites_released_version():
     """seed 不允许偷偷覆盖已存在的 released version（§15 核心约束）。"""
-    with Factory() as db:
-        _seed(db)
-        version = db.scalar(
-            select(TemplateVersion).where(
-                TemplateVersion.template_id == "cartpole", TemplateVersion.version == "0.1.0"
+    spec_image = SEED_TEMPLATES[0]["image"]
+    try:
+        with Factory() as db:
+            _seed(db)
+            version = db.scalar(
+                select(TemplateVersion).where(
+                    TemplateVersion.template_id == "cartpole", TemplateVersion.version == "0.1.0"
+                )
             )
-        )
-        original_image = version.image
-        # 修改 seed spec 模拟"模板更新"（指向新镜像）
-        SEED_TEMPLATES[0]["image"] = "registry/cartpole:0.2.0"
+            original_image = version.image
+            # 修改 seed spec 模拟"模板更新"（指向新镜像）
+            SEED_TEMPLATES[0]["image"] = "registry/cartpole:0.2.0"
 
-    with Factory() as db:
-        _seed(db)  # 再次 seed
+        with Factory() as db:
+            _seed(db)  # 再次 seed
 
-    with Factory() as db:
-        version = db.scalar(
-            select(TemplateVersion).where(
-                TemplateVersion.template_id == "cartpole", TemplateVersion.version == "0.1.0"
+        with Factory() as db:
+            version = db.scalar(
+                select(TemplateVersion).where(
+                    TemplateVersion.template_id == "cartpole", TemplateVersion.version == "0.1.0"
+                )
             )
-        )
-        # 已发布版本内容未被覆盖（不可变）
-        assert version.image == original_image
-        assert version.image != "registry/cartpole:0.2.0"
-
-    # 还原 spec（测试隔离）
-    SEED_TEMPLATES[0]["image"] = original_image
+            # 已发布版本内容未被覆盖（不可变）
+            assert version.image == original_image
+            assert version.image != "registry/cartpole:0.2.0"
+    finally:
+        # 还原 spec（测试隔离；异常时也必须恢复，避免污染其它用例）
+        SEED_TEMPLATES[0]["image"] = spec_image
 
 
 def test_unique_template_version_constraint():

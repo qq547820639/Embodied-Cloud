@@ -7,7 +7,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（328 passed + 1 skipped[k8s_integration]）** |
+| Test | **PASS（332 passed + 1 skipped[k8s_integration]）** |
 | Lint / Type | PASS（ruff 0 / mypy 40 files） |
 | Migration | PASS（clean DB empty→head 11 文件链 + schema 落地校验 + downgrade 循环） |
 | OpenAPI / VALIDATION freshness | PASS（make api-docs / make validate 无 diff） |
@@ -30,7 +30,7 @@
 ## 3. 分项状态
 
 ### VERIFIED PASS
-328 tests 全绿；lint/type/migration/build/smoke/release 全链路；前端六视图 + 全链路 API 冒烟。
+332 tests 全绿；lint/type/migration/build/smoke/release 全链路；前端六视图 + 全链路 API 冒烟。
 
 ### PHYSICAL_VALIDATION_PENDING / NOT_RUN（不假装 PASS）
 GPU（G1–G4 脚本就绪）· K8s（pytest -m k8s_integration 正确 skip）· Streaming 媒体面 · Robot 真机 · Warm pool SLA。
@@ -39,7 +39,7 @@ GPU（G1–G4 脚本就绪）· K8s（pytest -m k8s_integration 正确 skip）·
 NGC 凭据（镜像 digest 回填）· PostgreSQL 生产验证/容器测试（无 docker daemon）· S3 凭据 · 物理机器人 · 真实 K8s 集群。
 
 ### TECH DEBT（已知、有意延后）
-BillingAccount 重构（§17，当前 user/org 双 FK 聚合视角）· CreditHold 预授权（§18）· edge agent 独立包（§25）· SQLite FK 约束（§30）· lockfile/SBOM · 并发语义测试迁移到 PostgreSQL · `default_idle_timeout_minutes`（缺 runtime 活动信号，标注预留）· 前端无自动化浏览器测试（当前以 API 冒烟 + 转义回归覆盖）。
+BillingAccount 重构（§17，当前 user/org 双 FK 聚合视角）· CreditHold 预授权（§18）· edge agent 独立包（§25）· SQLite FK 约束（§30）· lockfile/SBOM · 并发语义测试迁移到 PostgreSQL（SQLite 下 `FOR UPDATE SKIP LOCKED` 为 no-op）· `default_idle_timeout_minutes`（缺 runtime 活动信号，标注预留）· 前端无自动化浏览器测试（当前以 API 冒烟 + 转义回归覆盖）· Docker/K8s provider 的 health/inspect/logs/wait_ready/reconcile/rotate_credentials 直接单测（依赖 docker daemon/集群，暂以 orchestrator gate 语义 + 补偿分支测试覆盖）· 测试公共 fixture 抽取（4 组 `_setup`/`_register` 拷贝粘贴）· test-*.db 模块级文件库迁移 tmp_path/内存 SQLite · K8s 物理验收 CI gate（无集群时显式 PENDING 登记，而非普通 skip）。
 
 ## 4. 结论
 

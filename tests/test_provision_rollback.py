@@ -20,6 +20,7 @@ from sqlalchemy.orm import sessionmaker
 from app.config import Settings
 from app.models import Base, Gpu, GpuAllocation, GpuStatus, Template, Workspace, WorkspaceStatus
 from app.services.orchestrator import WorkspaceOrchestrator
+from app.services.providers.base import ProvisionResult
 from app.services.providers.docker import DockerProvider
 from app.services.providers.k8s import KubernetesProvider
 from app.services.providers.mock import MockProvider
@@ -68,7 +69,7 @@ def _make_template(db) -> Template:
     return t
 
 
-def _assert_clean_rollback(workspace_id: str, provider_name: str, provider, monkeypatch) -> None:
+def _assert_clean_rollback(workspace_id: str, provider, monkeypatch) -> None:
     """回滚后的统一断言：无孤儿资源 + FAILED + error 持久化。"""
     with Factory() as db:
         ws = db.get(Workspace, workspace_id)
@@ -85,6 +86,8 @@ def _assert_clean_rollback(workspace_id: str, provider_name: str, provider, monk
         assert ws.media_port is None
         # provider 侧清理被调用
         assert provider.destroy_calls >= 1
+        # 进程内 IDE 端口分配登记必须已释放（destroy 的 finally 语义）
+        assert provider._allocated_ide_ports.get(workspace_id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -102,9 +105,6 @@ class FailingDockerProvider(DockerProvider):
     def health(self):
         return True, "fake"
 
-    def wait_ready(self, workspace, template, timeout_seconds: int = 120) -> bool:
-        return True  # 失败注入路径不达 ready；保险返回 True
-
     def _streaming_workspace_running(self):
         return False
 
@@ -114,22 +114,41 @@ class FailingDockerProvider(DockerProvider):
     def provision(self, workspace, template, workspace_dir, reservation=None):
         self.provision_calls += 1
         if self.fail_at == "after_gpu_allocate":
+            # GPU 已分配、runtime 尚未创建 → 补偿 destroy 只能按 id 推导容器名
             raise RuntimeError("simulated: fail after GPU allocate")
-        # 模拟 runtime create 之后、endpoint 完成之前失败
+        # 后续两个阶段：runtime（容器）已创建，模拟真实的中间产物
+        workspace.container_name = f"ec-{workspace.id[:12]}"
         if self.fail_at == "after_runtime_create":
-            workspace.container_name = f"ec-{workspace.id[:12]}"
+            # 容器已创建、端点未配置
             raise RuntimeError("simulated: fail after runtime create")
         if self.fail_at == "after_endpoint_create":
-            workspace.container_name = f"ec-{workspace.id[:12]}"
+            # 容器 + IDE 端点均已创建：端口已在进程内分配池登记（真实行为），
+            # 补偿 destroy 必须释放登记（断言见 _assert_clean_rollback）
+            self._allocated_ide_ports[workspace.id] = 38101
             raise RuntimeError("simulated: fail after endpoint create")
         if self.fail_at == "during_healthcheck":
-            workspace.container_name = f"ec-{workspace.id[:12]}"
-            raise RuntimeError("simulated: fail during healthcheck")
+            # provision 成功返回，readiness gate（wait_ready）阶段才失败。
+            # 真实行为：端口已登记进进程内分配池，补偿 destroy 必须释放。
+            self._allocated_ide_ports[workspace.id] = 38101
+            return ProvisionResult(
+                container_name=workspace.container_name,
+                ide_port=38101,
+                ide_url="http://127.0.0.1:38101/",
+                password="x",  # noqa: S106 失败注入测试数据
+            )
         raise AssertionError(f"unexpected fail_at {self.fail_at}")
+
+    def wait_ready(self, workspace, template, timeout_seconds: int = 120) -> bool:
+        # during_healthcheck：readiness gate 失败（真实语义：runtime 起了但未就绪）
+        if self.fail_at == "during_healthcheck":
+            raise RuntimeError("simulated: fail during healthcheck")
+        return True
 
     def destroy(self, workspace):
         self.destroy_calls += 1
-        return None
+        # 走真实 destroy（含 finally 释放端口登记），否则补偿清理的
+        # 端口释放语义（本次断言）不会被覆盖到
+        return super().destroy(workspace)
 
 
 def _docker_orchestrator(monkeypatch, tmp_path, fail_at):
@@ -158,7 +177,7 @@ def _docker_orchestrator(monkeypatch, tmp_path, fail_at):
 def test_docker_provision_failure_rolls_back_everything(monkeypatch, tmp_path, fail_at):
     orchestrator, provider, wid = _docker_orchestrator(monkeypatch, tmp_path, fail_at)
     orchestrator._start(wid)
-    _assert_clean_rollback(wid, "docker", provider, monkeypatch)
+    _assert_clean_rollback(wid, provider, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +186,12 @@ def test_docker_provision_failure_rolls_back_everything(monkeypatch, tmp_path, f
 
 
 class FailingK8sClient:
-    """PVC 创建成功，Service 创建失败：验证 PVC 补偿删除。"""
+    """PVC 创建成功，Service 创建失败：验证 PVC 补偿删除 + destroy 全组清理。"""
 
     def __init__(self):
-        self.deleted_pvc: list[str] = []
+        self.deleted_pvcs: list[str] = []
+        self.deleted_svcs: list[str] = []
+        self.deleted_deployments: list[str] = []
 
     def CoreV1Api(self):
         return self
@@ -184,11 +205,14 @@ class FailingK8sClient:
     def create_namespaced_service(self, namespace, body, **kwargs):
         raise RuntimeError("simulated: service create failure")
 
+    def delete_namespaced_deployment(self, name, namespace, **kwargs):
+        self.deleted_deployments.append(name)
+
     def delete_namespaced_service(self, name, namespace, **kwargs):
-        self.deleted_pvc.append(f"svc:{name}")
+        self.deleted_svcs.append(name)
 
     def delete_namespaced_persistent_volume_claim(self, name, namespace, **kwargs):
-        self.deleted_pvc.append(name)
+        self.deleted_pvcs.append(name)
 
 
 class RecordingK8sProvider(KubernetesProvider):
@@ -224,9 +248,46 @@ def test_k8s_provision_failure_removes_orphan_pvc(monkeypatch, tmp_path):
         assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == wid)) is None
         gpu = db.scalar(select(Gpu))
         assert gpu.status == GpuStatus.AVAILABLE.value
-    # provider 补偿 destroy 被调用，且 fake 内部已删 PVC（无孤儿 volume）
+    # 补偿清理语义：Service 创建失败时 provision 内补偿删除已创建的 PVC
+    # （Service 本身未创建成功，无 Service 可删）；随后 orchestrator 补偿
+    # destroy 删除 Deployment/Service/PVC 全组资源（幂等）。两者都必须发生。
     assert provider.destroy_calls >= 1
-    assert fake.deleted_pvc, "PVC 必须被补偿删除"
+    assert fake.deleted_pvcs, "PVC 必须被补偿删除（无孤儿 volume）"
+    assert fake.deleted_svcs, "destroy 必须清理 Service（K8s 资源组删除）"
+
+
+def test_k8s_compensating_deletes_404_vs_error(monkeypatch, tmp_path):
+    """补偿删除的 404/非 404 分支（此前零覆盖）：
+    404 = 资源已不存在 → 幂等成功不抛；其它错误（如 500/鉴权）必须上抛，
+    否则「删除失败」被当成「已删除」会造成孤儿资源。"""
+
+    class FakeApiError(RuntimeError):
+        def __init__(self, status: int):
+            super().__init__(f"kubernetes API {status}")
+            self.status = status
+
+    class Core:
+        def __init__(self, status: int):
+            self.status = status
+
+        def delete_namespaced_service(self, name, namespace, **kwargs):
+            raise FakeApiError(self.status)
+
+        def delete_namespaced_persistent_volume_claim(self, name, namespace, **kwargs):
+            raise FakeApiError(self.status)
+
+    settings = Settings(eula_accepted=True, k8s_namespace="embodiedcloud")
+    provider = KubernetesProvider(settings, _client=object())  # offline 模式：不加载 kubeconfig
+
+    # 404 → 幂等成功（不抛）
+    provider._try_delete_service(Core(404), "ns", "svc-1")
+    provider._try_delete_pvc(Core(404), "ns", "pvc-1")
+
+    # 非 404 → 必须上抛（不得吞掉真实删除失败）
+    with pytest.raises(RuntimeError, match="补偿清理 Service"):
+        provider._try_delete_service(Core(500), "ns", "svc-2")
+    with pytest.raises(RuntimeError, match="补偿清理 PVC"):
+        provider._try_delete_pvc(Core(500), "ns", "pvc-2")
 
 
 # ---------------------------------------------------------------------------

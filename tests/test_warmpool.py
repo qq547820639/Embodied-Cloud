@@ -26,7 +26,7 @@ from app.models import (
 )
 from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
-from app.services.warmpool import WarmPoolManager
+from app.services.warmpool import _WARM_STATES, WarmPoolManager
 from app.services.worker import OperationWorker
 
 _TEST_DB = Path("test-warmpool.db")
@@ -288,11 +288,12 @@ def test_metrics_shape(db_factory):
         _make_template(db, "cartpole")
         _seed_gpu(db)
         manager = _make_manager(db_factory)
-        metrics = manager.metrics(db)
+        metrics = manager.pool_metrics(db)
         assert "cartpole" in metrics
-        assert set(metrics["cartpole"]) == {"warm", "ready"}
-        assert metrics["cartpole"]["warm"] == 0
-        assert metrics["cartpole"]["ready"] == 0
+        # 真实按 state 计数（§8）：返回全部 warm pool 状态的计数，非 {warm,ready} 二值
+        assert set(metrics["cartpole"]) == set(_WARM_STATES)
+        assert metrics["cartpole"][WarmPoolState.READY.value] == 0
+        assert metrics["cartpole"][WarmPoolState.PREWARMING.value] == 0
 
 
 def test_metrics_counts_warm_after_launch(db_factory):
@@ -308,7 +309,7 @@ def test_metrics_counts_warm_after_launch(db_factory):
         # 结束 db 事务，避免读到 drain 之前的旧快照
         db.rollback()
         manager.maintain(db)
-        assert manager.metrics(db)["cartpole"]["warm"] == 1
+        assert manager.pool_metrics(db)["cartpole"][WarmPoolState.READY.value] == 1
 
 
 def test_benchmark_launch_returns_p50_p95(db_factory):

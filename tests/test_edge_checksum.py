@@ -127,18 +127,33 @@ def test_replay_after_failed_does_not_resurrect(tmp_path):
 
 
 def test_cross_deployment_checksum_fails(tmp_path):
-    """把 deployment A 的 checksum 上报给 B（跨部署）→ B FAILED。"""
+    """真正的跨部署误报：把 deployment B（不同 artifact/checksum）的 sha256
+    上报给 deployment A → A 必须 FAILED（expected 属于 A 的 artifact）。"""
+    import hashlib
 
     with Factory() as db:
-        svc, owner, ws, _ = _setup(db, tmp_path)
-        d_a = _deploy(db, svc, owner, ws, robot="franka")
-        d_b = _deploy(db, svc, owner, ws, robot="franka-2")
-        assert d_a.checksum == d_b.checksum  # 同一 artifact → 同一 expected
-        # 用 A 的 artifact 校验 B 的部署（checksum 相同会 VERIFIED —— 这是正确的：
-        # expected 属于 artifact；跨部署风险在"上报了别的部署的 checksum"。
-        # 用完全无关的 checksum 模拟跨部署错误上报：
-        result = svc.report_checksum(db, d_b, "f" * 64)
+        svc, owner, ws_a, root = _setup(db, tmp_path)
+        # 第二个 workspace 持有不同内容的 artifact（不同 checksum）
+        ws_b = Workspace(
+            id="ws-2", name="w2", template_id="cartpole", provider="mock",
+            user_id="u1", status=WorkspaceStatus.RUNNING.value,
+        )
+        db.add(ws_b)
+        db.commit()
+        (root / "ws-2").mkdir(parents=True)
+        (root / "ws-2" / "model.pt").write_bytes(b"OTHER-MODEL-BYTES")
+
+        d_a = _deploy(db, svc, owner, ws_a, robot="franka")
+        d_b = _deploy(db, svc, owner, ws_b, robot="franka")
+        assert d_a.checksum != d_b.checksum  # 两个 artifact 内容不同 → expected 不同
+
+        # edge 把 B 的 artifact sha256 上报给 A（串台）→ A 校验失败
+        wrong = hashlib.sha256(b"OTHER-MODEL-BYTES").hexdigest()
+        result = svc.report_checksum(db, d_a, wrong)
         assert result.status == DeploymentStatus.FAILED.value
+        assert "edge reported" in result.error_message
+        # B 自己上报自己的值仍正常通过（互不影响）
+        assert svc.report_checksum(db, d_b, wrong).status == DeploymentStatus.VERIFIED.value
 
 
 def test_report_without_download_rejected(tmp_path):

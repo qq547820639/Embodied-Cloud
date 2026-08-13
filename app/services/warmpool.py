@@ -305,21 +305,6 @@ class WarmPoolManager:
             result[template.id] = counts
         return result
 
-    # ------------------------------------------------------------------
-    # 兼容接口（早期版本）
-    # ------------------------------------------------------------------
-    def metrics(self, db: Session) -> dict[str, dict[str, int]]:
-        """每个 enabled 模板的 warm（READY）与 ready（PREWARMING/CLAIMING/CLAIMED）数。"""
-        result: dict[str, dict[str, int]] = {}
-        for template in db.scalars(select(Template).where(Template.enabled.is_(True))):
-            result[template.id] = {
-                "warm": self._count_state(db, template.id, WarmPoolState.READY),
-                "ready": self._count_state(db, template.id, WarmPoolState.PREWARMING)
-                + self._count_state(db, template.id, WarmPoolState.CLAIMING)
-                + self._count_state(db, template.id, WarmPoolState.CLAIMED),
-            }
-        return result
-
     def benchmark_launch(self, db: Session, template_id: str, iterations: int = 3) -> dict:
         """依次 create+start workspace，轮询到 RUNNING/FAILED，统计 p50/p95。"""
         import math

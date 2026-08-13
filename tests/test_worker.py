@@ -181,20 +181,25 @@ def test_operation_failure_retries_then_failed():
 
     op = orchestrator.start_async(wid)
     worker = OperationWorker(Factory, orchestrator)
-    # 失败后立即重试（测试加速：backoff 置 0）
+    # 失败后立即重试（测试加速：backoff 置 0）；结束必须还原（全局类属性，
+    # 泄漏会污染其它用例的重试时序）
+    original_delay = OperationWorker.RETRY_BASE_DELAY
     OperationWorker.RETRY_BASE_DELAY = 0
-    # 逐个 tick，观察状态流转：RUNNING → RETRYING → … → FAILED
-    statuses = []
-    for _ in range(OperationWorker.MAX_ATTEMPTS + 2):
-        # 确定性：显式把 RETRYING backoff lease 置为过期（不依赖真实时钟推进）
-        with Factory() as db:
-            db_op = db.get(WorkspaceOperation, op.id)
-            if db_op is not None and db_op.status == OperationStatus.RETRYING.value:
-                db_op.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
-                db.commit()
-        worker.tick_once()
-        with Factory() as db:
-            statuses.append(db.get(WorkspaceOperation, op.id).status)
+    try:
+        # 逐个 tick，观察状态流转：RUNNING → RETRYING → … → FAILED
+        statuses = []
+        for _ in range(OperationWorker.MAX_ATTEMPTS + 2):
+            # 确定性：显式把 RETRYING backoff lease 置为过期（不依赖真实时钟推进）
+            with Factory() as db:
+                db_op = db.get(WorkspaceOperation, op.id)
+                if db_op is not None and db_op.status == OperationStatus.RETRYING.value:
+                    db_op.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+                    db.commit()
+            worker.tick_once()
+            with Factory() as db:
+                statuses.append(db.get(WorkspaceOperation, op.id).status)
+    finally:
+        OperationWorker.RETRY_BASE_DELAY = original_delay
     # 最终状态必须是 FAILED
     with Factory() as db:
         db_op = db.get(WorkspaceOperation, op.id)

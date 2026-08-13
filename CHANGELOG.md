@@ -40,9 +40,15 @@
 - 新增：test_auth.py（login/logout/me + verify_password 边界 + token 仅存哈希）、
   test_course_onboarding.py（slug 加入/member 可见/progress/launch 402）、
   test_demo_checkpoint.py、test_gpu_admin.py（admin inventory + GPU 分配→释放真实断言）、
+  test_api_success_paths.py（templates/{id}/start/admin/all 成功路径）、
   demo 页 XSS 转义回归。
 - 修正伪覆盖：deployment_verification「恒真 VERIFIED」改为「PENDING 直接 verify 409 防绕过」；
-  迁移测试校验关键表落地/移除；admin_adjustment 补 HTTP 层 403/200。
+  迁移测试校验关键表落地/移除；admin_adjustment 补 HTTP 层 403/200；跨部署 checksum
+  改为真实「两个不同 checksum 的 A→B 互报」；provision_rollback 四个失败注入点改为
+  真实分阶段（GPU 分配后/容器创建后/端点配置后/readiness gate），并补 K8s 补偿删除
+  404/非 404 分支测试；warmpool 观测切到 pool_metrics 真实按 state 计数（删除 legacy
+  metrics）；修测试全局状态泄漏（SEED_TEMPLATES try/finally、RETRY_BASE_DELAY 恢复、
+  端口池释放）。
 
 ### 文档
 - API.md 重写为全量端点参考；ARCHITECTURE.md 对齐代码（Provider 协议/routers/数据模型/

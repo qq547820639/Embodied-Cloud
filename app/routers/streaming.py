@@ -71,7 +71,8 @@ def list_streaming_sessions(workspace_id: str, db: DB, user: CurrentUser):
 
 @router.get("/warmpool/metrics")
 def warmpool_metrics(db: DB, user: CurrentUser):
-    return warm_pool.metrics(db)
+    """warm pool 观测：按 template × state 的 COUNT(*) 真实计数。"""
+    return warm_pool.pool_metrics(db)
 
 
 @router.get("/warmpool/benchmark")
