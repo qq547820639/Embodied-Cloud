@@ -45,10 +45,15 @@
 - 修正伪覆盖：deployment_verification「恒真 VERIFIED」改为「PENDING 直接 verify 409 防绕过」；
   迁移测试校验关键表落地/移除；admin_adjustment 补 HTTP 层 403/200；跨部署 checksum
   改为真实「两个不同 checksum 的 A→B 互报」；provision_rollback 四个失败注入点改为
-  真实分阶段（GPU 分配后/容器创建后/端点配置后/readiness gate），并补 K8s 补偿删除
-  404/非 404 分支测试；warmpool 观测切到 pool_metrics 真实按 state 计数（删除 legacy
-  metrics）；修测试全局状态泄漏（SEED_TEMPLATES try/finally、RETRY_BASE_DELAY 恢复、
-  端口池释放）。
+  真实分阶段（GPU 分配后/容器创建后/端点配置后/readiness gate），K8s 补偿清理改为
+  精确计数断言（provision 内补偿 + destroy 各删一次）+ Deployment 失败双清理用例 +
+  404/非 404 分支；test_k8s_inventory 改为直接调用真实 `deps._sync_k8s_gpus`（删除
+  复刻版 `_sync_inventory`）；test_k8s_node_truth 改为真实 orchestrator 链路捕获
+  reservation（删除复制构造自证）；新增 make_tripwire_models 安全哨兵 fake，把
+  「未设置 privileged/hostNetwork/hostPath/security_context」从恒真断言变为必然失败
+  哨兵；streaming 补 FAILED 终态不可迁移测试（此前只有注释）；warmpool 观测切到
+  pool_metrics 真实按 state 计数（删除 legacy metrics）；修测试全局状态泄漏
+  （SEED_TEMPLATES try/finally、RETRY_BASE_DELAY 恢复、端口池释放）。
 
 ### 文档
 - API.md 重写为全量端点参考；ARCHITECTURE.md 对齐代码（Provider 协议/routers/数据模型/

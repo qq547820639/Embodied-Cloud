@@ -128,12 +128,30 @@ def test_invalid_transitions_raise_value_error(db_factory, service):
         session = service.disconnect(db, session.id, user)  # disconnected
         with pytest.raises(ValueError):
             service.disconnect(db, session.id, user)  # disconnected → disconnected 非法
-        # 失败态不可再迁移
+        # 失败态不可再迁移（真实验证见 test_failed_session_is_terminal）
         session = service.reconnect(db, session.id, user)
         session = service.connect(db, session.id, user)
         session = service.disconnect(db, session.id, user)
         session = service.reconnect(db, session.id, user)
         assert session.status == StreamingStatus.READY.value
+
+
+def test_failed_session_is_terminal(db_factory, service):
+    """FAILED 是终态（_STREAM_TRANSITIONS[FAILED]=∅）：connect/disconnect/reconnect
+    全部非法迁移。此前「失败态不可再迁移」只有注释、从未构造 FAILED 会话。"""
+    with db_factory() as db:
+        user = _make_user(db)
+        workspace = _make_workspace(db, user)
+        session = StreamingSession(
+            id=str(uuid.uuid4()),
+            workspace_id=workspace.id,
+            status=StreamingStatus.FAILED.value,
+        )
+        db.add(session)
+        db.commit()
+        for op in ("connect", "disconnect", "reconnect"):
+            with pytest.raises(ValueError, match="非法状态迁移"):
+                getattr(service, op)(db, session.id, user)
 
 
 def test_start_requires_running_workspace(db_factory, service):

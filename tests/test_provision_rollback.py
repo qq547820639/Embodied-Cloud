@@ -248,12 +248,74 @@ def test_k8s_provision_failure_removes_orphan_pvc(monkeypatch, tmp_path):
         assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == wid)) is None
         gpu = db.scalar(select(Gpu))
         assert gpu.status == GpuStatus.AVAILABLE.value
-    # 补偿清理语义：Service 创建失败时 provision 内补偿删除已创建的 PVC
-    # （Service 本身未创建成功，无 Service 可删）；随后 orchestrator 补偿
-    # destroy 删除 Deployment/Service/PVC 全组资源（幂等）。两者都必须发生。
+    # 补偿清理语义（精确计数区分「provision 内补偿」与「destroy 再删」）：
+    # - Service 创建失败 → provision 内补偿删除已创建的 PVC（第 1 次）
+    # - orchestrator 补偿 destroy 删除 Deployment/Service/PVC 全组（各 +1）
+    # 若补偿代码被删除，destroy 只会各删 1 次 → 计数断言立即失败（非恒真）。
     assert provider.destroy_calls >= 1
-    assert fake.deleted_pvcs, "PVC 必须被补偿删除（无孤儿 volume）"
-    assert fake.deleted_svcs, "destroy 必须清理 Service（K8s 资源组删除）"
+    assert len(fake.deleted_pvcs) == 2, "PVC 必须被删除 2 次：provision 内补偿 + destroy"
+    assert len(fake.deleted_svcs) == 1, "Service 创建未成功：只有 destroy 删除 1 次"
+    assert len(fake.deleted_deployments) == 1, "Deployment 未创建成功：只有 destroy 删除 1 次"
+
+
+class DeploymentFailingK8sClient:
+    """PVC/Service 创建成功，Deployment 创建失败：验证 provision 内双补偿删除
+    （Service + PVC 各删 1 次）与 destroy 全组删除叠加后的精确计数。"""
+
+    def __init__(self):
+        self.deleted_pvcs: list[str] = []
+        self.deleted_svcs: list[str] = []
+        self.deleted_deployments: list[str] = []
+
+    def CoreV1Api(self):
+        return self
+
+    def AppsV1Api(self):
+        return self
+
+    def create_namespaced_persistent_volume_claim(self, namespace, body, **kwargs):
+        return body
+
+    def create_namespaced_service(self, namespace, body, **kwargs):
+        return body
+
+    def create_namespaced_deployment(self, namespace, body, **kwargs):
+        raise RuntimeError("simulated: deployment create failure")
+
+    def delete_namespaced_deployment(self, name, namespace, **kwargs):
+        self.deleted_deployments.append(name)
+
+    def delete_namespaced_service(self, name, namespace, **kwargs):
+        self.deleted_svcs.append(name)
+
+    def delete_namespaced_persistent_volume_claim(self, name, namespace, **kwargs):
+        self.deleted_pvcs.append(name)
+
+
+def test_k8s_deployment_failure_compensates_service_and_pvc(monkeypatch, tmp_path):
+    """Deployment 创建失败 → provision 内补偿删除 Service + PVC（双清理），
+    随后 orchestrator 补偿 destroy 再次全组删除。计数精确断言防「补偿被删仍通过」。"""
+    fake = DeploymentFailingK8sClient()
+    settings = Settings(eula_accepted=True, k8s_namespace="embodiedcloud", host_public_ip="10.0.0.8")
+    provider = RecordingK8sProvider(settings, fake)
+    with Factory() as db:
+        _seed_gpu(db)
+        _make_template(db)
+        orchestrator = WorkspaceOrchestrator(Factory, provider, Path(tmp_path))
+        workspace = orchestrator.create(db, db.get(Template, "cartpole"), user_id="u1")
+        wid = workspace.id
+
+    orchestrator._start(wid)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.FAILED.value
+        assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == wid)) is None
+    assert provider.destroy_calls >= 1
+    # provision 内补偿：Service + PVC 各 1 次；destroy：再各 1 次 → 各 2 次
+    assert len(fake.deleted_svcs) == 2, "Service 必须被删除 2 次：provision 补偿 + destroy"
+    assert len(fake.deleted_pvcs) == 2, "PVC 必须被删除 2 次：provision 补偿 + destroy"
+    assert len(fake.deleted_deployments) == 1, "Deployment 创建失败：只有 destroy 删除 1 次"
 
 
 def test_k8s_compensating_deletes_404_vs_error(monkeypatch, tmp_path):

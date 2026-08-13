@@ -18,7 +18,6 @@ from app.db import Base
 from app.models import (
     Gpu,
     GpuAllocation,
-    GpuHost,
     GpuStatus,
     Template,
     Workspace,
@@ -79,26 +78,70 @@ def test_k8s_provider_requires_reservation(tmp_path):
         provider.provision(ws, template, tmp_path / "ws", None)
 
 
-def test_orchestrator_passes_node_reservation():
-    """§10：orchestrator 构造 reservation 时 node_name 来自 GpuHost.name（明确字段）。"""
+def test_orchestrator_passes_node_reservation(tmp_path):
+    """§10：真实链路验证 —— orchestrator 构造的 reservation 的 node_name 来自
+    GpuHost.name（明确字段），而非复刻构造逻辑自证。
+
+    注入 RecordingProvider 捕获 orchestrator 实际传给 provision 的 reservation：
+    node_name = GpuHost.name（≠ host_id），gpu 绑定来自 scheduler 分配。
+    """
+    from pathlib import Path
+
+    from app.services.providers.base import ProvisionResult, RuntimeState
+
+    class RecordingProvider:
+        name = "k8s"
+
+        def __init__(self):
+            self.reservations: list[ResourceReservation | None] = []
+
+        def health(self):
+            return True, "fake"
+
+        def provision(self, workspace, template, workspace_dir, reservation=None):
+            self.reservations.append(reservation)
+            return ProvisionResult(ide_url="http://10.0.0.8/ide/", password="p")  # noqa: S106 测试数据
+
+        def wait_ready(self, workspace, template, timeout_seconds: int = 120) -> bool:
+            return True
+
+        def destroy(self, workspace):
+            return None
+
+        def inspect(self, workspace):
+            return {}
+
+        def logs(self, workspace, tail: int = 200) -> str:
+            return ""
+
+        def reconcile(self, workspace):
+            return RuntimeState.UNKNOWN
+
+        def rotate_credentials(self, workspace, credentials) -> bool:
+            return False
+
+        @property
+        def supports_credential_rotation(self) -> bool:
+            return False
+
+    provider = RecordingProvider()
+    orchestrator = WorkspaceOrchestrator(Factory, provider, Path(tmp_path) / "node-truth")
     with Factory() as db:
         _seed_with_node(db, node_name="gpu-node-07")
-        ws = Workspace(id="w2", name="w", template_id="cartpole", provider="k8s", status="queued")
-        db.add(ws)
-        db.commit()
-        gpu = GpuScheduler(Factory).allocate(db, "w2", gpu_requirement_gb=8)
-        host = db.get(GpuHost, gpu.host_id)
-        reservation = ResourceReservation(
-            host_id=gpu.host_id,
-            gpu_id=gpu.id,
-            gpu_uuid=gpu.gpu_uuid,
-            gpu_index=gpu.gpu_index or 0,
-            node_name=host.name if host else "",
-        )
-        assert reservation.node_name == "gpu-node-07"
-        # 与 host_id 不同（明确字段不依赖字符串解析）
-        assert reservation.host_id == "k8s-node-gpu-node-07"
-        assert reservation.node_name != reservation.host_id
+        ws = orchestrator.create(db, db.get(Template, "cartpole"), user_id=None)
+        wid = ws.id
+
+    orchestrator._start(wid)
+
+    assert provider.reservations and provider.reservations[0] is not None
+    r = provider.reservations[0]
+    assert r.node_name == "gpu-node-07"
+    # 与 host_id 不同（明确字段不依赖字符串解析）
+    assert r.host_id == "k8s-node-gpu-node-07"
+    assert r.node_name != r.host_id
+    # GPU 绑定来自 scheduler 真实分配（非手工构造）
+    assert r.gpu_id
+    assert r.gpu_uuid == "gpu-node-07:gpu-0"
 
 
 class FakeNodeClient:

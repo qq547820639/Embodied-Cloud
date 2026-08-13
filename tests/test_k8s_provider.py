@@ -240,13 +240,27 @@ def test_provision_creates_deployment_service_pvc(tmp_path):
     assert container.resources.limits["nvidia.com/gpu"] == "1"
     # nodeSelector 来自 reservation.metadata
     assert dep.spec.template.spec.node_selector == {"kubernetes.io/hostname": "gpu-node-01"}
-
-    # 无 privileged / 无 docker.sock (hostPath 挂载) / 无 hostNetwork
-    assert container.security_context is None
-    assert dep.spec.template.spec.host_network is None
+    # 安全基线（privileged/hostNetwork/hostPath/security_context 不得显式设置）：
+    # fake 默认值的断言近乎恒真，真实验证见 test_provision_sets_no_privileged_*
+    # —— 哨兵 fake 在出现任一设置时立即失败。
     volumes = dep.spec.template.spec.volumes
-    assert all(v.host_path is None for v in volumes)
     assert volumes[0].persistent_volume_claim.claim_name == PVC_NAME
+
+
+def test_provision_sets_no_privileged_hostnetwork_hostpath(tmp_path):
+    """SECURITY.md T3 安全基线：provision 不得显式设置 privileged / hostNetwork /
+    hostPath 挂载 / security_context —— 哨兵 fake（make_tripwire_models）遇到
+    任一设置立即抛 AssertionError，测试因此真正触达生产决策。"""
+    from k8s_fakes import make_tripwire_models
+
+    fake = FakeClientModule()
+    settings = make_settings()
+    provider = KubernetesProvider(settings, _client=fake, model_factory=make_tripwire_models)
+    provider.provision(make_workspace(), make_template(), tmp_path / "ws", make_reservation())
+    kinds = [c[0] for c in fake.calls]
+    assert "create_pvc" in kinds
+    assert "create_service" in kinds
+    assert "create_deployment" in kinds
 
 
 def test_provision_streaming_template_sets_livestream(tmp_path):
