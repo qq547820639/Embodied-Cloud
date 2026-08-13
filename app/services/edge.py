@@ -5,7 +5,6 @@
 """
 
 import uuid
-from datetime import UTC, datetime
 
 from fastapi import HTTPException, Request
 from sqlalchemy import select
@@ -13,10 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import AgentStatus, EdgeAgent, Role, TelemetryEvent, User
 from ..security import generate_token, hash_token
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
+from ..utils import utcnow
 
 
 class EdgeService:

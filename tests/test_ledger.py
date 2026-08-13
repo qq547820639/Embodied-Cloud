@@ -85,6 +85,27 @@ def test_usage_settlement_idempotent_per_run():
         assert service.balance(db, "u1") == -180
 
 
+def test_usage_settlement_description_and_amount_use_credit_per_second():
+    """计费口径明确：amount = -seconds（1 秒 = 1 credit），描述文本不含模板费率。"""
+    service = CreditLedgerService(Factory)
+    with Factory() as db:
+        db.add(_template())
+        db.commit()
+        ws = Workspace(
+            id="ws-desc", name="ws", template_id="cartpole", user_id="u1",
+            provider="mock", status="running",
+            started_at=datetime.now(UTC),
+        )
+        db.add(ws)
+        db.commit()
+
+        entry = service.settle_workspace_run(db, ws, 30, "2026-08-12T10:00:00+00:00")
+        assert entry is not None
+        assert entry.amount == -30
+        assert entry.gpu_seconds == 30
+        assert entry.description == "GPU usage 30s @ 1 credit/second"
+
+
 def test_zero_seconds_no_transaction():
     service = CreditLedgerService(Factory)
     with Factory() as db:

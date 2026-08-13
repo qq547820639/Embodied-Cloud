@@ -5,7 +5,6 @@ teacher/admin 才有管理权限, 越权管理操作返回 403。
 """
 
 import uuid
-from datetime import UTC, datetime
 
 from fastapi import HTTPException
 from sqlalchemy import or_, select
@@ -23,15 +22,12 @@ from ..models import (
     Workspace,
 )
 from ..schemas import AssignmentCreate, CourseCreate, LabCreate
+from ..utils import utcnow
 from .billing import BillingError, BillingPolicy
 from .orchestrator import WorkspaceOrchestrator
 
 TEACHER_MEMBER_ROLES = (Role.INSTRUCTOR.value, Role.ORG_ADMIN.value)
 ALLOWED_MEMBER_ROLES = (Role.STUDENT.value, Role.INSTRUCTOR.value, Role.ORG_ADMIN.value)
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +229,11 @@ def list_assignments(db: Session, lab: Lab) -> list[Assignment]:
 
 
 def course_completions(db: Session, course: Course) -> list[dict]:
-    """每个 assignment x 每个学生的 submission 状态汇总 (teacher/admin)。"""
+    """每个 assignment x 每个学生的 submission 状态汇总 (teacher/admin)。
+
+    批量加载该 course 的 labs/assignments/submissions（消除逐 lab/assignment/student
+    的 N+1 查询），再在内存中按原遍历顺序组装；返回结构与旧实现完全一致。
+    """
     students = list(
         db.scalars(
             select(User)
@@ -245,23 +245,40 @@ def course_completions(db: Session, course: Course) -> list[dict]:
             .order_by(User.username)
         )
     )
+    labs = list_labs(db, course)
+    lab_ids = [lab.id for lab in labs]
+    assignments_by_lab: dict[str, list[Assignment]] = {}
+    if lab_ids:
+        for assignment in db.scalars(
+            select(Assignment)
+            .where(Assignment.lab_id.in_(lab_ids))
+            .order_by(Assignment.created_at)
+        ):
+            assignments_by_lab.setdefault(assignment.lab_id, []).append(assignment)
+    assignment_ids = [
+        assignment.id
+        for assignments in assignments_by_lab.values()
+        for assignment in assignments
+    ]
+    submissions: dict[tuple[str, str], Submission] = {}
+    if assignment_ids:
+        for sub in db.scalars(
+            select(Submission).where(Submission.assignment_id.in_(assignment_ids))
+        ):
+            submissions[(sub.assignment_id, sub.user_id)] = sub
+
     result: list[dict] = []
-    for lab in list_labs(db, course):
-        for assignment in list_assignments(db, lab):
+    for lab in labs:
+        for assignment in assignments_by_lab.get(lab.id, []):
             rows = []
             for student in students:
-                sub = db.scalar(
-                    select(Submission).where(
-                        Submission.assignment_id == assignment.id,
-                        Submission.user_id == student.id,
-                    )
-                )
+                submission = submissions.get((assignment.id, student.id))
                 rows.append(
                     {
                         "user_id": student.id,
                         "username": student.username,
-                        "status": sub.status if sub is not None else "not_submitted",
-                        "completed_at": sub.completed_at if sub is not None else None,
+                        "status": submission.status if submission is not None else "not_submitted",
+                        "completed_at": submission.completed_at if submission is not None else None,
                     }
                 )
             result.append(

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
@@ -17,11 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
-
+from .utils import utcnow
 
 # ---------------------------------------------------------------------------
 # Enums

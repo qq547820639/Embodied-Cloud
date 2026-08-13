@@ -14,7 +14,6 @@
 """
 
 import logging
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
@@ -27,6 +26,7 @@ from ..metrics import (
     WARM_POOL_READY,
 )
 from ..models import OperationType, Template, User, WarmPoolState, Workspace, WorkspaceStatus
+from ..utils import utcnow
 
 if TYPE_CHECKING:
     from .orchestrator import WorkspaceOrchestrator
@@ -42,10 +42,6 @@ _TERMINAL_STATUSES = {
     WorkspaceStatus.STOPPED.value,
     WorkspaceStatus.DELETED.value,
 }
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class WarmPoolManager:

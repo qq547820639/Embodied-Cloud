@@ -5,15 +5,10 @@
 
 from fastapi import APIRouter, HTTPException
 
-from ..deps import DB, CurrentUser, SessionFactory, orchestrator, settings
+from ..deps import DB, CurrentUser, streaming_service, warm_pool
 from ..schemas import StreamingOut
-from ..services.streaming import StreamingSessionService
-from ..services.warmpool import WarmPoolManager
 
 router = APIRouter(prefix="/streaming", tags=["streaming"])
-
-_service = StreamingSessionService(SessionFactory)
-_warmpool = WarmPoolManager(SessionFactory, orchestrator, settings)
 
 
 # ---------------------------------------------------------------------------
@@ -24,7 +19,7 @@ _warmpool = WarmPoolManager(SessionFactory, orchestrator, settings)
 @router.post("/sessions/{session_id}/connect", response_model=StreamingOut)
 def connect_session(session_id: str, db: DB, user: CurrentUser):
     try:
-        return _service.connect(db, session_id, user)
+        return streaming_service.connect(db, session_id, user)
     except PermissionError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -34,7 +29,7 @@ def connect_session(session_id: str, db: DB, user: CurrentUser):
 @router.post("/sessions/{session_id}/disconnect", response_model=StreamingOut)
 def disconnect_session(session_id: str, db: DB, user: CurrentUser):
     try:
-        return _service.disconnect(db, session_id, user)
+        return streaming_service.disconnect(db, session_id, user)
     except PermissionError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -44,7 +39,7 @@ def disconnect_session(session_id: str, db: DB, user: CurrentUser):
 @router.post("/sessions/{session_id}/reconnect", response_model=StreamingOut)
 def reconnect_session(session_id: str, db: DB, user: CurrentUser):
     try:
-        return _service.reconnect(db, session_id, user)
+        return streaming_service.reconnect(db, session_id, user)
     except PermissionError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -54,7 +49,7 @@ def reconnect_session(session_id: str, db: DB, user: CurrentUser):
 @router.post("/{workspace_id}/start", response_model=StreamingOut, status_code=202)
 def start_streaming(workspace_id: str, db: DB, user: CurrentUser):
     try:
-        return _service.start(db, workspace_id, user)
+        return streaming_service.start(db, workspace_id, user)
     except PermissionError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -64,7 +59,7 @@ def start_streaming(workspace_id: str, db: DB, user: CurrentUser):
 @router.get("/workspace/{workspace_id}", response_model=list[StreamingOut])
 def list_streaming_sessions(workspace_id: str, db: DB, user: CurrentUser):
     try:
-        return _service.list_for_workspace(db, workspace_id, user)
+        return streaming_service.list_for_workspace(db, workspace_id, user)
     except PermissionError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -76,12 +71,12 @@ def list_streaming_sessions(workspace_id: str, db: DB, user: CurrentUser):
 
 @router.get("/warmpool/metrics")
 def warmpool_metrics(db: DB, user: CurrentUser):
-    return _warmpool.metrics(db)
+    return warm_pool.metrics(db)
 
 
 @router.get("/warmpool/benchmark")
 def warmpool_benchmark(template_id: str, db: DB, user: CurrentUser, iterations: int = 3):
     try:
-        return _warmpool.benchmark_launch(db, template_id, iterations)
+        return warm_pool.benchmark_launch(db, template_id, iterations)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

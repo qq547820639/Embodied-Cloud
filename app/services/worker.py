@@ -16,19 +16,16 @@ import secrets
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import OperationStatus, OperationType, WorkspaceOperation
+from ..utils import utcnow
 
 logger = logging.getLogger("embodiedcloud.worker")
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class LeaseLostError(RuntimeError):

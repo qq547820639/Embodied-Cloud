@@ -2,7 +2,7 @@ import contextlib
 import logging
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC
 from pathlib import Path
 
 from sqlalchemy import select
@@ -21,6 +21,7 @@ from ..models import (
     WorkspaceOperation,
     WorkspaceStatus,
 )
+from ..utils import utcnow
 from .billing import BillingPolicy
 from .ledger import CreditLedgerService
 from .providers.base import ResourceReservation, RuntimeState, WorkspaceProvider
@@ -29,10 +30,6 @@ from .streaming import StreamingSessionService
 from .worker import enqueue_operation
 
 logger = logging.getLogger("embodiedcloud.orchestrator")
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class WorkspaceOrchestrator:
@@ -304,20 +301,33 @@ class WorkspaceOrchestrator:
         db.refresh(workspace)
         return workspace
 
+    def _settle_run(self, db: Session, workspace: Workspace) -> int:
+        """结算当前运行段并累计秒数（幂等）；返回结算的 GPU 秒数。
+
+        idempotency_key = usage:{workspace.id}:{started_at.isoformat()}，
+        与 settle_workspace_run 内部一致：同一运行段重复结算不会重复扣款。
+        无 started_at（尚未开始运行）时返回 0，且不产生账本/累计副作用。
+        """
+        if not workspace.started_at:
+            return 0
+        started = workspace.started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        run_seconds = max(0, int((utcnow() - started).total_seconds()))
+        workspace.accumulated_seconds += run_seconds
+        # 幂等结算该运行段 GPU 秒数（同一运行段重复结算不会重复扣款）
+        self.ledger.settle_workspace_run(
+            db, workspace, run_seconds, workspace.started_at.isoformat()
+        )
+        return run_seconds
+
     def _finalize_stop(self, db: Session, workspace: Workspace) -> None:
         """结算运行段 + 释放 GPU + STOPPED（幂等；reconcile 与 stop 共用）。"""
         now = utcnow()
-        if workspace.started_at:
-            started = workspace.started_at
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=UTC)
-            run_seconds = max(0, int((now - started).total_seconds()))
-            workspace.accumulated_seconds += run_seconds
-            # 幂等结算该运行段 GPU 秒数（同一运行段重复结算不会重复扣款）
-            self.ledger.settle_workspace_run(
-                db, workspace, run_seconds, workspace.started_at.isoformat()
-            )
-            # §25：实际计费 GPU 秒指标
+        had_start = workspace.started_at is not None
+        run_seconds = self._settle_run(db, workspace)
+        if had_start:
+            # §25：实际计费 GPU 秒指标（仅存在运行段时记录，语义与原实现一致）
             from ..metrics import record_gpu_seconds
 
             record_gpu_seconds(run_seconds)
@@ -329,17 +339,8 @@ class WorkspaceOrchestrator:
 
     def _settle_running_segment(self, db: Session, workspace: Workspace) -> None:
         """结算当前 RUNNING 段并累计秒数（供 destroy/delete 复用）。"""
-        now = utcnow()
         if workspace.status == WorkspaceStatus.RUNNING.value and workspace.started_at:
-            started = workspace.started_at
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=UTC)
-            seconds = max(0, int((now - started).total_seconds()))
-            workspace.accumulated_seconds += seconds
-            if seconds > 0:
-                self.ledger.settle_workspace_run(
-                    db, workspace, seconds, workspace.started_at.isoformat()
-                )
+            self._settle_run(db, workspace)
             db.commit()
 
     def destroy(self, db: Session, workspace: Workspace) -> None:

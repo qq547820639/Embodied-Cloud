@@ -7,17 +7,12 @@
 """
 
 import uuid
-from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..models import CreditLedger, LedgerType, Template, Workspace
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
+from ..models import CreditLedger, LedgerType, Workspace
 
 
 class LedgerError(RuntimeError):
@@ -100,9 +95,7 @@ class CreditLedgerService:
         """
         if seconds <= 0:
             return None
-        template = db.get(Template, workspace.template_id)
-        rate = template.estimated_hourly_cost_cny if template else 0.0
-        # 1 秒 = 1 credit（展示口径；未来可乘费率系数）
+        # 1 秒 = 1 credit（展示口径；金额计算不依赖模板费率，未来若引入按费换算再扩展）
         amount = -seconds
         return self.record(
             db,
@@ -110,7 +103,7 @@ class CreditLedgerService:
             amount=amount,
             user_id=workspace.user_id,
             organization_id=workspace.organization_id,
-            description=f"GPU usage {seconds}s @ {rate}/h",
+            description=f"GPU usage {seconds}s @ 1 credit/second",
             workspace_id=workspace.id,
             template_id=workspace.template_id,
             gpu_seconds=seconds,

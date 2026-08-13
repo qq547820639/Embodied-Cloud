@@ -24,6 +24,7 @@ from .services.providers.docker import DockerProvider
 from .services.providers.k8s import KubernetesProvider
 from .services.providers.mock import MockProvider
 from .services.scheduler import GpuScheduler
+from .services.streaming import StreamingSessionService
 from .services.warmpool import WarmPoolManager
 from .services.worker import OperationWorker
 
@@ -41,6 +42,8 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 
 scheduler = GpuScheduler(SessionFactory)
 ledger = CreditLedgerService(SessionFactory)
+# streaming 会话服务统一在此装配（组合根），router 不自建第二套 DI。
+streaming_service = StreamingSessionService(SessionFactory)
 # §8：真实注入 Settings（禁止配置字段存在但对象用 constructor default）
 billing = BillingPolicy(
     SessionFactory,

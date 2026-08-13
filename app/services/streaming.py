@@ -8,20 +8,16 @@ owner 隔离: 所有操作先校验 workspace / session 归属, 越权抛 Permis
 """
 
 import uuid
-from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..metrics import STREAM_FAILURE_TOTAL, STREAM_SESSION_TOTAL
 from ..models import Role, StreamingSession, StreamingStatus, User, Workspace, WorkspaceStatus
+from ..utils import utcnow
 
 DEFAULT_SIGNAL_PORT = 49100
 DEFAULT_MEDIA_PORT = 47998
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 # 合法状态迁移表：{当前状态: {允许的目标状态}}。任何状态均可迁移到 failed。

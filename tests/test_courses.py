@@ -248,6 +248,66 @@ def test_completions_include_student_submission(
     assert row["completed_at"] is not None
 
 
+def test_course_completions_ordering_and_dedup(db_session, template, teacher):
+    """course_completions 批量加载与旧实现等价：lab/assignment 按创建序、学生按用户名、无提交占位。"""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Assignment, Course, Lab
+    from app.services import course as course_service
+
+    course = Course(id="c-comp", owner_id=teacher.id, name="C", slug="comp")
+    db_session.add(course)
+    db_session.commit()
+
+    # 学生按 username 升序：amy < bob < zoe
+    for uid, uname in (("s-bob", "bob"), ("s-amy", "amy"), ("s-zoe", "zoe")):
+        db_session.add(
+            User(
+                id=uid, email=f"{uid}@x.com", username=uname,
+                password_hash="x",  # noqa: S106 测试桩用户，非真实密码
+                role=Role.USER.value,
+            )
+        )
+        db_session.add(
+            CourseMember(id=f"cm-{uid}", course_id="c-comp", user_id=uid, role=Role.STUDENT.value)
+        )
+    db_session.commit()
+
+    # 显式 created_at 保证遍历顺序确定性
+    base = datetime(2026, 8, 12, 10, 0, 0, tzinfo=UTC)
+    lab1 = Lab(id="lab-1", course_id="c-comp", template_id=template.id, name="Lab1", created_at=base)
+    lab2 = Lab(id="lab-2", course_id="c-comp", template_id=template.id, name="Lab2",
+               created_at=base + timedelta(seconds=10))
+    db_session.add_all([lab1, lab2])
+    db_session.commit()
+    a1 = Assignment(id="a1", lab_id="lab-1", name="A1", created_at=base)
+    a2 = Assignment(id="a2", lab_id="lab-1", name="A2", created_at=base + timedelta(seconds=1))
+    a3 = Assignment(id="a3", lab_id="lab-2", name="A3", created_at=base)
+    db_session.add_all([a1, a2, a3])
+    db_session.commit()
+    db_session.add(Submission(id="sub-1", assignment_id="a1", user_id="s-bob", status="completed"))
+    db_session.commit()
+
+    data = course_service.course_completions(db_session, course)
+
+    # 遍历顺序：lab1 的两个 assignment 在前，lab2 在后；assignment 按创建序
+    assert [e["lab_id"] for e in data] == ["lab-1", "lab-1", "lab-2"]
+    assert [e["assignment_id"] for e in data] == ["a1", "a2", "a3"]
+    assert [e["lab_name"] for e in data] == ["Lab1", "Lab1", "Lab2"]
+    assert [e["assignment_name"] for e in data] == ["A1", "A2", "A3"]
+    # 每个 assignment 下学生按 username 升序，且每学生仅一行（去重）
+    for entry in data:
+        assert [r["username"] for r in entry["submissions"]] == ["amy", "bob", "zoe"]
+        assert len(entry["submissions"]) == 3
+    # 提交状态与占位字段
+    a1_rows = {r["user_id"]: r for r in data[0]["submissions"]}
+    assert a1_rows["s-bob"]["status"] == "completed"
+    assert a1_rows["s-amy"]["status"] == "not_submitted"
+    assert a1_rows["s-zoe"]["status"] == "not_submitted"
+    assert a1_rows["s-bob"]["completed_at"] is None
+    assert all(r["status"] == "not_submitted" for r in data[1]["submissions"])
+
+
 def test_non_member_cannot_read_course(teacher_client, stranger_client):
     course = create_course(teacher_client, f"private-{uuid.uuid4().hex[:8]}")
     resp = stranger_client.get(f"/courses/{course['id']}")

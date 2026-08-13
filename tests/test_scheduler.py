@@ -21,7 +21,6 @@ from app.services.scheduler import (
     GpuInfo,
     GpuScheduler,
     recover_stuck_gpu_allocations,
-    recover_stuck_workspaces,
 )
 
 ENGINE = create_engine("sqlite:///./test-scheduler.db", connect_args={"check_same_thread": False})
@@ -163,20 +162,6 @@ def test_crash_recovery_releases_terminal_orphan_allocation():
         assert gpu.status == GpuStatus.AVAILABLE.value
         assert gpu.workspace_id is None
         assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == "w-orphan")) is None
-
-
-def test_recover_stuck_workspaces_finds_queued_and_provisioning():
-    _setup_two_gpus()
-    with Factory() as db:
-        _workspace(db, "w-queued")  # 默认 queued
-        db.add(
-            Workspace(
-                id="w-prov", name="ws2", template_id="cartpole", provider="mock",
-                status=WorkspaceStatus.PROVISIONING.value,
-            )
-        )
-        db.commit()
-        assert set(recover_stuck_workspaces(db)) == {"w-queued", "w-prov"}
 
 
 @pytest.mark.parametrize(

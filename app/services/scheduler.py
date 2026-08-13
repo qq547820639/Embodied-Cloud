@@ -9,18 +9,13 @@
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models import Gpu, GpuAllocation, GpuHost, GpuStatus, WorkspaceStatus
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
-
+from ..utils import utcnow
 
 # nvidia-smi `--query-gpu=memory.total` 上报单位为 MiB；标称「N GB」的卡实际可用
 # MiB 常略低于 N*1024（如 24GB 卡上报 24564 MiB，比 24576 少 12 MiB）。分配时
@@ -188,18 +183,6 @@ class GpuScheduler:
         """恢复期调用：释放一批 workspace 的全部 GPU 绑定（幂等）。"""
         for wid in workspace_ids:
             self.release(db, wid)
-
-
-def recover_stuck_workspaces(db: Session) -> list[str]:
-    """返回应标记 FAILED 的悬置 workspace id 列表（QUEUED/PROVISIONING）。"""
-    from ..models import Workspace
-
-    stuck = db.scalars(
-        select(Workspace).where(
-            Workspace.status.in_([WorkspaceStatus.QUEUED.value, WorkspaceStatus.PROVISIONING.value])
-        )
-    ).all()
-    return [w.id for w in stuck]
 
 
 def recover_stuck_gpu_allocations(db: Session) -> None:
