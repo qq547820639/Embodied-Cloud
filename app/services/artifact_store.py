@@ -109,12 +109,33 @@ class S3CompatibleArtifactStore:
         return response["Body"].read()
 
     def exists(self, object_key: str) -> bool:
+        """对象存在性探测：仅 S3「不存在」语义（404/NoSuchKey）返回 False。
+
+        鉴权失败（403）、桶不存在（NoSuchBucket）、网络错误等一律上抛
+        ArtifactStoreError —— 把「故障」误判为「对象不存在」会让调用方静默
+        吞掉真实错误，破坏部署校验/回滚等链路。
+        """
         _safe_key(object_key)
+        # 先取 client：boto3 未安装时 _client() 已抛 ArtifactStoreError（不假装可用）
+        client = self._client()
         try:
-            self._client().head_object(Bucket=self.bucket, Key=object_key)
+            client.head_object(Bucket=self.bucket, Key=object_key)
             return True
-        except Exception:
-            return False
+        except Exception as exc:
+            # 懒加载 botocore；只有 ClientError 的「不存在」语义幂等返回 False，
+            # 其余（403 鉴权 / NoSuchBucket / 网络错误等）一律上抛。
+            try:
+                from botocore.exceptions import ClientError
+            except ImportError:
+                raise ArtifactStoreError(f"S3 head_object failed: {exc}") from exc
+            if isinstance(exc, ClientError):
+                error = (exc.response or {}).get("Error") or {}
+                code = error.get("Code", "")
+                # 仅按 Error Code 判定「不存在」：NoSuchBucket 的 HTTP 状态码也是 404，
+                # 若按 status==404 判定会把「桶不存在」误判为「对象不存在」。
+                if code in {"404", "NoSuchKey"}:
+                    return False
+            raise ArtifactStoreError(f"S3 head_object failed: {exc}") from exc
 
     def delete(self, object_key: str) -> None:
         _safe_key(object_key)

@@ -10,10 +10,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import func, select
 
 from . import __version__
-from .deps import DB, SessionFactory, provider, run_crash_recovery, settings
+from .deps import DB, CurrentUser, SessionFactory, provider, run_crash_recovery, settings
 from .logging_setup import RequestIDMiddleware, configure_logging
 from .metrics import GPU_ALLOCATED, WORKSPACE_RUNNING
-from .models import Gpu, GpuStatus, Workspace, WorkspaceStatus
+from .models import Gpu, GpuStatus, Role, Workspace, WorkspaceStatus
 from .routers import auth, courses, deployments, edge, gpus, streaming, templates, usage, workspaces
 from .schemas import HealthOut
 
@@ -103,12 +103,15 @@ def metrics():
 
 
 @app.get("/demo-workspace/{workspace_id}", response_class=HTMLResponse, include_in_schema=False)
-def demo_workspace(workspace_id: str, db: DB, view: str | None = None):
+def demo_workspace(workspace_id: str, db: DB, user: CurrentUser, view: str | None = None):
     from .models import Template
     from .models import Workspace as W
 
     workspace = db.get(W, workspace_id)
     if workspace is None:
+        return HTMLResponse("workspace not found", status_code=404)
+    # §6/SECURITY.md T1：owner/org 隔离，越权一律 404（不泄露资源存在性）
+    if user.role != Role.ADMIN.value and workspace.user_id != user.id:
         return HTMLResponse("workspace not found", status_code=404)
     template = db.get(Template, workspace.template_id)
     mode = "仿真流演示" if view == "stream" else "浏览器 IDE 演示"
