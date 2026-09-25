@@ -5,7 +5,7 @@ VERSION ?= 0.4.0
 .PHONY: install dev test test-pg lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
-        release api-docs validate
+        release api-docs validate lock verify-lock sbom audit supply-chain
 
 install:
 	python3.12 -m venv .venv
@@ -80,3 +80,22 @@ api-docs:
 
 validate:
 	$(PYTHON) scripts/validate_release.py
+
+# --- 供应链：锁文件 / SBOM / 漏洞审计 ---
+# uv.lock 是 universal 解析（多平台 marker + sha256 哈希）。pip 路径不受影响，
+# 贡献者仍可 `make install`；CI 两条路径都验（pip 安装 + 锁一致性）。
+lock:
+	$(UV) lock
+
+verify-lock:
+	$(UV) lock --check
+
+sbom:
+	@mkdir -p dist
+	@$(UV) export --frozen --format cyclonedx1.5 > dist/sbom.cdx.json
+	@$(PYTHON) -c "import json;d=json.load(open('dist/sbom.cdx.json'));print('[sbom] dist/sbom.cdx.json', d['bomFormat'], d['specVersion'], len(d['components']), 'components')"
+
+audit:
+	@$(UV) audit --locked
+
+supply-chain: verify-lock sbom audit

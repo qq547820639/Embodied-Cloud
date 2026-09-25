@@ -13,7 +13,8 @@ set -euo pipefail
 # 流程：
 #   1. make lint && make typecheck && make test（任一失败中止并输出原因）
 #   2. make build 生成 dist/*.whl 与 dist/*.tar.gz
-#   3. 生成 dist/checksums.txt（对 dist/*.whl 与 dist/*.tar.gz 计算 sha256sum）
+#   2.4 make verify-lock / sbom / audit（uv.lock 一致性 + CycloneDX SBOM + 漏洞审计）
+#   3. 生成 dist/checksums.txt（对 wheel / sdist / sbom.cdx.json 计算 sha256sum）
 #   4. 生成 dist/VALIDATION_STATUS.md（分级验证矩阵 + BLOCKED_EXTERNAL_DEPENDENCY 明细）
 #   5. 输出 release 产物清单，并提示 git tag（不自动打 tag、不 push）
 # =============================================================================
@@ -81,6 +82,13 @@ step "4/5 make build"
 rm -rf dist
 make build
 
+# ---------- 2.4 供应链：锁一致性 / SBOM / 漏洞审计 ----------
+step "4.1 make verify-lock"
+make verify-lock
+step "4.2 make sbom + make audit"
+make sbom
+make audit
+
 # ---------- 2.5 release archive 清洁验证（§16） ----------
 step "2.5 校验 release archive 清洁度"
 # source archive 不得包含：__pycache__ / *.pyc / pytest/mypy/ruff cache /
@@ -113,7 +121,7 @@ if ! command -v sha256sum >/dev/null 2>&1; then
 fi
 : > dist/checksums.txt
 count=0
-for f in dist/*.whl dist/*.tar.gz; do
+for f in dist/*.whl dist/*.tar.gz dist/sbom.cdx.json; do
   [[ -f "$f" ]] || continue
   $hash_cmd "$f" >> dist/checksums.txt
   count=$((count + 1))
@@ -130,7 +138,7 @@ step "生成 dist/VALIDATION_STATUS.md"
 
 # 预构建产物清单。注意：必须用 ${f} 花括号形式，避免 bash 把 $f 与紧随的
 # 全角字符（（ ）误解析为变量名（set -u 下会报 unbound variable）。
-ARTIFACTS="$(for f in dist/*.whl dist/*.tar.gz; do [[ -f "$f" ]] && echo "- ${f}（SHA-256 见 dist/checksums.txt）"; done)"
+ARTIFACTS="$(for f in dist/*.whl dist/*.tar.gz dist/sbom.cdx.json; do [[ -f "$f" ]] && echo "- ${f}（SHA-256 见 dist/checksums.txt）"; done)"
 
 cat > dist/VALIDATION_STATUS.md <<EOF
 # VALIDATION_STATUS — embodiedcloud v${VERSION}
@@ -158,6 +166,10 @@ cat > dist/VALIDATION_STATUS.md <<EOF
 | lint | make lint | PASS（退出码 0） |
 | typecheck | make typecheck | PASS（退出码 0） |
 | test | make test | PASS（退出码 0） |
+| 锁文件一致性 | make verify-lock | PASS（uv.lock 与 pyproject 一致） |
+| SBOM | make sbom | dist/sbom.cdx.json（CycloneDX 1.5） |
+| 依赖漏洞审计 | make audit | PASS（uv audit --locked，0 命中） |
+| PostgreSQL 真并发 | make test-pg | 见 docs/VALIDATION.json 的 integration_postgres |
 | build | make build | PASS（退出码 0） |
 
 ## 构建产物（dist/）
@@ -168,9 +180,10 @@ ${ARTIFACTS}
 
 | 依赖 | 状态 | 影响 |
 |---|---|---|
-| Docker + daemon | 本环境缺失 | G1–G4 无法执行 |
-| NVIDIA GPU + NVIDIA Container Toolkit | 本环境缺失 | G1–G4 无法执行 |
-| NGC（nvcr.io/nvidia/isaac-sim:6.0.1） | 需 NGC 凭据/网络可拉取 | G2–G4 无法执行 |
+| Docker daemon | 本环境可用（colima） | 容器档集成测试可跑（make test-pg / docker 档） |
+| NVIDIA GPU + NVIDIA Container Toolkit | 本机为 Apple Silicon，无 CUDA | G1–G4 无法执行（非软件缺陷） |
+| NGC（nvcr.io/nvidia/isaac-sim:6.0.1） | 需 NGC 凭据 + x86 GPU 主机 | G2–G4 无法执行 |
+| Kubernetes 集群 + Device Plugin | 本环境无集群（provider 资源请求 4 CPU/16Gi 亦超出本地 VM） | G0.17 / G1 K8s 保持 PENDING |
 | 真实机器人硬件 | 本环境无真机 | G5 Sim2Real 无法执行 |
 
 ## 待办（开发者人工执行）

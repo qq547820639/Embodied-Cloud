@@ -10,6 +10,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10
+      - name: Lockfile consistency
+        # uv.lock 与 pyproject.toml 不一致即红（实测：改一个 range 不重锁 → 退出码 1）
+        run: make verify-lock
+      - name: SBOM and vulnerability audit
+        # 命中已知漏洞就红，而不是攒着：这是 `uv audit` 的实测行为（退出码 1）
+        run: make sbom && make audit
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
       - name: Lint
