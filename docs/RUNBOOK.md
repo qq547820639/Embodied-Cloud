@@ -1,6 +1,6 @@
 # RUNBOOK — EmbodiedCloud
 
-> 版本：0.4.0（2026-08-14）。面向 SRE/值班工程师；先看 `docs/ACCEPTANCE_GATES.md` 了解验证分级。
+> 版本：0.5.0（2026-09-26）。面向 SRE/值班工程师；先看 `docs/ACCEPTANCE_GATES.md` 了解验证分级。
 
 ## 1. 本地开发（Mock）
 

@@ -1,6 +1,6 @@
 # PRODUCT_SPEC — EmbodiedCloud
 
-> 版本：0.4.0（2026-08-14）。取代早期 `docs/PRODUCT_SCOPE.md` 的定位描述，保留其边界并固化为规范。
+> 版本：0.5.0（2026-09-26）。取代早期 `docs/PRODUCT_SCOPE.md` 的定位描述，保留其边界并固化为规范。
 
 ## 1. 产品使命
 

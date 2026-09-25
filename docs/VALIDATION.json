@@ -1,14 +1,14 @@
 {
-  "version": "0.4.0",
+  "version": "0.5.0",
   "overall": "PASS_WITH_PHYSICAL_PENDING",
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 406
+      "count": 409
     },
     "test_run": {
       "status": "PASS",
-      "passed": 405,
+      "passed": 408,
       "skipped": 1,
       "failed": 0
     },

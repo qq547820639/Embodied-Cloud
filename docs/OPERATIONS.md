@@ -1,6 +1,6 @@
 # OPERATIONS — EmbodiedCloud
 
-> 版本：0.4.0（2026-08-14）。环境拓扑、监控、容量与运维约定。
+> 版本：0.5.0（2026-09-26）。环境拓扑、监控、容量与运维约定。
 
 ## 1. 部署拓扑
 
@@ -39,7 +39,12 @@
 
 ## 4. 数据生命周期
 
-- 数据库：Alembic 迁移，SQLite 本地 / PostgreSQL 生产。
+- 数据库：Alembic 迁移，SQLite 本地 / PostgreSQL 生产（**生产仅支持 PostgreSQL**：
+  SQLite 方言丢弃 `FOR UPDATE`，行锁类并发保证拿不到；见 ADR 0005）。
+- 预授权（credit_holds）：`billing_hold_ttl_minutes`（默认 60）界定崩溃残留的泄漏窗口，
+  worker 每 60s 扫一次超时 pending 并退回；RUNNING 的 workspace 不回收，等结算转正。
+- 迁移新增列/约束忘了写：`tests/test_migrations.py` 的模型↔迁移对账（`compare_metadata`）
+  会在默认档直接红，不需要等生产库暴露。
 - Workspace 数据：`/workspace/project|datasets|outputs|checkpoints` 持久化，重建不丢。
 - checkpoint → artifact（checksum）→ deployment record → edge 下载验证。
 
@@ -51,4 +56,5 @@
 
 ## 6. 环境变量（.env）
 
-见 `.env.example`；新增配置必须在 `app/config.py` 有默认值且文档化。
+见 `.env.example`；新增配置必须在 `app/config.py` 有默认值且文档化 —— 该约定由
+`tests/test_config_docs.py` 双向核（字段未进文档、或文档留着 Settings 已删的键，都红）。

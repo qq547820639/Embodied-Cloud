@@ -1,51 +1,62 @@
 # CURRENT_STATE — EmbodiedCloud
 
-> 版本：**0.4.0 Product UX Iteration 软件面完成**（2026-08-14）。
+> 版本：**0.5.0 验证纵深 + 计费预授权**（2026-09-26）。
 > 数据来源：`docs/VALIDATION.json`（`make validate` 自动生成，JUnit 稳定计数）。
 
 ## 1. 本次真实验证（实测，非复制旧文档）
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（334 passed + 1 skipped[k8s_integration]）** |
+| Test | **PASS（408 passed + 1 skipped[k8s_integration]，collected 409）** |
 | Lint / Type | PASS（ruff 0 / mypy 40 files） |
-| Migration | PASS（clean DB empty→head 11 文件链 + schema 落地校验 + downgrade 循环） |
-| OpenAPI / VALIDATION freshness | PASS（make api-docs / make validate 无 diff） |
-| 前端冒烟 | PASS（六视图 SPA 静态资源 200；课程/部署/Edge/流全链路 API 冒烟 OK） |
+| Migration | PASS（clean DB empty→head **13 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
+| Integration PostgreSQL | **PASS 17/17**（自建一次性容器，真行锁语义） |
+| Integration Docker | **PASS 17/17**（真容器，非 mock） |
+| Integration Browser | **PASS 11/11**（Playwright 驱动系统 Chrome 真 DOM） |
+| Integration K8s | PENDING（原因登记：无真实集群；请求体合规改由 SDK 模型档覆盖 6 例） |
+| 供应链 | PASS（`uv.lock` 一致性 + SBOM + `uv audit --locked`，CI 门禁） |
+| OpenAPI / VALIDATION freshness | PASS（`make api-docs` / `make validate` 无 diff） |
 
-## 2. v0.4.0 本轮交付
+## 2. v0.5.0 本轮交付
 
 | § | 内容 | 验证 |
 |---|---|---|
-| UX-1 | **前端重构为六视图 SPA**（概览/用量账单/课程/部署·Sim2Real/边缘设备/GPU 管理），此前 68 行 JS 只覆盖登录+模板+工作区，后端 9 组路由大部分能力前端零入口 | 手动 + API 冒烟；`test_version_consistency`（UI 版本 pill 动态） |
-| UX-2 | 用量页（per-workspace 明细/账本明细/演示充值/口径说明）、课程页（slug 邀请码加入/教师全班矩阵/学生进度与提交）、部署页（状态机操作 + checksum）、边缘设备页（token 一次性）、流会话面板、GPU 管理页 | `test_course_onboarding.py`（6 用例）、`test_demo_checkpoint.py`（3 用例）、`test_gpu_admin.py`（2 用例） |
-| UX-3 | 状态反馈：瞬态自动轮询（终态即停/页面隐藏暂停）、状态中文映射、按状态渲染操作（修复「非 running 一律显示启动」）、破坏性操作确认弹窗 + in-flight 防重 | 手动 + 现有 lifecycle 测试 |
-| SEC-1 | **前端 XSS 全面转义**（workspace 名/错误信息/模板字段/日志标题）；`/demo-workspace` 后端同步转义 name/launch_command + 按真实状态渲染徽标（不再无条件 RUNNING）；IDE 密码改「复制密码」按钮 | `test_demo_workspace.py` 转义回归（name + launch_command 双断言） |
-| SEC-2 | 认证盲区补齐：login/logout/me + `verify_password` 边界（pepper 变化/畸形格式）+ token 仅存哈希 | `test_auth.py`（5 用例） |
-| API-1 | 新端点：`POST /api/courses/join-by-slug`、`GET /api/courses/{id}/my-progress`、`POST /api/workspaces/{id}/demo-checkpoint`（mock 专用，非 mock 400）；labs/assignments 列表对 member 可读 | `test_course_onboarding.py`、`test_demo_checkpoint.py` |
-| T-1 | 修正伪覆盖：deployment「恒真 VERIFIED」改为「PENDING 直接 verify 409 防绕过」；迁移测试校验 22 张关键表落地/移除；admin_adjustment 补 HTTP 403/200；GPU 释放补真实断言 | `test_deployment_verification.py`、`test_migrations.py`、`test_usage_admin_adjustment.py`、`test_gpu_admin.py` |
-| D-1 | 文档对齐：API.md 重写为全量端点参考；ARCHITECTURE 对齐代码；ACCEPTANCE_GATES 去重 + 数字刷新；四份 08-13 review 报告加「已修复」历史快照头；模板 slug 修正（GPU_HOST/ACCEPTANCE）；版本标号统一 0.4.0 | grep 校验 |
-| D-2 | 死代码清理：WorkspaceStatusLegacy / require_admin / release_all_for_workspaces / ledger.history / warmpool.drain/mark_failed / new_request_id / workspace_log_context | ruff F401 全绿 |
+| V-1 | **PostgreSQL 真并发档**（此前"SQLite 下 `FOR UPDATE SKIP LOCKED` 是 no-op，并发语义无法验证"被当作环境限制）：`tests/pg_server.py` 自建一次性 PG 容器（就绪判据走测试真正使用的 TCP+`SELECT 1` 路径，不用容器内 `pg_isready`——它在 initdb 期间会先起一个只监听 unix socket 的临时服务器） | `test_postgres_concurrency.py` 17 例：`FOR UPDATE` 必须阻塞 / `SKIP LOCKED` 必须放行的成对判据、allocate 锁范围确定性探针、并发不重复占用、worker lease CAS、账本 8 线程幂等、warm pool CAS 单赢家、BillingAccount 行锁两档并排 |
+| V-2 | **Docker provider 真容器档**：`health/start/inspect/logs/wait_ready/reconcile` 及流式占用门禁首次在真实守护进程上执行（架构匹配镜像选择、不使用 `--rm` 以免"退出但存在"被掩盖、宿主 http_server 提供真实下载源、会话级容器泄漏守卫） | `test_docker_provider_integration.py` 17 例 |
+| V-3 | **浏览器级前端档**：Playwright + 系统 Chrome 驱动真 DOM，替掉"grep 前端源码"式伪覆盖 | `test_browser_console.py` 11 例；含 `<img src=x onerror=…>` 载荷在 DOM 中不执行、终态/页面隐藏时轮询真的停下（`pollTimer === null`）、控制台零错误 |
+| V-4 | **K8s 请求体合规档**：provider 生成的对象经真实 SDK 的 `sanitize_for_serialization` 过一遍线格式，不再只与自造 fake 对拍 | `test_k8s_model_conformance.py` 6 例 |
+| S-1 | **供应链可复现**：universal `uv.lock`（多平台 marker + sha256）、SBOM（`uv export --format cyclonedx1.5`）、`uv audit --locked`；CI 增 `make verify-lock` / `make sbom && make audit`，并要求"需要 docker 的档位必须真的 PASS，否则红" | `docs/SUPPLY_CHAIN.md` §4/§5 |
+| B-1 | **§17 BillingAccount + §18 CreditHold 落地**：可用额度 = 账本毛余额 − pending hold；provision 前圈额度、结算转正、失败退回、超时扫描 | `test_credit_holds.py` 14 例（含 3 条走 worker 真实执行链的端到端）+ PG 档锁语义 |
+| F-1 | 修 **GPU allocate 无界 `FOR UPDATE`**：一次启动会锁住整片候选 GPU，并发启动互相饿死（SQLite 档结构性看不见） | PG 档 `test_allocate_locks_exactly_one_candidate_row`（锁范围）+ `test_unbounded_candidate_read_starves_concurrent_allocate`（饿死反证） |
+| F-2 | 修 **生命周期入队冲突谎报成功**：start/stop/delete 在队列拒绝时返回 409；`start` 不再先提交 `QUEUED` | `test_lifecycle_conflict_is_reported_instead_of_faking_success`（变异对照验过牙） |
+| F-3 | 修 **edge_agents 租户外键从未被创建**（模型声明有、迁移没有 → SQLite 与 PG 都没有），并补上"模型↔迁移"对账门 | `3f0c9a51b7e2` + `test_migrations.py` 用 `compare_metadata` 对账（改前红 2 条 `add_fk`，改后 0） |
+| F-4 | 修 **SQLite 外键默认不校验**：`make_engine` 逐连接 `PRAGMA foreign_keys=ON`；并把"SQLite 不提供行锁"钉成常驻断言 | `test_sqlite_semantic_baseline.py` 4 例 |
+| F-5 | 修 released-version 回退非全序（同秒并列导致 flake）；零秒运行段 leave pending hold → capture 改为无条件 | `test_template_versions.py`、`test_credit_holds.py` |
+| G-1 | 把两条"写在文档里的约定"变成常驻对账：①模型声明 ↔ 迁移产物（`compare_metadata`，非空即红）；②`Settings` 字段 ↔ `.env.example`（双向：漏文档 / 留死键都红） | `test_migrations.py` 对账用例 + `test_config_docs.py` 2 例（改前红：`billing_hold_ttl_minutes` 未进 .env.example） |
+| D-1 | 决策记录：ADR 0004（hold 为何是独立表而非账本条目）、0005（SQLite/PG 语义差与两层验证）、0006（冲突即 409）；API.md 补 409/402 口径 | `docs/adr/000{4,5,6}-*.md` |
 
 ## 3. 分项状态
 
 ### VERIFIED PASS
-334 tests 全绿；lint/type/migration/build/smoke/release 全链路；前端六视图 + 全链路 API 冒烟。
+408 tests 全绿（含 PG 真并发 17、真容器 17、真浏览器 11、SDK 线格式 6、预授权 14）；
+lint/type/migration/build/smoke/release/供应链全链路。
 
 ### PHYSICAL_VALIDATION_PENDING / NOT_RUN（不假装 PASS）
-GPU（G1–G4 脚本就绪）· K8s（pytest -m k8s_integration 正确 skip）· Streaming 媒体面 · Robot 真机 · Warm pool SLA。
+GPU 真机（G1–G4 脚本就绪，本机无 NVIDIA 设备）· 真实 K8s 集群 · Streaming 媒体面（Isaac Sim WebRTC）· Robot 真机 · Warm pool SLA。
 
 ### BLOCKED_EXTERNAL_DEPENDENCY
-NGC 凭据（镜像 digest 回填）· PostgreSQL 生产验证/容器测试（无 docker daemon）· S3 凭据 · 物理机器人 · 真实 K8s 集群。
+NGC 凭据（镜像 digest 回填）· S3 凭据 · 物理机器人 · 真实 K8s 集群凭据 · NVIDIA 容器运行时（Docker 档的 `--gpus` 分支）。
+> 注：docker daemon 与 postgres 镜像本轮已可用，旧文档"无 docker daemon"的说法作废。
 
 ### TECH DEBT（已知、有意延后）
-BillingAccount 重构（§17，当前 user/org 双 FK 聚合视角）· CreditHold 预授权（§18）· edge agent 独立包（§25）· SQLite FK 约束（§30）· lockfile/SBOM · 并发语义测试迁移到 PostgreSQL（SQLite 下 `FOR UPDATE SKIP LOCKED` 为 no-op）· `default_idle_timeout_minutes`（缺 runtime 活动信号，标注预留）· 前端无自动化浏览器测试（当前以 API 冒烟 + 转义回归覆盖）· Docker `health/start/inspect/logs/wait_ready/reconcile/_streaming_workspace_running/_assert_streaming_slot_available` 与 K8s `wait_ready/rotate_credentials/supports_credential_rotation` 的直接单测（依赖 docker daemon/集群；Docker `rotate_credentials=False` 已有测试，K8s 补偿清理 404/非 404 分支已覆盖）· 测试公共 fixture 抽取（4 组 `_setup`/`_register` 拷贝粘贴）· test-*.db 模块级文件库迁移 tmp_path/内存 SQLite · K8s 物理验收 CI gate（无集群时显式 PENDING 登记，而非普通 skip）。
+edge agent 独立包（§25）· `default_idle_timeout_minutes`（缺 runtime 活动信号，标注预留）· **测试公共 fixture 抽取**（4 组 `_setup`/`_register` 拷贝粘贴）· **`test-*.db` 模块级文件库**（迁移 tmp_path/内存 SQLite）——本轮实测代价：两个 pytest 进程并发跑同一仓库时互相污染，读出 30 例假红，串行即绿；序列号：`telemetry_events.edge_agent_id` 在模型与迁移里都没有外键（本轮发现，未处理，与 F-3 同类）· K8s provider 的 `wait_ready/rotate_credentials/supports_credential_rotation` 真实集群路径 · Docker `--gpus` 设备透传分支 · S3 `ArtifactStore` 真实后端。
 
 ## 4. 结论
 
-v0.4.0 Product UX Iteration 软件面完成：前端从"演示级原型"升级为覆盖
-**全部后端能力**的六视图控制台（用量账本/课程/部署/Edge/流/GPU），状态反馈、
-确认/防重、XSS 转义、可达性、移动端按审计 H1–H3 清单逐项落地；后端补齐学生端
-课程闭环（slug 邀请码/我的进度/member 可见）与演示模式 Sim2Real 闭环（mock
-checkpoint），并清理死代码、修正 4 处伪覆盖测试、补齐认证盲区测试。
-剩余工作依赖真实硬件/凭据（GPU/K8s/机器人/S3/PostgreSQL 容器）。
+v0.5.0 把上一轮"记为无法在本环境验证"的四类判据（PostgreSQL 行锁、Docker provider、
+真实浏览器 DOM、K8s 请求体形状）全部变成常驻门禁，并在此过程中修出 5 个真实缺陷：
+GPU 分配锁范围只有真行锁下才看得见、生命周期谎报是浏览器档真点出来的、
+`edge_agents` 的租户外键则由模型↔迁移对账暴露（三条都需要真后端或真工具，SQLite
++ grep 的老办法一条也抓不到）。计费侧补上预授权，使"并发启动把余额花成负数"不再可能。
+硬件与凭据类项目（GPU 真机、真实集群、机器人、S3/NGC）继续保持
+PENDING/BLOCKED 显式登记，不用测试通过来冒充物理验证。

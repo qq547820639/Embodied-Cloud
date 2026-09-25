@@ -1,6 +1,6 @@
 # ADR 0005: SQLite 与 PostgreSQL 的语义差 —— 补齐能补的，把补不了的钉成断言
 
-状态：Accepted（2026-09-25）
+状态：Accepted（2026-09-26）
 
 ## 背景
 

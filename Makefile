@@ -1,6 +1,6 @@
 PYTHON ?= .venv/bin/python
 UV ?= uv
-VERSION ?= 0.4.0
+VERSION ?= 0.5.0
 
 .PHONY: install dev test test-pg test-docker test-browser lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \

@@ -3,7 +3,7 @@
   "info": {
     "title": "EmbodiedCloud API",
     "description": "Browser-first Isaac Lab workspace control plane",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
   "paths": {
     "/api/auth/register": {
@@ -983,6 +983,7 @@
           "streaming"
         ],
         "summary": "Warmpool Metrics",
+        "description": "warm pool \u89c2\u6d4b\uff1a\u6309 template \u00d7 state \u7684 COUNT(*) \u771f\u5b9e\u8ba1\u6570\u3002",
         "operationId": "warmpool_metrics_api_streaming_warmpool_metrics_get",
         "responses": {
           "200": {

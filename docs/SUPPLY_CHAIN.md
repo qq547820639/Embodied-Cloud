@@ -1,6 +1,6 @@
 # SUPPLY CHAIN — EmbodiedCloud 供应链可复现性
 
-> 更新：2026-08-12。只记录仓库内已落地/已验证的事实；未验证项明确标注。
+> 更新：2026-09-26。只记录仓库内已落地/已验证的事实；未验证项明确标注。
 
 ## 1. 镜像
 
@@ -30,8 +30,9 @@
 | 项 | 现状 | 状态 |
 |---|---|---|
 | 依赖范围 | pyproject.toml：fastapi/sqlalchemy/pydantic-settings/alembic/kubernetes/prometheus-client/pyyaml/cryptography | VERIFIED |
-| lockfile | 未提交 lockfile（uv.lock / requirements.lock） | PENDING（TECHNICAL DEBT，见下） |
-| 测试/构建工具 | pytest/httpx/pytest-asyncio/ruff/mypy/build | VERIFIED |
+| lockfile | `uv.lock`：universal 解析（多平台 marker + sha256 哈希），CI 跑 `make verify-lock` | VERIFIED（v0.5.0） |
+| 安装路径 | pip（`make install`，不依赖 uv）与 uv 两条并存，CI 都验 | VERIFIED |
+| 测试/构建工具 | pytest/httpx/playwright/psycopg/ruff/mypy/build | VERIFIED |
 
 ## 5. Release 校验
 
@@ -39,7 +40,9 @@
 |---|---|---|
 | release 流程 | scripts/release.sh：semver → lint/type/test → build → checksums → 分级验证矩阵 | VERIFIED（脚本存在且 CI 通过） |
 | OpenAPI 新鲜度 | CI 重新生成 + git diff 门禁 | VERIFIED（本轮新增） |
-| SBOM | 未生成 | PENDING（建议 cyclonedx 接入 CI） |
+| SBOM | `make sbom` = `uv export --format cyclonedx1.5` → `dist/sbom.cdx.json`，随 `dist/checksums.txt` 入产物清单 | VERIFIED（v0.5.0） |
+| 漏洞审计 | `make audit` = `uv audit --locked`，CI 在 sbom 之后执行 | VERIFIED（v0.5.0） |
+| 集成档真实性 | CI 断言需要 docker 的档位（postgres/docker/browser）必须 PASS，否则红；只有 k8s 档允许 PENDING | VERIFIED（v0.5.0） |
 
 ## 6. 禁止项
 
@@ -48,8 +51,8 @@
 
 ## 7. 待办（按优先级）
 
-1. **Python lockfile**（uv.lock）：CI 可复现安装
-2. **镜像 digest 回填**：build_workspace_image.sh 构建成功后把 digest 写入 TemplateVersion.image_digest
-3. **code-server SHA256 校验**：build 脚本内验证下载物
-4. **SBOM 生成**：`cyclonedx-py` 或 `syft` 接入 CI
-5. **IsaacLab exact revision**：镜像 recipe 锁定 git rev
+1. **镜像 digest 回填**：build_workspace_image.sh 构建成功后把 digest 写入 TemplateVersion.image_digest（阻塞于 NGC 凭据）
+2. **code-server SHA256 校验**：build 脚本内验证下载物
+3. **IsaacLab exact revision**：镜像 recipe 锁定 git rev
+
+（原第 1 项 Python lockfile 与原第 4 项 SBOM 已于 v0.5.0 落地，见 §4/§5。）

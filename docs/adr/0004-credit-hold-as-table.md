@@ -1,6 +1,6 @@
 # ADR 0004: 预授权用独立 hold 表，不进 append-only 账本
 
-状态：Accepted（2026-09-25）
+状态：Accepted（2026-09-26）
 
 ## 背景
 

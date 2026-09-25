@@ -1,6 +1,6 @@
 # ARCHITECTURE — EmbodiedCloud
 
-> 版本：0.4.0（2026-08-14）。本文是现行实现架构；历史讨论见 `docs/IMPLEMENTATION_PLAN.md`、`docs/K8S_PRODUCTION.md`、`docs/adr/*`。
+> 版本：0.5.0（2026-09-26）。本文是现行实现架构；历史讨论见 `docs/IMPLEMENTATION_PLAN.md`、`docs/K8S_PRODUCTION.md`、`docs/adr/*`。
 
 ## 1. 总体分层
 
@@ -56,7 +56,9 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
 ## 3. GPU Scheduler
 
 - `gpu_allocations` 表（`gpu_id`/`workspace_id` 唯一索引）实现原子分配：
-  `SELECT ... FOR UPDATE SKIP LOCKED`（PostgreSQL 生效）+ 唯一约束兜底（SQLite 单写者）。
+  每轮只 `SELECT ... FOR UPDATE SKIP LOCKED ... LIMIT 1` 锁一张候选（PostgreSQL 生效），
+  取不到即「被别人持着」→ 有界重试；唯一约束兜底并发插入（SQLite 单写者）。
+  行锁语义只在 `make test-pg` 档验证——SQLite 方言把 `FOR UPDATE` 整个丢弃（ADR 0005）。
 - 分配顺序：AVAILABLE（显存满足模板需求，含 16MiB 厂商预留容差）→ ALLOCATED；
   释放：stop/destroy → AVAILABLE。
 - UNHEALTHY 不参与调度；DRAINING 不再分配新 workspace。
@@ -98,7 +100,7 @@ class WorkspaceProvider(Protocol):
 - users / organizations / user_sessions
 - templates / template_versions（identity 与不可变版本分离，current_version_id 指针）
 - workspaces / workspace_operations（durable operations）/ gpu_hosts / gpus / gpu_allocations
-- credit_ledger（不可变账本）
+- credit_ledger（不可变账本）/ billing_accounts（计费主体行，预授权锁根）/ credit_holds（启动预授权）
 - streaming_sessions
 - courses / course_members / labs / assignments / submissions
 - artifacts / deployments
@@ -110,8 +112,13 @@ class WorkspaceProvider(Protocol):
 - GPU 计费单位：实际运行秒数（RUNNING 起止差，stop/destroy 时结算；幂等键
   `usage:{workspace_id}:{started_at_iso}`，同一运行段只结算一次）。
 - balance = SUM(amount)；不维护单一 mutable balance。
-- BillingPolicy：launch 前门禁（个人+组织余额 / 预授权门槛 / course 配额），
-  运行中由 worker 周期任务 `monitor_runtime_quotas` 透支优雅停止。
+- **可用额度 = 个人+组织账本毛余额 − pending hold 合计**；hold 是独立可变表，
+  不进账本（ADR 0004）。`reserve_launch` 在 provision 前圈住最低额度（幂等键
+  `hold:{workspace_id}`，同一 workspace 至多一个 pending），结算 `capture_hold`
+  转正并记 `ledger_usage_key`，失败/销毁 `release_hold` 退回。
+- BillingPolicy：launch 前门禁（可用额度 / course 配额），admin 与 instructor 豁免；
+  运行中由 worker 周期任务 `monitor_runtime_quotas` 透支优雅停止，另有
+  `release_expired_holds` 回收超时 pending（控制面崩溃残留，RUNNING 段不回收）。
 
 ## 7. 安全边界
 

@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.5.0 — 2026-09-26（验证纵深 + 计费预授权）
+
+### 四档"本环境做不到"的判据变成常驻门禁
+- **PostgreSQL 真并发档（17 例）**：`tests/pg_server.py` 自建一次性容器 + 每例独占库
+  （跑完整 13 级迁移链，`DROP DATABASE … WITH (FORCE)` 收尾）。就绪判据走测试真正
+  使用的那条路（对发布端口建 TCP 连接 `SELECT 1`），不用容器内 `pg_isready`——官方
+  镜像在 initdb 期间会先起一个只监听 unix socket 的临时服务器，用它判就绪是假绿。
+  覆盖：`FOR UPDATE` 必阻塞 / `SKIP LOCKED` 必放行的成对判据、并发 allocate 不重复
+  占用、worker lease CAS、账本 8 线程幂等、部分唯一索引串行、warm pool CAS 单赢家、
+  BillingAccount 行锁两档并排。
+- **Docker provider 真容器档（17 例）**：`health/start/inspect/logs/wait_ready/
+  reconcile` 与流式占用门禁首次在真实守护进程上执行；按 daemon 架构匹配镜像
+  （否则容器秒退、`--rm` 把"退出但存在"掩盖成"不存在"）、宿主 http_server 提供真实
+  下载源、会话级泄漏守卫。
+- **浏览器档（11 例）**：Playwright 驱动系统 Chrome 真 DOM，替代"grep 前端源码"。
+  含存储型 XSS 载荷在 DOM 中确实不执行、终态/页面隐藏时轮询真的停（`pollTimer === null`）、
+  控制台零错误（由此抓出并修掉 favicon 404）。
+- **K8s 线格式合规档（6 例）**：provider 生成的对象过真实 SDK 的
+  `sanitize_for_serialization`，不再只与自造 fake 对拍。真实集群验收仍以
+  `K8S_PHYSICAL_VALIDATION_PENDING` 显式登记，不用 skip 冒充。
+
+### 计费：主体行 + 启动预授权（§17/§18）
+- `BillingAccount(subject_type, subject_id)` 唯一：把"user/org 两个 FK 聚合视角"收敛
+  成一行，作为预授权前的串行化根；迁移按现存 users/organizations 回填。
+- `CreditHold` 独立可变表（不进 append-only 账本，理由见 ADR 0004）：provision 前
+  `reserve_launch` 圈住最低额度、结算 `capture_hold` 转正、失败/销毁 `release_hold`
+  退回、worker 周期扫 `expires_at` 兜崩溃残留（RUNNING 段不回收）。
+- 可用额度改为「账本毛余额 − pending hold」；`enforce_preauthorization=False`
+  （本地/演示）时零写行。
+- 连带修两处真实竞态：`reserve_launch` 与 `account_for` 在并发首批请求下会漏出
+  `UniqueViolation`/`IntegrityError`，改为回滚后收敛到已存在行。
+
+### 缺陷修复
+- **GPU 分配锁范围**：`allocate` 原先对全部候选 `FOR UPDATE`，一次启动锁住整片 GPU，
+  并发启动互相饿死；改为每次 `limit(1) + SKIP LOCKED` + 有界重试，并区分"没剩下"
+  与"被别人持着"。SQLite 档结构性看不见此缺陷。
+- **生命周期谎报**：start/stop/delete 忽略入队返回值，队列拒绝时仍回 2xx；改判 409，
+  且 `start` 不再先提交 `QUEUED`（ADR 0006，附变异对照）。
+- **`edge_agents` 租户外键从未存在**：`c7c6f510d21f` 只加列未加约束，SQLite 与
+  PostgreSQL 都没有它；`3f0c9a51b7e2` 补建，并把"模型↔迁移"对账（`compare_metadata`）
+  接进默认档门禁，防同类漂移。
+- **SQLite 外键默认不校验**：`make_engine` 逐连接 `PRAGMA foreign_keys=ON`（ADR 0005）。
+- released-version 回退改为全序（同秒并列导致的 flake 根因）；零秒运行段的 hold
+  由无条件 capture 收口。
+
+### 供应链
+- 提交 universal `uv.lock`（多平台 marker + sha256），CI 跑 `make verify-lock`。
+- SBOM（`uv export --format cyclonedx1.5`）+ `uv audit --locked` 进 release 步骤与
+  `dist/checksums.txt`；CI 要求"需要 docker 的集成档必须真 PASS，否则红"。
+
+### 文档
+- 新增 ADR 0004（hold 为何独立成表）、0005（SQLite/PG 语义差与两层验证）、
+  0006（冲突即 409）；API.md 补 409 语义与 402 额度口径；CURRENT_STATE /
+  ACCEPTANCE_GATES / SUPPLY_CHAIN / ARCHITECTURE / OPERATIONS / MASTER_PLAN 按实测读数对齐。
+- 两条"写在文档里的约定"接进常驻对账：模型声明 ↔ 迁移产物（`compare_metadata`）、
+  `Settings` 字段 ↔ `.env.example`（双向）。后者落地即开火——它抓出了本轮自己漏文档的
+  `billing_hold_ttl_minutes`。
+
 ## 0.4.0 — 2026-08-14（Product UX Iteration）
 
 ### 前端重构（多视图 SPA，仍为无构建工具链的静态资源）

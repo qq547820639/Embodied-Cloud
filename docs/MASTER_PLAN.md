@@ -1,6 +1,6 @@
 # MASTER_PLAN — EmbodiedCloud
 
-> 版本：0.4.0（2026-08-14）。滚动更新；每完成一个 milestone 同步 `docs/CURRENT_STATE.md` 与 `docs/ACCEPTANCE_GATES.md`。
+> 版本：0.5.0（2026-09-26）。滚动更新；每完成一个 milestone 同步 `docs/CURRENT_STATE.md` 与 `docs/ACCEPTANCE_GATES.md`。
 
 ## 目标
 
@@ -29,7 +29,8 @@
 
 ## 当前状态
 
-见 `docs/CURRENT_STATE.md`。遗留 BLOCKED：Docker daemon / NVIDIA GPU / NGC 凭据 / 真机机器人。
+见 `docs/CURRENT_STATE.md`。当前 v0.5.0：PostgreSQL 真并发、Docker provider 真容器、真实浏览器 DOM 三档已进常驻门禁（docker daemon 已可用，不再是遗留项）。
+遗留 BLOCKED：NVIDIA GPU/容器运行时 / NGC 凭据 / S3 凭据 / 真实 K8s 集群 / 真机机器人。
 
 ## 商业 Gate（预留）
 

@@ -1,13 +1,13 @@
 # VALIDATION — EmbodiedCloud
 
-> 版本：0.4.0（自动生成，勿手改）
+> 版本：0.5.0（自动生成，勿手改）
 
 ## 总览：**PASS_WITH_PHYSICAL_PENDING**
 
 | Gate | 状态 | 明细 |
 |---|---|---|
-| Test collected | PASS | 406 |
-| Test run | PASS | passed=405 skipped=1 failed=0 |
+| Test collected | PASS | 409 |
+| Test run | PASS | passed=408 skipped=1 failed=0 |
 | lint | PASS | |
 | typecheck | PASS | |
 | migration | PASS | |
