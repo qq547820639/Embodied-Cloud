@@ -32,6 +32,25 @@ class GpuInfo:
     memory_total: int
     index: int = 0
 
+
+# PostgreSQL/psycopg 的唯一约束冲突 SQLSTATE
+_UNIQUE_VIOLATION = "23505"
+
+
+def _is_unique_contention(exc: IntegrityError) -> bool:
+    """这次 IntegrityError 是"卡被别人抢了"（唯一冲突），还是我们自己写坏了数据？
+
+    给 gpu_allocations 加外键之后，两类冲突都会落进同一个 except 分支：
+    唯一冲突 = 并发竞争（该重试下一张卡）；外键冲突 = 往分配表写了不存在的
+    workspace/host（重试多少次都不会成功，且会被误报成"没有空闲卡"）。
+    先按驱动给的 SQLSTATE 判，退回到 SQLite 的约束文案。
+    """
+    orig = getattr(exc, "orig", None)
+    state = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if state:
+        return str(state) == _UNIQUE_VIOLATION
+    return "UNIQUE constraint failed" in str(orig)
+
 class GpuScheduler:
     # 候选正被其他事务锁住时的重试窗口（0.05+0.1+0.15+0.2 ≈ 0.5s 上限）
     ALLOCATE_MAX_ATTEMPTS = 5
@@ -134,9 +153,16 @@ class GpuScheduler:
                 )
                 try:
                     db.commit()
-                except IntegrityError:
-                    # 并发竞争：另一事务已占用该 GPU → 回滚重试下一张
+                except IntegrityError as exc:
+                    # 只有唯一约束冲突才是"另一路已占用这张卡"（并发竞争，换下一张重试）；
+                    # 外键冲突说明我们自己在往 gpu_allocations 写不存在的 workspace/host，
+                    # 一律重试会把数据缺陷报成"没有空闲卡"。
+                    contention = _is_unique_contention(exc)
                     db.rollback()
+                    if not contention:
+                        raise RuntimeError(
+                            f"GPU 分配被完整性约束拒绝（非并发争用）: {exc}"
+                        ) from exc
                     continue
                 return gpu
             # 没锁到候选：区分「真没卡」与「卡正被别人锁着」

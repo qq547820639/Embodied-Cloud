@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import warnings
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
@@ -83,13 +84,24 @@ def test_migration_upgrade_downgrade_cycle(tmp_path):
 
 
 def _metadata_diff(db_path) -> list:
-    """迁移产出的库 vs app/models.py 声明：返回 alembic 认为「还差什么」。"""
+    """迁移产出的库 vs app/models.py 声明：返回 alembic 认为「还差什么」。
+
+    先挡住一种假绿：表之间存在互相回指的外键时，compare_metadata 会发
+    "unresolvable cycles" 警告并**静默跳过该环内所有外键比较** —— 尺子当场变瞎。
+    """
     engine = create_engine(f"sqlite:///{db_path}")
     try:
-        with engine.connect() as conn:
-            return list(compare_metadata(MigrationContext.configure(conn), Base.metadata))
+        with engine.connect() as conn, warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            diff = list(compare_metadata(MigrationContext.configure(conn), Base.metadata))
     finally:
         engine.dispose()
+    skipped = [str(w.message) for w in caught if "unresolvable cycle" in str(w.message).lower()]
+    assert not skipped, (
+        f"对账门被静默降级（存在互相回指的外键，比较被跳过）：{skipped}；"
+        "每个互指对只保留一条方向的约束"
+    )
+    return diff
 
 
 def test_migrated_schema_declares_nothing_the_models_do_not(tmp_path):

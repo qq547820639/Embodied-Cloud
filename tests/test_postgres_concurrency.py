@@ -131,6 +131,28 @@ def assert_lock_timeout(exc: BaseException, label: str) -> None:
     assert "lock timeout" in msg, f"{label}：未按预期因行锁超时，实际={msg}"
 
 
+def ensure_workspace(factory, ws_id: str) -> str:
+    """建一条指定 id 的 workspace 行。
+
+    `gpu_allocations.workspace_id` 现在是真的外键：分配表只接受存在的 workspace。
+    用例里那些 "ws-keep" / "ws-c" 之类的字面量因此必须有父行——这正是生产路径
+    （provision 先落 workspace 再分配）的形状。
+    """
+    with factory() as db:
+        if db.get(Workspace, ws_id) is None:
+            db.add(
+                Workspace(
+                    id=ws_id,
+                    name="ws",
+                    template_id="cartpole",
+                    provider="mock",
+                    status="queued",
+                )
+            )
+            db.commit()
+    return ws_id
+
+
 def new_workspace(factory, status: str = "queued", warm_pool_state: str | None = None) -> str:
     ws_id = f"ws-{uuid.uuid4().hex[:8]}"
     with factory() as db:
@@ -204,6 +226,18 @@ def test_alembic_chain_schema_landing_on_postgres(pg_url):
                 )
             }
             assert {
+                # 本轮补齐的"真指针"外键（b7e4c1a09f52）：迁移必须真的在 PG 上落地
+                "fk_gpuallocation_workspace_id",
+                "fk_gpuallocation_host_id",
+                "fk_gpu_workspace_id",
+                "fk_credithold_workspace_id",
+                "fk_deploymentrecord_workspace_id",
+                "fk_deploymentrecord_edge_agent_id",
+                "fk_telemetryevent_edge_agent_id",
+                "fk_workspace_template_version_id",
+                "fk_artifact_workspace_id",
+                "fk_streamingsession_workspace_id",
+                "fk_submission_workspace_id",
                 "gpus_host_id_fkey",
                 "gpu_allocations_gpu_id_fkey",
                 "credit_ledger_user_id_fkey",
@@ -357,6 +391,8 @@ def test_skip_locked_is_what_prevents_the_collision(pg_factory):
         same_c = read_unlocked(c)
         same_d = read_unlocked(d)
         assert same_c == same_d, f"不带锁的读法本应重叠：{same_c} / {same_d}"
+        ensure_workspace(pg_factory, "ws-c")
+        ensure_workspace(pg_factory, "ws-d")
         c.add(
             GpuAllocation(
                 id=str(uuid.uuid4()),
@@ -398,6 +434,7 @@ def test_allocate_succeeds_while_one_candidate_is_locked(pg_factory):
     assert locked == [ordered[0]]
     try:
         with pg_factory() as db:
+            ensure_workspace(pg_factory, "ws-while-locked")
             gpu = scheduler.allocate(db, "ws-while-locked", gpu_requirement_gb=0)
         assert gpu.id == ordered[1], f"应分到未被锁的那张：{gpu.id} vs {ordered}"
     finally:
@@ -428,6 +465,7 @@ def test_unbounded_candidate_read_starves_concurrent_allocate(pg_factory):
     assert len([g.id for g in starver.scalars(lock_all)]) == 2, "无 limit 的读法本应锁走两张候选"
     try:
         with pg_factory() as db, pytest.raises(RuntimeError, match="No GPU available"):
+            ensure_workspace(pg_factory, "ws-starved")
             scheduler.allocate(db, "ws-starved", gpu_requirement_gb=0)
     finally:
         starver.rollback()
@@ -435,6 +473,7 @@ def test_unbounded_candidate_read_starves_concurrent_allocate(pg_factory):
 
     # 放锁之后同一请求立即成功 → 证明刚才的失败是"被锁饿死"，不是真的没卡
     with pg_factory() as db:
+        ensure_workspace(pg_factory, "ws-after-release")
         gpu = scheduler.allocate(db, "ws-after-release", gpu_requirement_gb=0)
     assert gpu.status == GpuStatus.ALLOCATED.value
     assert len(ordered_gpu_ids(pg_factory)) == 1, "放锁并分配后只该剩一张空闲卡"
@@ -450,6 +489,7 @@ def test_concurrent_allocate_never_double_books(pg_factory):
 
     def worker(idx: int) -> None:
         workspace_id = f"ws-{idx}-{uuid.uuid4().hex[:8]}"
+        ensure_workspace(pg_factory, workspace_id)
         barrier.wait()
         with pg_factory() as db:
             try:
@@ -482,10 +522,12 @@ def test_allocate_is_crash_safe_on_postgres(pg_factory):
     seed_gpus(pg_factory, 1)
     scheduler = GpuScheduler(pg_factory)
     with pg_factory() as db:
+        ensure_workspace(pg_factory, "ws-keep")
         gpu = scheduler.allocate(db, "ws-keep", gpu_requirement_gb=0)
         allocated_gpu_id = gpu.id
     scheduler = GpuScheduler(pg_factory)
     with pg_factory() as db, pytest.raises(RuntimeError):
+        ensure_workspace(pg_factory, "ws-second")
         scheduler.allocate(db, "ws-second", gpu_requirement_gb=0)
     with pg_factory() as db:
         assert db.get(Gpu, allocated_gpu_id).status == GpuStatus.ALLOCATED.value
@@ -534,6 +576,7 @@ def test_allocate_locks_exactly_one_candidate_row(pg_factory):
 
     sa_event.listen(target.get_bind(), "after_cursor_execute", hook)
     try:
+        ensure_workspace(pg_factory, "ws-lock-scope")
         gpu = GpuScheduler(pg_factory).allocate(target, "ws-lock-scope", gpu_requirement_gb=0)
         target.commit()
     finally:
@@ -867,3 +910,17 @@ def test_billing_account_row_is_a_real_exclusive_lock(pg_factory):
         assert policy.available_credits(after, after.get(User, user_id)) == 400
         after.execute(delete(CreditHold))
         after.commit()
+
+
+def test_missing_workspace_is_not_reported_as_no_capacity(pg_factory):
+    """分配表的外键冲突必须报成数据问题，不是"没有空闲卡"。
+
+    allocate() 原先把任何 IntegrityError 都当成"卡被别人抢了"→ 回滚重试；
+    给 gpu_allocations.workspace_id 加外键之后，这条会把"workspace 行不存在"
+    一路误报成容量不足（本轮 PG 档实测就是这个路径）。反向对照：父行存在时
+    同一请求成功（其余 allocate 用例已覆盖）。
+    """
+    seed_gpus(pg_factory, 1)
+    with pg_factory() as db, pytest.raises(RuntimeError, match="非并发争用") as exc:
+        GpuScheduler(pg_factory).allocate(db, "ws-does-not-exist", gpu_requirement_gb=0)
+    assert "No GPU available" not in str(exc.value), "外键冲突又被误报成容量不足"

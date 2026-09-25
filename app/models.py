@@ -259,7 +259,12 @@ class Workspace(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     template_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     # 具体引用的不可变 TemplateVersion（runtime image 的单一事实来源）
-    template_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    template_version_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("template_versions.id", name="fk_workspace_template_version_id"),
+        nullable=True,
+        index=True,
+    )
     # 启动时快照的 runtime image（来自 TemplateVersion；provider 据此启动容器）
     image: Mapped[str | None] = mapped_column(String(255), nullable=True)
     user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
@@ -318,7 +323,12 @@ class Gpu(Base):
     # host 上设备索引（Docker provider 用 --gpus device=<index>）
     gpu_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=GpuStatus.AVAILABLE.value)
-    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", name="fk_gpu_workspace_id"),
+        nullable=True,
+        index=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
@@ -336,9 +346,18 @@ class GpuAllocation(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     gpu_id: Mapped[str] = mapped_column(String(36), ForeignKey("gpus.id"), nullable=False, unique=True)
     workspace_id: Mapped[str] = mapped_column(
-        String(36), nullable=False, unique=True, index=True
+        String(36),
+        ForeignKey("workspaces.id", name="fk_gpuallocation_workspace_id"),
+        nullable=False,
+        unique=True,
+        index=True,
     )
-    host_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    host_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("gpu_hosts.id", name="fk_gpuallocation_host_id"),
+        nullable=False,
+        index=True,
+    )
     allocated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -413,7 +432,12 @@ class CreditHold(Base):
     account_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("billing_accounts.id"), nullable=False, index=True
     )
-    workspace_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", name="fk_credithold_workspace_id"),
+        nullable=False,
+        index=True,
+    )
     # 预留额度（正数；单位 credit = GPU 秒，与结算口径一致）
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=HoldStatus.PENDING.value)
@@ -505,7 +529,12 @@ class StreamingSession(Base):
     __tablename__ = "streaming_sessions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    workspace_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", name="fk_streamingsession_workspace_id"),
+        nullable=False,
+        index=True,
+    )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default=StreamingStatus.STARTING.value
     )
@@ -581,7 +610,11 @@ class Submission(Base):
         String(36), ForeignKey("assignments.id"), nullable=False, index=True
     )
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", name="fk_submission_workspace_id"),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="in_progress")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -598,7 +631,12 @@ class Artifact(Base):
     __tablename__ = "artifacts"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    workspace_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", name="fk_artifact_workspace_id"),
+        nullable=False,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     path: Mapped[str] = mapped_column(Text, nullable=False)
     # §9：对象存储 key（ArtifactStore）；None = 旧语义直接读 workspace 目录
@@ -616,7 +654,12 @@ class DeploymentRecord(Base):
     __tablename__ = "deployments"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    workspace_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", name="fk_deploymentrecord_workspace_id"),
+        nullable=False,
+        index=True,
+    )
     artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     model_version: Mapped[str] = mapped_column(String(32), nullable=False)
     template_version: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -625,7 +668,12 @@ class DeploymentRecord(Base):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default=DeploymentStatus.PENDING.value
     )
-    edge_agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    edge_agent_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("edge_agents.id", name="fk_deploymentrecord_edge_agent_id"),
+        nullable=True,
+        index=True,
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -659,7 +707,12 @@ class TelemetryEvent(Base):
     __tablename__ = "telemetry_events"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    edge_agent_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    edge_agent_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("edge_agents.id", name="fk_telemetryevent_edge_agent_id"),
+        nullable=False,
+        index=True,
+    )
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

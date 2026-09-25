@@ -49,3 +49,43 @@
 调研说明：`PRAGMA foreign_keys`、`batch_alter_table`、`compare_metadata` 均为所用
 框架的既有能力，本轮未做外部方案检索（影响范围明确的局部修复）；三条差异的判定
 全部来自本仓常驻用例的实测输出，不引用未实际查阅的外部文档。
+
+
+## 追加裁决（v0.5.0 收口）：其余 19 处未声明外键的 `*_id` 列
+
+判据不是"看着像外键就加"，而是先量删除能力：AST + 裸 SQL `DELETE FROM` 三种形态的普查
+显示，全仓唯一的硬删路径是 `GpuAllocation`（scheduler 释放分配），且没有任何表按 id
+引用它；其余被引用的表要么只软删（workspace tombstone），要么根本不删。
+→ 对"列里存的是别表主键"的指针加约束，不会挡任何现存流程，只挡脏写。
+
+**已加（11 处，迁移 `b7e4c1a09f52`）**：`gpu_allocations.{workspace_id,host_id}`、
+`gpus.workspace_id`、`credit_holds.workspace_id`、`deployments.{workspace_id,edge_agent_id}`、
+`telemetry_events.edge_agent_id`、`workspaces.template_version_id`、`artifacts.workspace_id`、
+`streaming_sessions.workspace_id`、`submissions.workspace_id`。
+
+**有意不加（8 处）**，逐条给理由，避免下一轮当成漏网：
+- `workspaces.gpu_id`：与 `gpus.workspace_id` 互为回指。两边都加会让 `compare_metadata`
+  发 "unresolvable cycles between gpus, workspaces" 并**静默跳过该环内全部外键比较**
+  （实测：加上之后对账门当场变瞎）。互指对因此只保留一条方向，且该警告已被
+  `tests/test_migrations.py` 收成判红条件。
+- `templates.current_version_id`：与 `template_versions.template_id` 互指，同理。
+- `workspaces.template_id` / `labs.template_id` / `deployments.artifact_id`：`template_id`
+  存的是 slug 而非主键（`String(64)`）。`templates.slug` 有唯一约束，技术上能指，但会把
+  "模板改 slug"变成一次跨表改写；要先决定 slug 是否可变更，属独立的引用形态裁决。
+  `artifact_id` 同类（可加，但与它们一并在"引用形态统一"那轮处理，避免同一表被两拨
+  迁移来回 batch 重建）。
+- `credit_ledger.{workspace_id,template_id}`：账本是审计事实，模板下线、工作区归档后仍
+  必须能还原"当时扣了多少、按什么价"；且 `template_id` 同样存 slug。
+- `billing_accounts.subject_id`：多态（user 或 organization），没有单一目标表。
+
+## 追加后果：`allocate()` 的错误分类被这次改动暴露
+
+给 `gpu_allocations.workspace_id` 加外键后，PG 档 6 个分配用例开始报
+"No GPU available"。真实机制是：`allocate()` 把**任何** `IntegrityError` 都当成
+"卡被别人抢了 → 回滚重试"，于是外键挡下的"workspace 行不存在"被误报成容量不足——
+把数据缺陷伪装成资源不足。已改为按 SQLSTATE（23505 唯一冲突＝竞争，可重试）与 SQLite
+的 `UNIQUE constraint failed` 文案分类，非唯一冲突直接抛出真实原因；
+`test_missing_workspace_is_not_reported_as_no_capacity` 双向钉住（退回盲重试即红，
+读数为 `No GPU available with >= 0 GB VRAM (workspace ws-does-)`）。
+PG 档同时补上真实 workspace 父行：分配用例此前一直用 `ws-keep` 这类字面量，这在生产
+路径上不可能发生（provision 先落 workspace 再分配）。
