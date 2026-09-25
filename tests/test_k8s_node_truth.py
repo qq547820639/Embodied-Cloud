@@ -27,8 +27,9 @@ from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.base import ResourceReservation, RuntimeState
 from app.services.providers.k8s import KubernetesProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-k8s-node.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("k8s-node"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

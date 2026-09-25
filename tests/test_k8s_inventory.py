@@ -14,8 +14,9 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.models import Gpu, GpuHost, Workspace
 from app.services.scheduler import GpuScheduler
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-k8s-inventory.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("k8s-inventory"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

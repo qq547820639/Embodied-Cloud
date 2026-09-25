@@ -22,8 +22,9 @@ from app.models import (
     WorkspaceStatus,
 )
 from app.services.deployment import DeploymentService
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-deploy-verify.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("deploy-verify"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

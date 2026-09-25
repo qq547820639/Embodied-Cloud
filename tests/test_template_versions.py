@@ -21,8 +21,9 @@ from app.services.providers.docker import DockerProvider
 from app.services.providers.mock import MockProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
 from app.utils import utcnow
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-template-version.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("template-version"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

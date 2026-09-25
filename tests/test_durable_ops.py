@@ -27,8 +27,9 @@ from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
 from app.services.worker import OperationWorker
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-durable-stop.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("durable-stop"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

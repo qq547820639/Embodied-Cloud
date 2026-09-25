@@ -47,7 +47,7 @@ smoke:
 
 clean:
 	rm -rf dist build *.egg-info .pytest_cache .mypy_cache .ruff_cache
-	rm -f embodiedcloud.db test-embodiedcloud.db
+	rm -f embodiedcloud.db test-*.db
 	rm -rf /tmp/embodiedcloud-workspaces /tmp/test-embodiedcloud-workspaces
 
 check: lint typecheck test

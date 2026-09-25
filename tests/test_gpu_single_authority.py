@@ -20,8 +20,9 @@ from app.models import Base, Gpu, GpuAllocation, GpuStatus, Template, Workspace,
 from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.docker import DockerProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-gpu-authority.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("gpu-authority"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

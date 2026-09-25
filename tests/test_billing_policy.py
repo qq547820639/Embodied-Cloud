@@ -37,8 +37,9 @@ from app.services.ledger import CreditLedgerService
 from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-billing.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("billing"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

@@ -28,8 +28,9 @@ from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
 from app.services.warmpool import _WARM_STATES, WarmPoolManager
 from app.services.worker import OperationWorker
+from tests.dbfiles import db_path
 
-_TEST_DB = Path("test-warmpool.db")
+_TEST_DB = db_path("warmpool")
 
 
 @pytest.fixture()

@@ -22,8 +22,9 @@ from app.services.scheduler import (
     GpuScheduler,
     recover_stuck_gpu_allocations,
 )
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-scheduler.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("scheduler"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

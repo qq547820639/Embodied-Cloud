@@ -8,8 +8,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models import Base, CreditLedger, LedgerType, Template, Workspace
 from app.services.ledger import CreditLedgerService
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-ledger.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("ledger"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

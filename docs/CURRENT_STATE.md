@@ -32,6 +32,9 @@
 | F-3 | 修 **edge_agents 租户外键从未被创建**（模型声明有、迁移没有 → SQLite 与 PG 都没有），并补上"模型↔迁移"对账门 | `3f0c9a51b7e2` + `test_migrations.py` 用 `compare_metadata` 对账（改前红 2 条 `add_fk`，改后 0） |
 | F-4 | 修 **SQLite 外键默认不校验**：`make_engine` 逐连接 `PRAGMA foreign_keys=ON`；并把"SQLite 不提供行锁"钉成常驻断言 | `test_sqlite_semantic_baseline.py` 4 例 |
 | F-5 | 修 released-version 回退非全序（同秒并列导致 flake）；零秒运行段 leave pending hold → capture 改为无条件 | `test_template_versions.py`、`test_credit_holds.py` |
+| T-1 | **测试库进程隔离**：22 处模块级 `test-*.db` 文件库改为 pid 独占名（`tests/dbfiles.py`）。此前同一仓库并发跑两个 pytest 会互清对方的库。
+改前基线（HEAD 工作树、两进程并排）：一份 31 例假红 rc=1、另一份 26 例假红 rc=1；
+改后同一并发对照：两份 rc=0、FAILED 计数 0/0 | 正反两档都实测（并发即判据） |
 | G-1 | 把两条"写在文档里的约定"变成常驻对账：①模型声明 ↔ 迁移产物（`compare_metadata`，非空即红）；②`Settings` 字段 ↔ `.env.example`（双向：漏文档 / 留死键都红） | `test_migrations.py` 对账用例 + `test_config_docs.py` 2 例（改前红：`billing_hold_ttl_minutes` 未进 .env.example） |
 | D-1 | 决策记录：ADR 0004（hold 为何是独立表而非账本条目）、0005（SQLite/PG 语义差与两层验证）、0006（冲突即 409）；API.md 补 409/402 口径 | `docs/adr/000{4,5,6}-*.md` |
 
@@ -49,7 +52,22 @@ NGC 凭据（镜像 digest 回填）· S3 凭据 · 物理机器人 · 真实 K8
 > 注：docker daemon 与 postgres 镜像本轮已可用，旧文档"无 docker daemon"的说法作废。
 
 ### TECH DEBT（已知、有意延后）
-edge agent 独立包（§25）· `default_idle_timeout_minutes`（缺 runtime 活动信号，标注预留）· **测试公共 fixture 抽取**（4 组 `_setup`/`_register` 拷贝粘贴）· **`test-*.db` 模块级文件库**（迁移 tmp_path/内存 SQLite）——本轮实测代价：两个 pytest 进程并发跑同一仓库时互相污染，读出 30 例假红，串行即绿；序列号：`telemetry_events.edge_agent_id` 在模型与迁移里都没有外键（本轮发现，未处理，与 F-3 同类）· K8s provider 的 `wait_ready/rotate_credentials/supports_credential_rotation` 真实集群路径 · Docker `--gpus` 设备透传分支 · S3 `ArtifactStore` 真实后端。
+edge agent 独立包（§25）· `default_idle_timeout_minutes`（缺 runtime 活动信号，标注预留）·
+**测试公共 fixture 抽取**（4 组 `_setup`/`_register` 拷贝粘贴）·
+K8s provider 的 `wait_ready/rotate_credentials/supports_credential_rotation` 真实集群路径 ·
+Docker `--gpus` 设备透传分支 · S3 `ArtifactStore` 真实后端。
+
+**待裁决（本轮普查发现，非缺陷）**：`telemetry_events.edge_agent_id` /
+`deployments.edge_agent_id` 等 19 处 `*_id` 列在模型里就**没有**声明外键（由
+`app/models.py` 的 AST 扫描现算，非手抄清单）。其中多数是有意反规范化——
+`credit_ledger.template_id`（模板下线后账本必须还原）、
+`billing_accounts.subject_id`（user/org 多态，无单一目标表）、
+`credit_holds.workspace_id`（销毁后仍要能查"当时圈过多少"）；少数（edge agent 归属类）
+该不该加约束属设计裁决，未拍板前不擅自改。与 F-3 的区别要说清：F-3 是"声明了却没建"
+（缺陷，已修，且被对账门挡住），这里是"从没声明"（要么补声明+迁移，要么写明为何不解）。
+
+（已闭：`test-*.db` 模块级文件库改 pid 独占，见 §2 T-1。闭之前实测过一次代价——两个
+pytest 进程并发跑同一仓库，互相清库，读出 31 / 26 例假红。）
 
 ## 4. 结论
 

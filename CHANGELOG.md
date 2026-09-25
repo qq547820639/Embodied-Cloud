@@ -45,6 +45,12 @@
 - released-version 回退改为全序（同秒并列导致的 flake 根因）；零秒运行段的 hold
   由无条件 capture 收口。
 
+### 测试基建
+- 22 处模块级 `test-*.db` 文件库改为**按 pid 独占**（`tests/dbfiles.py`）。此前同一仓库
+  并发跑两个 pytest 会互相清库：HEAD 工作树两进程并排实测 → 31 / 26 例假红（登录、
+  隔离、账本类全断）且两份 rc=1；改后同一并发对照两份 rc=0、零 FAILED。`make clean`
+  随之收 `test-*.db`。
+
 ### 供应链
 - 提交 universal `uv.lock`（多平台 marker + sha256），CI 跑 `make verify-lock`。
 - SBOM（`uv export --format cyclonedx1.5`）+ `uv audit --locked` 进 release 步骤与

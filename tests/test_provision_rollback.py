@@ -25,8 +25,9 @@ from app.services.providers.docker import DockerProvider
 from app.services.providers.k8s import KubernetesProvider
 from app.services.providers.mock import MockProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-rollback.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("rollback"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

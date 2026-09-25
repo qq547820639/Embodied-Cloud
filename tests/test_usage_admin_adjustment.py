@@ -8,8 +8,9 @@ from sqlalchemy.orm import sessionmaker
 import app.routers.usage as usage_router
 from app.models import Base, LedgerType, Organization, Role, User
 from app.services.ledger import CreditLedgerService
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-usage-admin.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("usage-admin"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 

@@ -30,9 +30,10 @@ from app.models import (
 from app.services.billing import BillingError, BillingPolicy
 from app.services.ledger import CreditLedgerService
 from app.utils import utcnow
+from tests.dbfiles import db_path
 
 # 与本模块同名的一次性文件库（与仓库其它离线档一致的做法），非跨会话共享
-DB_PATH = Path(__file__).resolve().parents[1] / "test-credit-holds.db"
+DB_PATH = db_path("credit-holds")
 ENGINE = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 

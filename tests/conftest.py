@@ -5,13 +5,15 @@ from pathlib import Path
 import pg_server
 import pytest
 
+from tests.dbfiles import db_name, db_url
+
 os.environ["EMBODIEDCLOUD_PROVIDER"] = "mock"
-os.environ["EMBODIEDCLOUD_DATABASE_URL"] = "sqlite:///./test-embodiedcloud.db"
+os.environ["EMBODIEDCLOUD_DATABASE_URL"] = db_url("embodiedcloud")
 os.environ["EMBODIEDCLOUD_WORKSPACE_ROOT"] = "/tmp/test-embodiedcloud-workspaces"  # noqa: S108 测试隔离目录
 
 
 def pytest_sessionfinish(session, exitstatus):
-    Path("test-embodiedcloud.db").unlink(missing_ok=True)
+    Path(db_name("embodiedcloud")).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

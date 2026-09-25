@@ -24,8 +24,9 @@ from app.models import (
     WorkspaceStatus,
 )
 from app.services.deployment import DeploymentService
+from tests.dbfiles import db_url
 
-ENGINE = create_engine("sqlite:///./test-edge-checksum.db", connect_args={"check_same_thread": False})
+ENGINE = create_engine(db_url("edge-checksum"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
 
