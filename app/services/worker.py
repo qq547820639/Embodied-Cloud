@@ -83,6 +83,8 @@ class OperationWorker:
     # §19/§21：周期任务间隔（tick 次数）—— 单 worker 循环执行，不建每 workspace 线程
     PERIODIC_QUOTA_EVERY = 10
     PERIODIC_WARM_POOL_EVERY = 30
+    # §18：pending hold 回收扫描（比 lease 慢得多即可，泄漏窗口由 expires_at 界定）
+    PERIODIC_HOLD_SWEEP_EVERY = 60
 
     def __init__(
         self,

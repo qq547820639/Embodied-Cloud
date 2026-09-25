@@ -102,6 +102,21 @@ class OperationStatus(StrEnum):
     FAILED = "failed"
 
 
+class HoldStatus(StrEnum):
+    """CreditHold 生命周期：pending（圈住额度）→ captured（随结算转正）/ released（退回）。"""
+
+    PENDING = "pending"
+    CAPTURED = "captured"
+    RELEASED = "released"
+
+
+class BillingSubject(StrEnum):
+    """计费主体类型。BillingAccount 是"谁付钱 + 预授权串行化根"的唯一入口。"""
+
+    USER = "user"
+    ORGANIZATION = "organization"
+
+
 class WarmPoolState(StrEnum):
     """Warm pool 真实状态机（§18）：READY 的 runtime 没有用户归属/用户数据。"""
 
@@ -353,6 +368,79 @@ class CreditLedger(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     __table_args__ = (Index("ix_ledger_user_created", "user_id", "created_at"),)
+
+
+# ---------------------------------------------------------------------------
+# 计费主体与预授权（§17 / §18）
+# ---------------------------------------------------------------------------
+
+
+class BillingAccount(Base):
+    """"谁付钱"的单一入口，同时也是预授权的串行化根。
+
+    账本仍以 user_id/organization_id 记录历史事实（append-only，不回填改写）；
+    本表把"个人 + 组织"两个 FK 视角收敛成一个可锁定的主体行：算可用额之前先锁
+    这一行，避免同一余额被并发启动花两次（PostgreSQL 行锁真实生效，SQLite 由
+    下面的部分唯一索引兜住"一个 workspace 只能圈一次"）。
+    """
+
+    __tablename__ = "billing_accounts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    subject_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    # 组织账户的付款联系人（个人账户 = 本人）；仅用于展示/通知，不是权限来源
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("subject_type", "subject_id", name="uq_billing_account_subject"),)
+
+
+class CreditHold(Base):
+    """启动预授权（§18）：先把额度圈住，结算时转正、余量退回。
+
+    取舍（docs/adr/0004-credit-hold-as-table.md）：hold **不进账本**。账本只记
+    真实消费，审计口径不会因为"圈了但没花"而变脏；代价是多一张可变表，于是用
+    expires_at + 周期扫描兜住"控制面在 hold 与结算之间崩溃"——那种泄漏只会少报
+    可用额，既不会多扣钱，也不会污染历史。
+    """
+
+    __tablename__ = "credit_holds"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("billing_accounts.id"), nullable=False, index=True
+    )
+    workspace_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # 预留额度（正数；单位 credit = GPU 秒，与结算口径一致）
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=HoldStatus.PENDING.value)
+    captured_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 结算幂等关联：capture 时写入对应 usage 账本条目的 idempotency_key
+    ledger_usage_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    __table_args__ = (
+        # 一个 workspace 至多一个 pending hold：并发双启动只能圈住一次额度
+        Index(
+            "uq_holds_pending_per_workspace",
+            "workspace_id",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index("ix_holds_account_status", "account_id", "status"),
+    )
 
 
 # ---------------------------------------------------------------------------

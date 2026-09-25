@@ -22,14 +22,18 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.models import (
+    BillingAccount,
+    CreditHold,
     CreditLedger,
     Gpu,
     GpuAllocation,
     GpuHost,
     GpuStatus,
+    HoldStatus,
     LedgerType,
     OperationStatus,
     OperationType,
+    User,
     Workspace,
     WorkspaceOperation,
 )
@@ -714,3 +718,146 @@ def test_warm_pool_claim_cas_has_single_winner(pg_factory):
         ws = db.get(Workspace, ws_id)
         assert ws is not None
         assert ws.warm_pool_state == "claiming" and ws.container_name == "A"
+
+
+# ---------------------------------------------------------------------------
+# 7. §18 预授权：只有真行锁才证得出"同一余额不被花两次"
+# ---------------------------------------------------------------------------
+
+
+def make_hold_policy(factory):
+    from app.services.billing import BillingPolicy
+    from app.services.ledger import CreditLedgerService
+
+    return BillingPolicy(
+        factory,
+        CreditLedgerService(factory),
+        minimum_launch_minutes=5,
+        enforce_preauthorization=True,
+        hold_ttl_minutes=30,
+    )
+
+
+def seed_hold_user(factory, credits: int) -> str:
+    from app.models import LedgerType, Role, User
+
+    user_id = str(uuid.uuid4())
+    with factory() as db:
+        db.add(
+            User(
+                id=user_id,
+                email=f"hold-{user_id[:8]}@example.org",
+                username=user_id[:8],
+                password_hash="x",  # noqa: S106  测试用假口令
+                role=Role.USER.value,
+            )
+        )
+        db.commit()
+        CreditLedgerService(factory).record(
+            db,
+            type=LedgerType.RECHARGE,
+            amount=credits,
+            user_id=user_id,
+            idempotency_key=f"recharge:{user_id}",
+        )
+    return user_id
+
+
+def pending_hold_count(factory) -> int:
+    with factory() as db:
+        return len(
+            list(db.scalars(select(CreditHold).where(CreditHold.status == HoldStatus.PENDING.value)))
+        )
+
+
+def test_concurrent_reserve_same_workspace_creates_one_hold(pg_factory):
+    """同一 workspace 并发预授权：只能存在一条 pending hold（部分唯一索引）。"""
+    policy = make_hold_policy(pg_factory)
+    user_id = seed_hold_user(pg_factory, 10_000)
+    ws = new_workspace(pg_factory)
+    n = 8
+    barrier = threading.Barrier(n)
+    outcomes: list[object] = []
+    lock = threading.Lock()
+
+    def one(_: int) -> None:
+        barrier.wait()
+        with pg_factory() as db:
+            try:
+                hold = policy.reserve_launch(db, db.get(User, user_id), ws)
+                result: object = hold.id if hold is not None else None
+            except Exception as exc:  # 未吸收的异常同样要暴露
+                result = exc
+        with lock:
+            outcomes.append(result)
+
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        list(pool.map(one, range(n)))
+
+    leaked = [o for o in outcomes if isinstance(o, Exception)]
+    assert not leaked, f"并发 reserve 泄漏未吸收异常：{leaked}"
+    assert pending_hold_count(pg_factory) == 1, "同一 workspace 圈出了多条 pending hold"
+    assert len(set(outcomes)) == 1, f"并发重试没收敛到同一条 hold：{set(outcomes)}"
+
+
+def test_reserve_refuses_second_launch_once_balance_is_held(pg_factory):
+    """400 credits、每笔圈 300：第二笔必须被拒，且不留 hold 行。"""
+    from app.services.billing import BillingError
+
+    policy = make_hold_policy(pg_factory)
+    user_id = seed_hold_user(pg_factory, 400)
+    with pg_factory() as db:
+        user = db.get(User, user_id)
+        assert policy.reserve_launch(db, user, new_workspace(pg_factory)) is not None
+        with pytest.raises(BillingError, match="insufficient credits to reserve"):
+            policy.reserve_launch(db, user, new_workspace(pg_factory))
+    assert pending_hold_count(pg_factory) == 1
+    with pg_factory() as db:
+        assert len(list(db.scalars(select(CreditHold)))) == 1, "被拒的启动不得留下行"
+
+
+def test_billing_account_row_is_a_real_exclusive_lock(pg_factory):
+    """两档并排：不锁时两个事务看到同一份余额（竞态是真的）；锁上后第二路必须等待。
+
+    这就是"为什么要 BillingAccount 这个锁根"的实证：SQLite 档证不了（方言丢掉
+    FOR UPDATE），双花只能靠 PG 的行锁挡住。
+    """
+    from sqlalchemy import delete
+
+    policy = make_hold_policy(pg_factory)
+    user_id = seed_hold_user(pg_factory, 400)
+
+    # 档一（前提）：两个都未加锁的读事务看到同样的可用额 → 说明检查会互相穿透
+    with pg_factory() as a, pg_factory() as b:
+        a.begin()
+        b.begin()
+        user = a.get(User, user_id)
+        assert policy.available_credits(a, user) == policy.available_credits(b, user) == 400
+        a.rollback()
+        b.rollback()
+
+    # 档二（必须撞墙）：A 锁住账户行不提交，B 的 lock_accounts 只能等到 lock_timeout
+    holder = pg_factory()
+    holder.begin()
+    accounts = policy.user_accounts(holder, holder.get(User, user_id))
+    policy.lock_accounts(holder, accounts)
+    try:
+        with pg_factory() as challenger:
+            challenger.begin()
+            set_lock_timeout(challenger)
+            other_accounts = challenger.scalars(
+                select(BillingAccount).where(BillingAccount.id.in_([a.id for a in accounts]))
+            ).all()
+            with pytest.raises(DBAPIError) as exc:
+                policy.lock_accounts(challenger, other_accounts)
+            challenger.rollback()
+        assert_lock_timeout(exc.value, "计费主体行没有被真正串行化（预授权会双花）")
+    finally:
+        holder.rollback()
+        holder.close()
+
+    # 收尾：确认释放锁后可用额仍可读（不是把库锁坏了）
+    with pg_factory() as after:
+        assert policy.available_credits(after, after.get(User, user_id)) == 400
+        after.execute(delete(CreditHold))
+        after.commit()

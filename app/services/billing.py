@@ -6,12 +6,26 @@
 - 结算本身保持 append-only CreditLedger + 幂等 key（restart-safe、无双重扣费）
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..models import Lab, Role, Template, User, Workspace, WorkspaceStatus
+from ..models import (
+    BillingAccount,
+    BillingSubject,
+    CreditHold,
+    HoldStatus,
+    Lab,
+    Role,
+    Template,
+    User,
+    Workspace,
+    WorkspaceStatus,
+)
+from ..utils import utcnow
 from .ledger import CreditLedgerService
 
 
@@ -26,11 +40,13 @@ class BillingPolicy:
         ledger: CreditLedgerService | None = None,
         minimum_launch_minutes: int = 5,
         enforce_preauthorization: bool = False,
+        hold_ttl_minutes: int = 60,
     ):
         self.session_factory = session_factory
         self.ledger = ledger or CreditLedgerService(session_factory)
         self.minimum_launch_minutes = max(1, minimum_launch_minutes)
         self.enforce_preauthorization = enforce_preauthorization
+        self.hold_ttl_minutes = max(1, hold_ttl_minutes)
 
     # ------------------------------------------------------------------
     def check_launch_eligible(
@@ -46,10 +62,10 @@ class BillingPolicy:
         if user.role == Role.INSTRUCTOR.value:
             return  # 教师不受个人额度/配额限制（MVP 策略）
 
-        # 1) 有效余额（个人 + 组织）为负 → 拒绝
+        # 1) 有效余额（个人 + 组织，再扣掉已被 pending hold 圈住的额度）为负 → 拒绝
         personal = self.ledger.balance(db, user.id)
         org = self.ledger.organization_balance(db, user.organization_id) if user.organization_id else 0
-        available = personal + org
+        available = self.available_credits(db, user)
         if available < 0:
             raise BillingError(
                 f"insufficient credits: personal={personal}, organization={org} "
@@ -75,6 +91,233 @@ class BillingPolicy:
                     f"course quota exhausted: {used}/{lab.quota_seconds}s used "
                     f"(lab {lab.id[:8]})"
                 )
+
+
+    # ------------------------------------------------------------------
+    # §17 计费主体 / §18 预授权（CreditHold）
+    # ------------------------------------------------------------------
+
+    def account_for(
+        self,
+        db: Session,
+        *,
+        subject_type: str,
+        subject_id: str,
+        owner_user_id: str | None = None,
+    ) -> BillingAccount:
+        """取（或建）一个计费主体行。它是"谁付钱"的唯一入口，也是预授权的锁根。"""
+        account = db.scalar(
+            select(BillingAccount).where(
+                BillingAccount.subject_type == subject_type,
+                BillingAccount.subject_id == subject_id,
+            )
+        )
+        if account is not None:
+            return account
+        account = BillingAccount(
+            id=str(uuid4()),
+            subject_type=subject_type,
+            subject_id=subject_id,
+            owner_user_id=owner_user_id,
+        )
+        db.add(account)
+        try:
+            db.commit()
+        except IntegrityError:
+            # 同一用户的首批并发启动会同时走到这里（uq_billing_account_subject 挡下后来的）
+            # → 收敛到已存在的账户行，而不是把 IntegrityError 抛成 500
+            db.rollback()
+            existing = db.scalar(
+                select(BillingAccount).where(
+                    BillingAccount.subject_type == subject_type,
+                    BillingAccount.subject_id == subject_id,
+                )
+            )
+            if existing is not None:
+                return existing
+            raise
+        return account
+
+    def user_accounts(self, db: Session, user: User) -> list[BillingAccount]:
+        """该用户可用钱的账户集合：个人账户 +（若有）组织账户。"""
+        accounts = [
+            self.account_for(
+                db, subject_type=BillingSubject.USER.value, subject_id=user.id, owner_user_id=user.id
+            )
+        ]
+        if user.organization_id:
+            accounts.append(
+                self.account_for(
+                    db,
+                    subject_type=BillingSubject.ORGANIZATION.value,
+                    subject_id=user.organization_id,
+                    owner_user_id=user.id,
+                )
+            )
+        return accounts
+
+    def lock_accounts(self, db: Session, accounts: list[BillingAccount]) -> None:
+        """算可用额之前先锁住主体行（PostgreSQL 真行锁；SQLite 下为 no-op，
+        由 uq_holds_pending_per_workspace 保证"同一 workspace 只圈一次"）。"""
+        for account in accounts:
+            db.execute(
+                select(BillingAccount).where(BillingAccount.id == account.id).with_for_update()
+            )
+
+    def pending_hold_total(self, db: Session, account_ids: list[str]) -> int:
+        if not account_ids:
+            return 0
+        total = db.scalar(
+            select(func.coalesce(func.sum(CreditHold.amount), 0)).where(
+                CreditHold.account_id.in_(account_ids),
+                CreditHold.status == HoldStatus.PENDING.value,
+            )
+        )
+        return int(total or 0)
+
+    def available_credits(self, db: Session, user: User) -> int:
+        """可花额度 = 个人 + 组织账本余额 − 已被 hold 圈住的额度。
+
+        hold 不是消费（账本里没有它），所以只有这里扣；结算后 capture 的 hold
+        不再计入，消费由 usage 账本条目体现，二者不会重复扣一次。
+        """
+        accounts = self.user_accounts(db, user)
+        gross = self.ledger.balance(db, user.id)
+        if user.organization_id:
+            gross += self.ledger.organization_balance(db, user.organization_id)
+        return gross - self.pending_hold_total(db, [a.id for a in accounts])
+
+    def reserve_launch(
+        self,
+        db: Session,
+        user: User,
+        workspace_id: str,
+        *,
+        minutes: int | None = None,
+    ) -> CreditHold | None:
+        """圈住本次启动的最低额度；已有 pending hold 时幂等返回它。
+
+        未开启预授权（本地/演示）→ None，不产生任何行。
+        不足 → BillingError（路由层 402）。
+        """
+        if not self.enforce_preauthorization:
+            return None
+        if user.role in {Role.ADMIN.value, Role.INSTRUCTOR.value}:
+            return None
+
+        existing = db.scalar(
+            select(CreditHold).where(
+                CreditHold.workspace_id == workspace_id,
+                CreditHold.status == HoldStatus.PENDING.value,
+            )
+        )
+        if existing is not None:
+            return existing
+
+        accounts = self.user_accounts(db, user)
+        self.lock_accounts(db, accounts)
+        required = (minutes if minutes is not None else self.minimum_launch_minutes) * 60
+        gross = self.ledger.balance(db, user.id)
+        if user.organization_id:
+            gross += self.ledger.organization_balance(db, user.organization_id)
+        available = gross - self.pending_hold_total(db, [a.id for a in accounts])
+        if available < required:
+            raise BillingError(
+                f"insufficient credits to reserve launch: {available} available, "
+                f"{required} required ({required // 60} min hold)"
+            )
+
+        # 记账账户：优先个人（组织额度只是补足可见性），保持与结算口径一致
+        account = accounts[0]
+        key = f"hold:{workspace_id}"
+        hold = CreditHold(
+            id=str(uuid4()),
+            account_id=account.id,
+            workspace_id=workspace_id,
+            amount=required,
+            status=HoldStatus.PENDING.value,
+            idempotency_key=key,
+            expires_at=utcnow() + timedelta(minutes=self.hold_ttl_minutes),
+            reason="launch preauthorization",
+        )
+        db.add(hold)
+        try:
+            db.commit()
+        except IntegrityError:
+            # 并发重试路径：另一事务已为同一 workspace 圈住额度（uq_credit_holds_idempotency
+            # 或 pending 部分唯一索引挡下）→ 收敛到已有那条，而不是把异常抛给 provision
+            db.rollback()
+            existing = db.scalar(select(CreditHold).where(CreditHold.idempotency_key == key))
+            if existing is not None:
+                return existing
+            raise
+        return hold
+
+    def capture_hold(
+        self,
+        db: Session,
+        workspace_id: str,
+        *,
+        usage_seconds: int,
+        ledger_usage_key: str | None,
+    ) -> CreditHold | None:
+        """结算时把 pending hold 转正（余量随 released_at 语义自动回到可用额）。"""
+        hold = db.scalar(
+            select(CreditHold).where(
+                CreditHold.workspace_id == workspace_id,
+                CreditHold.status == HoldStatus.PENDING.value,
+            )
+        )
+        if hold is None:
+            return None
+        hold.status = HoldStatus.CAPTURED.value
+        hold.captured_amount = usage_seconds
+        hold.ledger_usage_key = ledger_usage_key
+        hold.captured_at = utcnow()
+        db.commit()
+        return hold
+
+    def release_hold(self, db: Session, workspace_id: str, *, reason: str) -> CreditHold | None:
+        """启动失败 / 结算前销毁：额度退回可用，不产生任何账本条目。"""
+        hold = db.scalar(
+            select(CreditHold).where(
+                CreditHold.workspace_id == workspace_id,
+                CreditHold.status == HoldStatus.PENDING.value,
+            )
+        )
+        if hold is None:
+            return None
+        hold.status = HoldStatus.RELEASED.value
+        hold.released_at = utcnow()
+        hold.reason = reason
+        db.commit()
+        return hold
+
+    def release_expired_holds(self, db: Session) -> int:
+        """回收超时 pending hold（控制面崩溃残留）。
+
+        RUNNING 的 workspace 不回收：它的 hold 会在下一次结算时 capture。
+        """
+        stale = list(
+            db.scalars(
+                select(CreditHold).where(
+                    CreditHold.status == HoldStatus.PENDING.value,
+                    CreditHold.expires_at < utcnow(),
+                )
+            )
+        )
+        released = 0
+        for hold in stale:
+            ws = db.get(Workspace, hold.workspace_id)
+            if ws is not None and ws.status == WorkspaceStatus.RUNNING.value:
+                continue
+            hold.status = HoldStatus.RELEASED.value
+            hold.released_at = utcnow()
+            hold.reason = "hold expired before settle"
+            released += 1
+        if released:
+            db.commit()
+        return released
 
     def check_course_quota(self, db: Session, user: User, template: Template) -> None:
         """provision 重试路径的 course quota 门禁（无 lab 上下文）。

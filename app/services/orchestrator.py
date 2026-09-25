@@ -163,6 +163,8 @@ class WorkspaceOrchestrator:
                 # §S-3：provision 重试路径补 course quota 门禁（无 lab 上下文，
                 # 按 template 匹配所有 lab 检查；首次执行后配额耗尽 → 重试被拦截）
                 self.billing.check_course_quota(db, user, template)
+                # §18：预授权 —— 真把这笔额度圈住（幂等：重试路径命中同一 pending hold）
+                self.billing.reserve_launch(db, user, workspace.id)
         # 失败重试前将状态置回 QUEUED（上次失败已置 FAILED）
         workspace.status = WorkspaceStatus.QUEUED.value
         workspace.error_message = None
@@ -257,6 +259,12 @@ class WorkspaceOrchestrator:
         FAILED 置位必须持久化：release 异常时回滚只撤销 release 的局部修改，
         随后重新置位 FAILED + error_message + 清 GPU 字段；GPU 残留由 reconcile 补做。
         """
+        # §18：启动失败 → 圈住的额度原样退回（不产生任何账本条目）
+        if self.billing is not None:
+            try:
+                self.billing.release_hold(db, workspace.id, reason="provision failed")
+            except Exception as exc:  # 释放失败不得掩盖 FAILED 置位（盲捕获有意，见 ADR 0002）
+                logger.warning("hold release failed for %s: %s", workspace.id[:8], exc)
         workspace.status = WorkspaceStatus.FAILED.value
         workspace.error_message = message
         # 先 flush：release 成功时其内部 commit 会连同 FAILED 置位一并落库
@@ -323,9 +331,19 @@ class WorkspaceOrchestrator:
         run_seconds = max(0, int((utcnow() - started).total_seconds()))
         workspace.accumulated_seconds += run_seconds
         # 幂等结算该运行段 GPU 秒数（同一运行段重复结算不会重复扣款）
-        self.ledger.settle_workspace_run(
+        entry = self.ledger.settle_workspace_run(
             db, workspace, run_seconds, workspace.started_at.isoformat()
         )
+        # §18：hold 随结算转正。**无条件**收口：不足 1 秒的运行段不产生 usage 条目
+        # （settle_workspace_run 对 0 秒返回 None），若只在有账本条目时 capture，
+        # 这种段会把 pending hold 一直留到超时扫描才回收。
+        if self.billing is not None:
+            self.billing.capture_hold(
+                db,
+                workspace.id,
+                usage_seconds=run_seconds,
+                ledger_usage_key=entry.idempotency_key if entry is not None else None,
+            )
         return run_seconds
 
     def _finalize_stop(self, db: Session, workspace: Workspace) -> None:
@@ -507,6 +525,13 @@ class WorkspaceOrchestrator:
             )
             is not None
         )
+
+    def release_expired_holds(self) -> int:
+        """周期回收超时 pending hold（§18 崩溃残留兜底；RUNNING 的段不回收）。"""
+        with self.session_factory() as db:
+            if self.billing is None:
+                return 0
+            return self.billing.release_expired_holds(db)
 
     def monitor_runtime_quotas(self) -> dict[str, int]:
         """§12 active-runtime quota monitor：防止 workspace 无限跑成大额负数。

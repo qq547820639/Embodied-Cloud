@@ -222,6 +222,17 @@ class WarmPoolManager:
         # attach user
         workspace.user_id = user.id
         workspace.organization_id = user.organization_id
+        # §18：claim 直接置 RUNNING（不走 provision），所以预授权必须在这里做；
+        # 额度不足 → BillingError，本 workspace 走下面的补偿归还，不交付给用户
+        billing = getattr(self.orchestrator, "billing", None)
+        if billing is not None:
+            try:
+                billing.reserve_launch(db, user, workspace.id)
+            except Exception as exc:
+                db.rollback()
+                logger.info("warm pool claim aborted for %s: %s", claimed_id[:8], exc)
+                WARM_POOL_CLAIM_FAILED.inc()
+                return None
         # 轮换凭据（§7）：warm runtime 的旧密码不属于任何用户，claim 后必须更换。
         # 1) 生成新密码并加密落库；2) provider.rotate_credentials 让 runtime 生效。
         new_password = None
@@ -266,6 +277,9 @@ class WarmPoolManager:
             workspace.status = WorkspaceStatus.FAILED.value
             workspace.error_message = "warm pool claim failed: credential rotation not supported"
             db.commit()
+            # §18：交付失败 → 刚才圈住的额度退回（此处已 commit，release 自带提交）
+            if billing is not None:
+                billing.release_hold(db, workspace.id, reason="warm pool claim aborted")
             logger.warning(
                 "warm pool claim aborted for %s: credential rotation failed (runtime+GPU released)",
                 claimed_id[:8],

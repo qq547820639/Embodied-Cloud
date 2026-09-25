@@ -56,6 +56,7 @@ billing = BillingPolicy(
     ledger,
     minimum_launch_minutes=settings.billing_minimum_launch_minutes,
     enforce_preauthorization=settings.billing_enforce_preauthorization,
+    hold_ttl_minutes=settings.billing_hold_ttl_minutes,
 )
 credential_cipher = WorkspaceCredentialCipher(settings.workspace_credential_key)
 
@@ -95,6 +96,8 @@ worker = OperationWorker(
         (OperationWorker.PERIODIC_QUOTA_EVERY, orchestrator.monitor_runtime_quotas),
         # §21：warm pool 后台 maintain（按 warm_pool_enabled 生效）
         (OperationWorker.PERIODIC_WARM_POOL_EVERY, _warm_pool_maintain),
+        # §18：回收超时未 capture 的 pending hold（控制面在 hold 与结算之间崩溃的残留）
+        (OperationWorker.PERIODIC_HOLD_SWEEP_EVERY, orchestrator.release_expired_holds),
     ],
 )
 # §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用

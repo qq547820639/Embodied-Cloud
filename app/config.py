@@ -39,9 +39,13 @@ class Settings(BaseSettings):
     provision_ready_timeout_seconds: int = 120
 
     # --- billing（§12）---
-    # 启动预授权（生产开启）：余额必须 ≥ minimum_launch_minutes × 60 credits 才能启动
+    # 启动预授权（生产开启）：余额必须 ≥ minimum_launch_minutes × 60 credits 才能启动，
+    # 且开启时会真的圈住这笔额度（CreditHold），结算转正、余量退回
     billing_enforce_preauthorization: bool = False
     billing_minimum_launch_minutes: int = 5
+    # pending hold 的最长存活时间：控制面在 hold 与结算之间崩溃时，扫描器按此回收
+    # （泄漏方向是"少报可用额"，不会多扣钱）
+    billing_hold_ttl_minutes: int = 60
 
     # --- auth ---
     session_ttl_hours: int = 168  # 7 天
