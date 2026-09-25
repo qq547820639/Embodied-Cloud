@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 UV ?= uv
 VERSION ?= 0.4.0
 
-.PHONY: install dev test test-pg lint typecheck build smoke clean check demo \
+.PHONY: install dev test test-pg test-docker lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
         release api-docs validate lock verify-lock sbom audit supply-chain
@@ -22,6 +22,11 @@ test:
 # 缺件时整档干净跳过并在 docs/VALIDATION.json 里登记 PENDING(原因)。
 test-pg:
 	$(PYTHON) -m pytest -m pg_integration
+
+# Docker provider 真容器档：需要 docker daemon + 一个与 daemon 架构一致、
+# 已本地缓存的测试镜像（缺件时整档干净跳过并登记 PENDING 原因）。
+test-docker:
+	$(PYTHON) -m pytest -m docker_integration
 
 lint:
 	$(PYTHON) -m ruff check app tests

@@ -4,11 +4,11 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 353
+      "count": 370
     },
     "test_run": {
       "status": "PASS",
-      "passed": 352,
+      "passed": 369,
       "skipped": 1,
       "failed": 0
     },
@@ -19,6 +19,10 @@
     "integration_postgres": {
       "status": "PASS",
       "note": "14/14 用例在真实后端上执行"
+    },
+    "integration_docker": {
+      "status": "PASS",
+      "note": "17/17 用例在真实后端上执行"
     },
     "lint": {
       "status": "PASS"

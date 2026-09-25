@@ -29,17 +29,26 @@ jobs:
         run: make api-docs && git diff --exit-code docs/openapi.json
       - name: Release validation freshness
         run: make validate && git diff --exit-code docs/VALIDATION.json docs/VALIDATION.md
-      - name: PostgreSQL tier really ran
-        # runner 自带 docker daemon + 本 job 装了 .[dev]（含 psycopg），所以 PG 档
-        # 必须真跑：这里把"被跳过"当构建失败，而不是让它混在 skip 里静默通过。
+      - name: Pull docker-tier test image
+        # docker 档只跑"与 daemon 同架构且已缓存"的镜像（本机 alpine:latest 是
+        # amd64 占位条目，容器一起来就退，会让整档读数失真）
+        run: docker pull node:22-alpine
+      - name: Docker-backed tiers really ran
+        # runner 自带 docker daemon，PG 与 Docker provider 两档都没有理由被跳过；
+        # 被跳过即构建失败，而不是混在 skip 里静默通过。
         run: |
           python - <<'PY'
           import json, sys
           checks = json.load(open("docs/VALIDATION.json"))["checks"]
-          status = checks["integration_postgres"]["status"]
-          if status != "PASS":
-              sys.exit(f"integration_postgres={status}: {checks['integration_postgres'].get('note')}")
-          print("integration_postgres PASS", checks["integration_postgres"]["note"])
+          bad = {
+              k: v for k, v in checks.items()
+              if k.startswith("integration_") and k != "integration_k8s" and v["status"] != "PASS"
+          }
+          if bad:
+              sys.exit(f"集成档未真实执行：{ {k: v.get('note') for k, v in bad.items()} }")
+          for k in sorted(checks):
+              if k.startswith("integration_"):
+                  print(k, checks[k]["status"], checks[k].get("note", ""))
           PY
       - name: Build artifact
         run: make build

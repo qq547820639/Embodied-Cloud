@@ -121,6 +121,10 @@ def _integration_gates() -> dict[str, dict]:
             "module": "tests.test_postgres_concurrency",
             "sentinel": _const_str("tests/pg_server.py", "GATE_SENTINEL"),
         },
+        "docker": {
+            "module": "tests.test_docker_provider_integration",
+            "sentinel": _const_str("tests/test_docker_provider_integration.py", "GATE_SENTINEL"),
+        },
     }
 
 
@@ -230,7 +234,8 @@ def _render_md(report: dict) -> str:
     )
     for key in ("lint", "typecheck", "migration", "build"):
         lines.append(f"| {key} | {c[key]['status']} | |")
-    for key in ("k8s", "postgres"):
+    # 集成档按 checks 里实际存在的键派生，避免"新增一档忘了加进渲染表"
+    for key in sorted(k[len("integration_"):] for k in c if k.startswith("integration_")):
         item = c[f"integration_{key}"]
         lines.append(f"| Integration {key} | {item['status']} | {item.get('note', '')} |")
     for key in ("gpu", "streaming", "robot"):
