@@ -420,3 +420,97 @@ def test_report_checksum_bound_agent_exclusive():
         )
         assert r.status_code == 404
         assert r.json()["detail"] == "deployment not found"
+
+
+# ---------------------------------------------------------------------------
+# §21 + docs/adr/0008：对象存储「不可用」与「产物不存在」必须是两种判决
+# ---------------------------------------------------------------------------
+
+
+class _VerdictStore:
+    """把 store 的读结果钉成指定异常（写方法被调用即失败：verify 不该写对象）。"""
+
+    name = "verdict"
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+    def put(self, object_key, data, content_type="application/octet-stream"):
+        raise AssertionError("verify 不该写对象")
+
+    def get(self, object_key):
+        raise self.error
+
+    def exists(self, object_key):
+        raise self.error
+
+    def delete(self, object_key):
+        raise AssertionError("verify 不该删对象")
+
+
+def _verify_with_store_error(monkeypatch, email: str, error: Exception):
+    """建一条 DOWNLOADING 部署，把 store 换成会抛 error 的实现，再走真实 HTTP verify。
+
+    返回 (响应, 落库状态)。`raise_server_exceptions=False` 让未处理的异常以 500 结束，
+    而不是把测试进程打断——未处理本身就是要观测的结果之一。
+    """
+    import hashlib
+
+    from fastapi.testclient import TestClient
+
+    from app.deps import SessionFactory, deployment_service
+    from app.main import app as fastapi_app
+    from app.models import DeploymentRecord
+
+    checksum = hashlib.sha256(b"store-verdict-bytes").hexdigest()
+    monkeypatch.setattr(deployment_service, "store", _VerdictStore(error))
+    with TestClient(fastapi_app, raise_server_exceptions=False) as client:
+        user = _api_register(client, email, email.split("@")[0])
+        headers = {"Authorization": f"Bearer {user['token']}"}
+        dep_id = _api_seed_downloading_deployment(client, headers, checksum)
+        resp = client.post(f"/api/deployments/{dep_id}/verify", headers=headers)
+        with SessionFactory() as db:
+            row = db.get(DeploymentRecord, dep_id)
+            return resp, (row.status if row else None), (row.error_message if row else None)
+
+
+def test_storage_outage_gives_503_and_leaves_deployment_retryable(monkeypatch):
+    """存储不可用 → 503，且记录停在 downloading（FAILED 是终态，进了就再也验不回来）。
+
+    变异对照：把 verify_checksum 改回 `except Exception → _fail(...)` 本条即红。
+    """
+    from app.services.artifact_store import ArtifactStoreUnavailableError
+
+    resp, status, error_message = _verify_with_store_error(
+        monkeypatch, "store-outage@example.com", ArtifactStoreUnavailableError("S3 head_bucket failed")
+    )
+    assert resp.status_code == 503, resp.text
+    assert "unavailable" in resp.text
+    assert status == DeploymentStatus.DOWNLOADING.value
+    assert error_message is None
+
+
+def test_genuinely_missing_object_still_fails_the_deployment(monkeypatch):
+    """产物确实不存在 → 仍是 200 + FAILED + "artifact object missing"（旧语义保留）。"""
+    from app.services.artifact_store import ArtifactNotFoundError
+
+    resp, status, error_message = _verify_with_store_error(
+        monkeypatch, "store-absent@example.com", ArtifactNotFoundError("object not found: 'ws/x'")
+    )
+    assert resp.status_code == 200, resp.text
+    assert status == DeploymentStatus.FAILED.value
+    assert "artifact object missing" in (error_message or "")
+
+
+def test_untranslated_store_error_does_not_consume_the_deployment(monkeypatch):
+    """没被协议层翻译过的 SDK 异常：不改状态（500），不能谎报"产物不存在"。"""
+    from botocore.exceptions import ClientError
+
+    resp, status, error_message = _verify_with_store_error(
+        monkeypatch,
+        "store-raw-sdk@example.com",
+        ClientError({"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "HeadObject"),
+    )
+    assert resp.status_code == 500, resp.text
+    assert status == DeploymentStatus.DOWNLOADING.value
+    assert error_message is None

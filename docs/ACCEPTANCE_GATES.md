@@ -24,12 +24,13 @@
 | G0.16 Frontend 安全/课程 onboarding | `pytest tests/test_demo_workspace.py tests/test_course_onboarding.py tests/test_demo_checkpoint.py` | demo 页转义/鉴权、slug 加入、member 可见、mock checkpoint | VERIFIED PASS |
 | G0.17 K8s integration | `pytest -m k8s_integration` | 无集群 → 整档 PENDING 并在 VALIDATION 登记原因（哨兵，不用 skip 冒充） | K8S_PHYSICAL_VALIDATION_PENDING（不假装 PASS） |
 | G0.18 PostgreSQL 真并发 | `make test-pg` | 自建一次性 PG 容器；`FOR UPDATE`/`SKIP LOCKED`/CAS/部分唯一索引在真行锁下成对验证 | VERIFIED PASS（18/18） |
-| G0.19 Docker provider 真容器 | `make test-docker` | 真守护进程跑 health/start/logs/wait_ready/reconcile/流式占用；会话级容器泄漏守卫 | VERIFIED PASS（17/17） |
+| G0.19 Docker provider 真容器 | `make test-docker` | 真守护进程跑 health/start/logs/wait_ready/reconcile/流式占用；会话级容器泄漏守卫；`--gpus device=N` 由**守护进程自己的 HostConfig 记账**验收（DeviceIDs/Capabilities）、生产 argv 原样交给 daemon 且不残留孤儿容器 | VERIFIED PASS（20/20） |
 | G0.20 浏览器真 DOM | `make test-browser` | Playwright + 系统 Chrome：XSS 载荷不执行、轮询真的停、控制台零错误 | VERIFIED PASS（11/11） |
 | G0.21 K8s 线格式合规 | `pytest tests/test_k8s_model_conformance.py` | provider 生成的对象过真实 SDK 的 `sanitize_for_serialization` | VERIFIED PASS（6/6） |
 | G0.22 预授权语义 | `pytest tests/test_credit_holds.py` | 圈住/转正/退回/过期回收 + 3 条走 worker 真实执行链 | VERIFIED PASS（14/14） |
 | G0.23 供应链可复现 | `make verify-lock && make sbom && make audit` | universal uv.lock 一致、SBOM 生成、审计无阻断项；CI 要求 docker 档必须真 PASS | VERIFIED PASS |
 | G0.24 约定入门禁 | `pytest tests/test_config_docs.py` + `test_migrations.py` 对账用例 | Settings↔.env.example 双向、模型声明↔迁移产物（`compare_metadata`） | VERIFIED PASS |
+| G0.25 对象存储真后端 | `make test-s3` | 自建一次性 S3 兼容服务端（VersityGW v1.8.0）+ 真实 boto3：读写删/Content-Type/4 MiB 字节保真；「桶不存在」不得读成「对象不存在」；403 与网络故障上抛；SDK 异常不外泄；与 Local 档同判据并排 | VERIFIED PASS（20/20，另用 MinIO 交叉核对读数一致，见 ADR 0008） |
 
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 

@@ -129,6 +129,10 @@ def _integration_gates() -> dict[str, dict]:
             "module": "tests.test_browser_console",
             "sentinel": _const_str("tests/test_browser_console.py", "GATE_SENTINEL"),
         },
+        "object_store": {
+            "module": "tests.test_s3_artifact_store",
+            "sentinel": _const_str("tests/s3_server.py", "GATE_SENTINEL"),
+        },
     }
 
 

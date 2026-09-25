@@ -23,7 +23,11 @@ from ..models import (
     TemplateVersion,
     Workspace,
 )
-from .artifact_store import ArtifactStore, LocalArtifactStore
+from .artifact_store import (
+    ArtifactNotFoundError,
+    ArtifactStore,
+    LocalArtifactStore,
+)
 from .providers.base import WorkspaceProvider
 
 
@@ -225,8 +229,13 @@ class DeploymentService:
         else:
             try:
                 data = self.store.get(object_key)
-            except Exception as exc:
+            except (ArtifactNotFoundError, FileNotFoundError) as exc:
                 return self._fail(db, deployment, f"artifact object missing: {exc}")
+            # 其余异常（鉴权失败 / 桶不存在 / 网络故障 / store 自身缺陷）**上抛**：
+            # verified|failed 都是终态（见本方法开头的提前返回），在这里吞掉并把
+            # 部署写成 FAILED 等于用一次存储不可用永久作废这次部署，且错误信息
+            # 会说谎（"object missing"）。让请求以 5xx 结束，记录停在 downloading，
+            # 调用方可重验。
             current = hashlib.sha256(data).hexdigest()
         if current == deployment.checksum:
             deployment.status = DeploymentStatus.VERIFIED.value

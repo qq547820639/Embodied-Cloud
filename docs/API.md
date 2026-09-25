@@ -95,10 +95,16 @@
 | GET | `/api/deployments?workspace_id=` | 我的部署（owner 隔离） |
 | GET | `/api/deployments/{id}` | 详情 |
 | POST | `/api/deployments/{id}/download` | pending → downloading（仅进入状态，绝不自动 VERIFIED） |
-| POST | `/api/deployments/{id}/verify` | 控制面侧幂等校验（对象存储 checksum 比对） |
+| POST | `/api/deployments/{id}/verify` | 控制面侧幂等校验（对象存储 checksum 比对）；存储不可用 → **503** |
 | POST | `/api/deployments/{id}/run` | verified → running，可选绑定自己的 Edge Agent |
 | POST | `/api/deployments/{id}/complete` | running → success/failed（终态） |
 | POST | `/api/deployments/{id}/report-checksum` | **Edge Agent 上报本地 sha256**（`X-Agent-Token` 认证）——唯一 edge→server 校验路径，防绕过/防 replay |
+
+**verify 的 503 口径**：`VERIFIED`/`FAILED` 都是终态（终态再调 `verify` 幂等返回，
+不会重验），所以只有"产物确实不存在"或"checksum 不匹配"这两种**关于产物的判决**
+才允许把记录写成 FAILED。对象存储不可用（鉴权失败 / 桶不存在 / 网络故障）不是判决，
+返回 `503 artifact store unavailable` 且记录**停在 `downloading`**，调用方可直接重试
+`verify`。见 `docs/adr/0008-object-store-outage-is-not-absence.md`。
 
 ## 边缘设备（Edge Agent）
 

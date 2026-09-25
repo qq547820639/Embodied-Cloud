@@ -14,6 +14,7 @@ from .db import make_engine, make_session_factory, session_dependency
 from .models import User
 from .security import WorkspaceCredentialCipher, make_session_dependency, validate_credential_configuration
 from .seed import seed_templates
+from .services.artifact_store import build_artifact_store
 from .services.billing import BillingPolicy
 from .services.deployment import DeploymentService
 from .services.edge import EdgeService
@@ -113,7 +114,21 @@ warm_pool = WarmPoolManager(SessionFactory, orchestrator, settings)
 edge_service = EdgeService(SessionFactory)
 # deployment 服务统一在此装配（组合根），router 不再自建第二套 DI。
 # provider 注入：控制面本地读不到 workspace 产出时经 provider.pull_artifact 拉取（K8s PVC）。
-deployment_service = DeploymentService(SessionFactory, settings.workspace_root, provider=provider)
+# store 由配置选择（§21）：backend=s3 而凭据不全 → 装配期即抛 BLOCKED_EXTERNAL_DEPENDENCY，
+# 不静默回退 local（回退会让产物落控制面文件系统，而 Artifact.store_name 仍记 s3）。
+deployment_service = DeploymentService(
+    SessionFactory,
+    settings.workspace_root,
+    provider=provider,
+    store=build_artifact_store(
+        settings.artifact_backend,
+        workspace_root=settings.workspace_root,
+        bucket=settings.artifact_s3_bucket,
+        endpoint_url=settings.artifact_s3_endpoint_url,
+        access_key=settings.artifact_s3_access_key_id,
+        secret_key=settings.artifact_s3_secret_access_key,
+    ),
+)
 
 
 def bootstrap_db() -> None:

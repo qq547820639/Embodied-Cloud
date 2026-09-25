@@ -27,7 +27,7 @@ import pytest
 from app.config import Settings
 from app.models import Template, Workspace
 from app.services.ports import is_port_free
-from app.services.providers.base import RuntimeState
+from app.services.providers.base import ResourceReservation, RuntimeState
 from app.services.providers.docker import DockerProvider
 
 GATE_SENTINEL = "DOCKER_VALIDATION_PENDING"
@@ -522,3 +522,112 @@ def test_credential_rotation_stays_unsupported_on_real_container(provider, conta
     inspect = _docker("inspect", "-f", "{{json .Config.Env}}", name)
     assert "WORKSPACE_PASSWORD=first" in inspect.stdout
     assert "WORKSPACE_PASSWORD=second" not in inspect.stdout
+
+
+# ---------------------------------------------------------------------------
+# §24 GPU 设备透传（--gpus）：可数字化的一半 = 守护进程理解并按 reservation 绑定
+#
+# 本机无 NVIDIA 设备/CDI，"容器里真能看见 GPU"那半仍是 PHYSICAL_PENDING（脚本
+# scripts/gpu_acceptance.sh）。这一节验收的是另一半：provider 发出的那条 argv
+# 是不是被守护进程**原样接受并记成对应设备的 DeviceRequest**。
+# 用 create 而非 run 就够：create 阶段守护进程已经解析并落库 HostConfig，
+# 实测 `--gpus device=7` → `{"DeviceIDs":["7"],"Capabilities":[["gpu"]]}`。
+# ---------------------------------------------------------------------------
+
+
+def _reservation(gpu_index: int) -> ResourceReservation:
+    return ResourceReservation(
+        host_id="localhost",
+        gpu_id=f"gpu-{gpu_index}",
+        gpu_uuid=f"GPU-0000{gpu_index}",
+        gpu_index=gpu_index,
+        metadata={"operation_id": "op-gpu-1", "fencing_token": 7},
+    )
+
+
+def _run_argv(provider: DockerProvider, image: str, gpu_index: int, name: str, tmp_path: Path) -> list[str]:
+    return provider.run_argv(
+        workspace=ws(container_name=name),
+        template=Template(id="cartpole", slug="cartpole", name="CartPole", description="t", category="rl"),
+        reservation=_reservation(gpu_index),
+        container_name=name,
+        workspace_dir=tmp_path / "proj",
+        ide_port=18123,
+        password="s3cret-probe",  # noqa: S106 测试数据，只进 create 的 env
+        image=image,
+    )
+
+
+def _to_create(argv: list[str]) -> list[str]:
+    """只把 `run -d --rm` 头换成 `create`，其余参数一字不改。
+
+    生产 argv 的形态本身由 `assert argv[:4] == ...` 钉住；测试不重抄命令行，
+    重抄只能证明两份抄得一样。
+    """
+    assert argv[:4] == ["docker", "run", "-d", "--rm"], argv[:4]
+    return argv[4:]
+
+
+def _exec_verbatim(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """原样执行生产 argv（argv[0] 已是 "docker"），与 provider._run 同一调用形状。"""
+    return subprocess.run(  # noqa: S603 受控 argv：与生产路径同一份列表
+        argv, capture_output=True, text=True, timeout=120, check=False
+    )
+
+
+@pytest.mark.parametrize("gpu_index", [0, 3])
+def test_gpu_index_binding_is_recorded_by_the_daemon_itself(provider, test_image, tmp_path, gpu_index):
+    """GPU 绑定来自 reservation，且守护进程按同一序号记账（不是"我们以为传了"）。"""
+    name = f"ec-dtest-gpu{gpu_index}-{uuid.uuid4().hex[:6]}"
+    argv = _run_argv(provider, test_image, gpu_index, name, tmp_path)
+    created = _docker("create", *_to_create(argv))
+    assert created.returncode == 0, created.stderr
+    try:
+        import json
+
+        # index 3 在本机并不存在（本机无 GPU）：守护进程照单记账，说明这条参数的
+        # 语义是"请求该设备"，硬件侧的满足与否归 CDI/runtime（物理档）。
+        recorded = json.loads(
+            _docker("inspect", "-f", "{{json .HostConfig.DeviceRequests}}", name).stdout
+        )
+        assert recorded == [
+            {"Driver": "", "Count": 0, "DeviceIDs": [str(gpu_index)], "Capabilities": [["gpu"]], "Options": {}}
+        ], recorded
+        labels = json.loads(_docker("inspect", "-f", "{{json .Config.Labels}}", name).stdout)
+        assert labels["embodiedcloud.gpu"] == str(gpu_index)
+        assert labels["embodiedcloud.gpu_id"] == f"gpu-{gpu_index}"
+        assert labels["embodiedcloud.operation"] == "op-gpu-1"
+        assert labels["embodiedcloud.fencing"] == "7"
+        binds = json.loads(_docker("inspect", "-f", "{{json .HostConfig.Binds}}", name).stdout)
+        assert binds == [f"{tmp_path / 'proj'}:/workspace/project:rw"], binds
+        env = json.loads(_docker("inspect", "-f", "{{json .Config.Env}}", name).stdout)
+        assert "WORKSPACE_PASSWORD=s3cret-probe" in env
+        assert "IDE_PORT=18123" in env
+        assert "ACCEPT_EULA=Y" in env
+        assert _docker("inspect", "-f", "{{.HostConfig.NetworkMode}}", name).stdout.strip() == "host"
+    finally:
+        _docker("rm", "-f", name)
+
+
+def test_provider_argv_is_accepted_by_the_daemon_and_gpu_failure_is_not_a_usage_error(
+    provider, test_image, tmp_path
+):
+    """把生产 argv 原样交给 `docker run`：守护进程必须走到 GPU 发现，而不是报命令行错误。
+
+    这是"参数形状对不对"的正向证明（错误形状会以 `unknown flag` 一类 CLI 用法错误结束）。
+    同时确认失败不留孤儿容器：`--rm` 下启动失败的容器会被自动清掉（实测
+    "error: no such object"），否则同名重试会撞容器名，且旧容器可能仍占着那张卡。
+    """
+    name = f"ec-dtest-run-{uuid.uuid4().hex[:6]}"
+    argv = _run_argv(provider, test_image, 0, name, tmp_path)
+    result = _exec_verbatim(argv)
+    if result.returncode == 0:
+        # 有真实 GPU 运行时的机器（例如 gpu 档主机）上它会起来：那也是通过
+        _docker("rm", "-f", name, timeout=30)
+        return
+    stderr = result.stderr.lower()
+    assert "unknown flag" not in stderr, result.stderr
+    assert "accepts no arguments" not in stderr, result.stderr
+    assert "gpu" in stderr, result.stderr  # 实测：failed to discover GPU vendor from CDI
+    # 失败之后不能再有同名容器（否则 provision 重试会被名字冲突卡住）
+    assert _docker("inspect", "-f", "{{.State.Status}}", name).returncode != 0

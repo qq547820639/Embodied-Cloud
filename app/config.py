@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,6 +38,17 @@ class Settings(BaseSettings):
     default_idle_timeout_minutes: int = 60
     # §9：provision readiness 等待超时（秒）
     provision_ready_timeout_seconds: int = 120
+
+    # --- 对象存储（§21）---
+    # local：产物落 workspace_root（开发/单机）；s3：S3 兼容对象存储（生产，
+    # 控制面不再直接读每个 Workspace PVC）。backend=s3 而凭据不全时启动即
+    # BLOCKED_EXTERNAL_DEPENDENCY —— 不静默回退 local，那会把产物写进控制面
+    # 文件系统而账目仍记 store_name=s3。
+    artifact_backend: Literal["local", "s3"] = "local"
+    artifact_s3_bucket: str = ""
+    artifact_s3_endpoint_url: str = ""
+    artifact_s3_access_key_id: str = ""
+    artifact_s3_secret_access_key: str = ""
 
     # --- billing（§12）---
     # 启动预授权（生产开启）：余额必须 ≥ minimum_launch_minutes × 60 credits 才能启动，

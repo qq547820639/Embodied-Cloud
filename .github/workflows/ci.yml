@@ -19,6 +19,14 @@ jobs:
         run: make sbom && make audit
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
+      - name: Pull docker-tier test images
+        # 必须在 `make validate` **之前**：VALIDATION.json 是 validate 的产物，
+        # 镜像晚拉一步，档位就会被记成 PENDING 而后面的门禁读的是旧产物。
+        # docker 档只跑"与 daemon 同架构且已缓存"的镜像（本机 alpine:latest 是
+        # amd64 占位条目，容器一起来就退，会让整档读数失真）
+        run: |
+          docker pull node:22-alpine
+          docker pull versity/versitygw:v1.8.0
       - name: Lint
         run: make lint
       - name: Type check
@@ -29,13 +37,9 @@ jobs:
         run: make api-docs && git diff --exit-code docs/openapi.json
       - name: Release validation freshness
         run: make validate && git diff --exit-code docs/VALIDATION.json docs/VALIDATION.md
-      - name: Pull docker-tier test image
-        # docker 档只跑"与 daemon 同架构且已缓存"的镜像（本机 alpine:latest 是
-        # amd64 占位条目，容器一起来就退，会让整档读数失真）
-        run: docker pull node:22-alpine
       - name: Docker-backed tiers really ran
-        # runner 自带 docker daemon，PG 与 Docker provider 两档都没有理由被跳过；
-        # 被跳过即构建失败，而不是混在 skip 里静默通过。
+        # runner 自带 docker daemon，PG / Docker provider / 对象存储三档都没有理由
+        # 被跳过；被跳过即构建失败，而不是混在 skip 里静默通过。
         run: |
           python - <<'PY'
           import json, sys

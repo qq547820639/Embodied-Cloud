@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from ..deps import DB, CurrentUser, deployment_service
 from ..models import DeploymentRecord, EdgeAgent, Role, Workspace
 from ..schemas import DeploymentCreate, DeploymentOut
+from ..services.artifact_store import ArtifactStoreUnavailableError
 from ..services.edge import get_agent_from_header
 
 router = APIRouter(prefix="/deployments", tags=["deployments"])
@@ -122,9 +123,16 @@ def complete_deployment(deployment_id: str, payload: DeploymentCompleteIn, db: D
 
 @router.post("/{deployment_id}/verify", response_model=DeploymentOut)
 def verify_deployment(deployment_id: str, db: DB, user: CurrentUser):
-    """幂等校验: artifact 当前 checksum 与记录一致 → verified, 否则 failed+error."""
+    """幂等校验: artifact 当前 checksum 与记录一致 → verified，否则 failed+error.
+
+    存储不可用（鉴权失败/桶不存在/网络故障）→ 503 且记录**留在 downloading**：
+    重验是安全的，而 once-FAILED 是终态，不能由一次基础设施抖动判定。
+    """
     deployment = _get_owned_deployment(db, user, deployment_id)
-    return deployment_service.verify_checksum(db, deployment)
+    try:
+        return deployment_service.verify_checksum(db, deployment)
+    except ArtifactStoreUnavailableError as exc:
+        raise HTTPException(503, f"artifact store unavailable: {exc}") from exc
 
 
 class EdgeChecksumIn(BaseModel):

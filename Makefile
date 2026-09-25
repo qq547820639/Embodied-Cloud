@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 UV ?= uv
 VERSION ?= 0.5.0
 
-.PHONY: install dev test test-pg test-docker test-browser lint typecheck build smoke clean check demo \
+.PHONY: install dev test test-pg test-docker test-browser test-s3 lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
         release api-docs validate lock verify-lock sbom audit supply-chain
@@ -31,6 +31,11 @@ test-docker:
 # 浏览器档：Playwright 驱动真 DOM（复用系统 Chrome，免下载浏览器二进制）。
 test-browser:
 	$(PYTHON) -m pytest -m browser_integration
+
+# 对象存储档：自起一次性 S3 兼容服务端（VersityGW 容器），用真实 boto3 打真协议。
+# 缺 docker/镜像未缓存/未装 boto3 时整档干净跳过并登记 PENDING(原因)。
+test-s3:
+	$(PYTHON) -m pytest -m s3_integration
 
 lint:
 	$(PYTHON) -m ruff check app tests

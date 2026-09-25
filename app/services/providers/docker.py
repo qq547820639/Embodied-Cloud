@@ -118,6 +118,50 @@ class DockerProvider:
         if not is_port_free(self.WEBRTC_MEDIA_PORT, sock_type=socket.SOCK_DGRAM):
             raise RuntimeError(f"WebRTC media port {self.WEBRTC_MEDIA_PORT}/UDP is already in use.")
 
+    def run_argv(
+        self,
+        *,
+        workspace: Workspace,
+        template: Template,
+        reservation: ResourceReservation,
+        container_name: str,
+        workspace_dir: Path,
+        ide_port: int,
+        password: str,
+        image: str,
+    ) -> list[str]:
+        """`docker run` 的完整 argv（provision 与 docker 真实档共用这一份）。
+
+        单独成方法只为让常驻档能拿**生产同款** argv 交给守护进程验收：测试里重抄
+        一遍命令行，只能证明两份抄得一样，证明不了生产那条 argv 守护进程认得。
+        """
+        gpu_index = reservation.gpu_index
+        env = [
+            "-e", "ACCEPT_EULA=Y",
+            "-e", f"PRIVACY_CONSENT={'Y' if self.settings.privacy_consent else 'N'}",
+            "-e", f"WORKSPACE_PASSWORD={password}",
+            "-e", f"IDE_PORT={ide_port}",
+            "-e", f"LIVESTREAM={'1' if template.requires_streaming else '0'}",
+            "-e", f"PUBLIC_IP={self.settings.host_public_ip}",
+        ]
+        return [
+            "docker", "run", "-d", "--rm",
+            "--name", container_name,
+            "--network", "host",
+            # GPU 绑定完全来自 reservation（scheduler 是唯一决策者），provider 不自行选卡
+            "--gpus", f"device={gpu_index}",
+            "--label", "embodiedcloud.workspace=1",
+            "--label", f"embodiedcloud.workspace_id={workspace.id}",
+            "--label", f"embodiedcloud.gpu={gpu_index}",
+            "--label", f"embodiedcloud.gpu_id={reservation.gpu_id}",
+            "--label", f"embodiedcloud.streaming={1 if template.requires_streaming else 0}",
+            "--label", f"embodiedcloud.operation={reservation.metadata.get('operation_id', '')}",
+            "--label", f"embodiedcloud.fencing={reservation.metadata.get('fencing_token', '')}",
+            *env,
+            "-v", f"{workspace_dir}:/workspace/project:rw",
+            image,
+        ]
+
     def provision(
         self,
         workspace: Workspace,
@@ -177,8 +221,6 @@ class DockerProvider:
                 container_name=workspace.container_name or f"ec-{workspace.id[:12]}",
             )
 
-        # GPU 绑定完全来自 reservation（scheduler 唯一决策），不再自行选择
-        gpu_index = reservation.gpu_index
         ide_port = allocate_tcp_port(self.settings.ide_port_start, self.settings.ide_port_end)
         # 记录分配，destroy 时释放（含 provision 中途失败的补偿销毁路径）
         self._allocated_ide_ports[workspace.id] = ide_port
@@ -187,35 +229,21 @@ class DockerProvider:
 
         password = secrets.token_urlsafe(16)
         container_name = f"ec-{workspace.id[:12]}"
-        env = [
-            "-e", "ACCEPT_EULA=Y",
-            "-e", f"PRIVACY_CONSENT={'Y' if self.settings.privacy_consent else 'N'}",
-            "-e", f"WORKSPACE_PASSWORD={password}",
-            "-e", f"IDE_PORT={ide_port}",
-            "-e", f"LIVESTREAM={'1' if template.requires_streaming else '0'}",
-            "-e", f"PUBLIC_IP={self.settings.host_public_ip}",
-        ]
 
         # runtime 镜像：workspace.image（TemplateVersion 快照）→ template.image →
         # settings.workspace_image 显式 fallback。禁止 mutable latest。
         image = workspace.image or template.image or self.settings.workspace_image
 
-        args = [
-            "docker", "run", "-d", "--rm",
-            "--name", container_name,
-            "--network", "host",
-            "--gpus", f"device={gpu_index}",
-            "--label", "embodiedcloud.workspace=1",
-            "--label", f"embodiedcloud.workspace_id={workspace.id}",
-            "--label", f"embodiedcloud.gpu={gpu_index}",
-            "--label", f"embodiedcloud.gpu_id={reservation.gpu_id}",
-            "--label", f"embodiedcloud.streaming={1 if template.requires_streaming else 0}",
-            "--label", f"embodiedcloud.operation={reservation.metadata.get('operation_id', '')}",
-            "--label", f"embodiedcloud.fencing={reservation.metadata.get('fencing_token', '')}",
-            *env,
-            "-v", f"{workspace_dir}:/workspace/project:rw",
-            image,
-        ]
+        args = self.run_argv(
+            workspace=workspace,
+            template=template,
+            reservation=reservation,
+            container_name=container_name,
+            workspace_dir=workspace_dir,
+            ide_port=ide_port,
+            password=password,
+            image=image,
+        )
         result = self._run(args, check=False)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
