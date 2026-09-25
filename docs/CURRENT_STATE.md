@@ -54,10 +54,32 @@ GPU 真机（G1–G4 脚本就绪，本机无 NVIDIA 设备）· 真实 K8s 集�
 NGC 凭据（镜像 digest 回填）· S3 凭据 · 物理机器人 · 真实 K8s 集群凭据 · NVIDIA 容器运行时（Docker 档的 `--gpus` 分支）。
 > 注：docker daemon 与 postgres 镜像本轮已可用，旧文档"无 docker daemon"的说法作废。
 
-### TECH DEBT（已知、有意延后）
-edge agent 独立包（§25）· `default_idle_timeout_minutes`（缺 runtime 活动信号，标注预留）·
+### TECH DEBT（已知、有意延后 —— 本轮逐条量过，不是照抄旧措辞）
 K8s provider 的 `wait_ready/rotate_credentials/supports_credential_rotation` 真实集群路径 ·
 Docker `--gpus` 设备透传分支 · S3 `ArtifactStore` 真实后端。
+
+**两项被本轮实测改性的条目**：
+
+- **`default_idle_timeout_minutes` 目前没有任何消费者**（`grep` 全仓：仅出现在
+  `app/config.py`，读数为 1 处声明、0 处读取）。所以它不是"已实现待调参"，而是一个
+  **尚未实现的预留开关**——不要因为 `.env.example` 里有它就以为空闲超时在生效。
+  它在 `.env.example` 里是有条目的（配置文档对账门要求每个 Settings 字段都落文档），
+  但**代码里 0 处读取**——所以真正的风险是"运维以为设了这个值就会超时停机"。
+  要实现必须先回答"用什么算活动"：容器 CPU 在 GPU 训练下会长时间接近 0
+  （CPU 空闲 ≠ 任务空闲），据此自动停机等于误杀长跑任务并照秒扣费；可信信号来自
+  真机 GPU 利用率（被 NVIDIA 设备阻塞，见 §3 BLOCKED）。→ 保持延后，性质记为
+  "缺可信信号 + 当前无消费者"。
+- **"edge agent 独立包（§25）"不是打包任务，而是组件缺失**：仓库里根本没有 agent 客户端
+  （`runtime/` 只有 Dockerfile 与 entrypoint；`grep` 心跳/`X-Agent-Token` 在 app 与
+  迁移之外零命中；GitHub 检索 "python robot edge agent heartbeat artifact download
+  verify" 命中 0 个仓库）。而且现成的 API 面**不足以支撑一个 agent**：agent token 只能
+  heartbeat / telemetry / report-checksum，`download→verify→run→complete` 四个状态迁移
+  全部走用户 bearer token（即今天的"edge 流程"是控制面侧模拟）。
+  → 落地它需要先决定"agent 怎么发现分派给它的 deployment"与"用 agent token 取 artifact
+  流的授权与路径安全"，那是新增鉴权面（安全敏感），应作为独立迭代设计-测试-评审，
+  不在版本收口里顺手加。外部实现对比（RAUC：面向嵌入式整机 A/B 升级与
+  "create/inspect/modify installation artifacts"，粒度不符；MQTT 设备 SDK 需引入
+  broker 与新凭据体系）与选择理由记在 ADR 0007。
 
 **引用完整性已逐条裁决完（见 ADR 0005 追加节）**：`*_id` 列普查出的 19 处未声明外键，
 以"全仓删除能力普查"（唯一硬删是 `GpuAllocation`，且无人按 id 引用它）为依据分派——

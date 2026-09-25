@@ -67,6 +67,16 @@
   元组"这层投影各随用例需要 —— 所以共享的是会漂移的契约部分，投影留在原地。
   抽取后用例数与结果不变。
 
+### 登记册事实校正（实测，不改代码）
+- `default_idle_timeout_minutes` 代码侧**零消费者**（`grep` 读数：仅 `app/config.py` 一处
+  声明；`.env.example` 有它是被配置文档门要求的）。它不是"已实现待调参"，而是尚未实现的
+  预留开关——按容器 CPU 判空闲会误杀 GPU 长跑任务并照秒扣费，可信信号要真机 GPU 利用率
+  （仍被硬件阻塞）。
+- "edge agent 独立包（§25）"实为**组件缺失**：仓库里没有 agent 客户端，且服务端缺少
+  agent 侧的工作发现与取件通路（agent token 只能 heartbeat/telemetry/report-checksum）。
+  落地需要先定"分派发现方式"和"取件鉴权"两件事，已记为 ADR 0007（Proposed，含六维
+  外部方案对比；本轮不新增鉴权面）。
+
 ### 供应链
 - 提交 universal `uv.lock`（多平台 marker + sha256），CI 跑 `make verify-lock`。
 - `uv.lock` 里本项目自身的版本也纳入版本一致性用例：只 bump `pyproject.toml` 而忘了
