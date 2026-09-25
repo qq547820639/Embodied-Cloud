@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # --- k8s provider ---
     k8s_namespace: str = "embodiedcloud"
     k8s_in_cluster: bool = False  # 默认使用 kubeconfig
+    # kubeconfig 路径；留空 = 走 SDK 默认解析（$KUBECONFIG 或 ~/.kube/config）。
+    # 需要显式指定是因为 SDK 在 import 期就把环境变量固化成常量（改环境不生效）。
+    k8s_kubeconfig: str = ""
     # K8s capacity reservation 的 GPU 显存粒度（MB）。K8s 不暴露 per-device
     # memory 给普通 resource request；精确显存由 NVIDIA Device Plugin 负责。
     k8s_gpu_memory_mb: int = 24576

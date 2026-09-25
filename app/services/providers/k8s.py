@@ -86,7 +86,13 @@ class KubernetesProvider:
             if self.settings.k8s_in_cluster:
                 config.load_incluster_config()
             else:
-                config.load_kube_config()
+                # 显式 kubeconfig 路径优先。留空时走 SDK 默认解析——注意 SDK 在
+                # **模块 import 时**就把 `KUBECONFIG` 环境变量固化成常量
+                # （kubernetes/config/kube_config.py:
+                # `KUBE_CONFIG_DEFAULT_LOCATION = os.environ.get('KUBECONFIG', ...)`），
+                # 进程启动后再改 KUBECONFIG 是不生效的；多集群/旁挂部署需要
+                # 一个能显式指路的入口，故有 k8s_kubeconfig。
+                config.load_kube_config(config_file=self.settings.k8s_kubeconfig or None)
         except Exception as exc:  # 配置失败仅缓存，由 health() 汇报
             self._config_error = f"kube config 加载失败: {exc}"
             return

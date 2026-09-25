@@ -31,6 +31,8 @@
 | G0.23 供应链可复现 | `make verify-lock && make sbom && make audit` | universal uv.lock 一致、SBOM 生成、审计无阻断项；CI 要求 docker 档必须真 PASS | VERIFIED PASS |
 | G0.24 约定入门禁 | `pytest tests/test_config_docs.py` + `test_migrations.py` 对账用例 | Settings↔.env.example 双向、模型声明↔迁移产物（`compare_metadata`） | VERIFIED PASS |
 | G0.25 对象存储真后端 | `make test-s3` | 自建一次性 S3 兼容服务端（VersityGW v1.8.0）+ 真实 boto3：读写删/Content-Type/4 MiB 字节保真；「桶不存在」不得读成「对象不存在」；403 与网络故障上抛；SDK 异常不外泄；与 Local 档同判据并排 | VERIFIED PASS（20/20，另用 MinIO 交叉核对读数一致，见 ADR 0008） |
+| G0.26 K8s 控制面真集群 | `make test-k8s-control-plane` | kind 一次性真集群（真 kubelet/调度器/endpoints）：provision 对象图与标签、§14 Pod 标记形态、`wait_ready` 三段判据的**正/负两档**（无 device plugin 时 Unschedulable ⇒ False；改规格后 ⇒ True 且独立复核 Endpoints 有地址）、凭据轮换真的滚出新 Pod 且无 Pod 残留旧口令、空口令不上报成功、stop/start 缩放与 destroy 无残留 | VERIFIED PASS（7/7，变异对照读数见 ADR 0009） |
+| G0.27 镜像配方下载钉死 | `pytest tests/test_supply_chain.py` | `runtime/Dockerfile*` 内每个下载步骤必须同块 `sha256sum -c`、每个 `git clone --branch` 必须比对 HEAD commit；并断言判据作用域非空（防恒真） | VERIFIED PASS（改钉之前对两处开火，读数见 CHANGELOG 0.6.0） |
 
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
@@ -68,7 +70,10 @@
 ## 当前总状态
 
 - VERIFIED PASS：G0 全部（精确计数见 `docs/VALIDATION.json`，`make validate` 自动生成）
-- IMPLEMENTED BUT NOT PHYSICALLY VERIFIED：Streaming 媒体面、G1–G4 脚本、K8s provider 真实集群路径（其请求体形状已由 G0.21 覆盖）
-- 已由真后端覆盖（v0.5.0 起不再属于上一条）：Docker provider 非 GPU 路径（G0.19）、PostgreSQL 并发语义（G0.18）、前端真实 DOM（G0.20）
+- IMPLEMENTED BUT NOT PHYSICALLY VERIFIED：Streaming 媒体面、G1–G4 脚本、
+  K8s 上 `nvidia.com/gpu` 的真实分配（需要 device plugin；控制面路径本身已由 G0.26 覆盖）
+- 已由真后端覆盖（不再属于上一条）：Docker provider 非 GPU 路径与 `--gpus` 参数的守护进程
+  侧记账（G0.19）、PostgreSQL 并发语义（G0.18）、前端真实 DOM（G0.20）、
+  对象存储 S3 协议（G0.25）、K8s `wait_ready`/凭据轮换（G0.26）
 - FAILED：无
 - BLOCKED_EXTERNAL_DEPENDENCY：G1.1–G4（Docker/NVIDIA/NGC）、G5.2（真机）

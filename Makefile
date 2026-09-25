@@ -2,7 +2,8 @@ PYTHON ?= .venv/bin/python
 UV ?= uv
 VERSION ?= 0.5.0
 
-.PHONY: install dev test test-pg test-docker test-browser test-s3 lint typecheck build smoke clean check demo \
+.PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane \
+        lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
         release api-docs validate lock verify-lock sbom audit supply-chain
@@ -36,6 +37,11 @@ test-browser:
 # 缺 docker/镜像未缓存/未装 boto3 时整档干净跳过并登记 PENDING(原因)。
 test-s3:
 	$(PYTHON) -m pytest -m s3_integration
+
+# K8s 控制面档：kind 起一次性真集群（真 kubelet/调度器/endpoints 控制器），
+# 验 wait_ready 与凭据轮换。GPU 声明原样保留，只有资源请求按测试集群规格下调。
+test-k8s-control-plane:
+	$(PYTHON) -m pytest -m k8s_control_plane
 
 lint:
 	$(PYTHON) -m ruff check app tests

@@ -61,6 +61,7 @@ markers = [
     "docker_integration: requires Docker daemon (real containers)",
     "browser_integration: requires Playwright + Chrome/Chromium (real DOM)",
     "s3_integration: requires Docker daemon + cached S3-compatible server image (real object store)",
+    "k8s_control_plane: requires Docker daemon + kind binary + cached kindest/node image (real cluster, no GPU)",
 ]
 
 [build-system]

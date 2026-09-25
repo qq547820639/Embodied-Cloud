@@ -133,6 +133,10 @@ def _integration_gates() -> dict[str, dict]:
             "module": "tests.test_s3_artifact_store",
             "sentinel": _const_str("tests/s3_server.py", "GATE_SENTINEL"),
         },
+        "k8s_control_plane": {
+            "module": "tests.test_k8s_control_plane",
+            "sentinel": _const_str("tests/k8s_server.py", "GATE_SENTINEL"),
+        },
     }
 
 

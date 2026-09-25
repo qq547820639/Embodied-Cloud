@@ -5,19 +5,32 @@ FROM nvcr.io/nvidia/isaac-sim:6.0.1
 USER root
 ARG CODE_SERVER_VERSION=4.130.0
 ARG ISAACLAB_REF=v3.0.0-beta2.patch1
+# 上游 v4.130.0 的 release 只发布 tar.gz/rpm/deb 资产，既没有 SHA256SUMS.txt
+# （下载该路径实测返回 "Not Found"），release notes 里也没有校验表，因此下面的
+# 摘要来自本机对官方 CDN 制品的实算（字节数与 GitHub API 报告的资产大小逐一对齐：
+# amd64 201284549、arm64 197540112）。它防的是"后续构建拿到被替换/截断的制品"，
+# 不构成第三方背书。
+ARG CODE_SERVER_SHA256_AMD64=3de23052e34fa705b3817efa66201cbc8d8ba6615b4cd03120c39bfc0ae1b7ab
+ARG CODE_SERVER_SHA256_ARM64=795366c40d0b32bc6fbbedf8dc992f9767a6125cc6dce965766c5f79e06bb725
+# tag 可被 force push 移动，`--branch` 不保证两次构建拿到同一份代码：钉到 commit。
+# v3.0.0-beta2.patch1 → ffff603e…（两个独立来源核对：GitHub refs API 与
+# `git ls-remote` 同一 sha；该 tag 是 lightweight tag，直接指向 commit）。
+ARG ISAACLAB_COMMIT=ffff603eafc6b74264a5261cc0183d6a65390d78
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates curl git tini \
     && rm -rf /var/lib/apt/lists/*
 
 RUN arch="$(dpkg --print-architecture)" \
-    && case "$arch" in amd64) cs_arch=amd64;; arm64) cs_arch=arm64;; *) echo "unsupported arch: $arch"; exit 1;; esac \
+    && case "$arch" in amd64) cs_arch=amd64; cs_sha="$CODE_SERVER_SHA256_AMD64";; arm64) cs_arch=arm64; cs_sha="$CODE_SERVER_SHA256_ARM64";; *) echo "unsupported arch: $arch"; exit 1;; esac \
     && curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-${cs_arch}.tar.gz" -o /tmp/code-server.tgz \
+    && echo "${cs_sha}  /tmp/code-server.tgz" | sha256sum -c - \
     && tar -xzf /tmp/code-server.tgz -C /opt \
     && ln -s "/opt/code-server-${CODE_SERVER_VERSION}-linux-${cs_arch}/bin/code-server" /usr/local/bin/code-server \
     && rm /tmp/code-server.tgz
 
 RUN git clone --depth 1 --branch "${ISAACLAB_REF}" https://github.com/isaac-sim/IsaacLab.git /workspace/IsaacLab \
+    && test "$(git -C /workspace/IsaacLab rev-parse HEAD)" = "${ISAACLAB_COMMIT}" \
     && cd /workspace/IsaacLab \
     && ./isaaclab.sh --install
 

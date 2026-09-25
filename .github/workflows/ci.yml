@@ -27,6 +27,19 @@ jobs:
         run: |
           docker pull node:22-alpine
           docker pull versity/versitygw:v1.8.0
+          docker pull kindest/node:v1.37.0
+      - name: Install kind (checksum verified)
+        # k8s 控制面档（G0.26）需要 kind 二进制；校验用上游发布物自带的 .sha256sum
+        env:
+          KIND_VERSION: v0.33.0
+        run: |
+          set -euo pipefail
+          base=https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64
+          curl -fsSL -o /usr/local/bin/kind "$base"
+          curl -fsSL -o /tmp/kind.sha256sum "$base.sha256sum"
+          printf '%s  %s\n' "$(awk '{print $1}' /tmp/kind.sha256sum)" /usr/local/bin/kind | sha256sum -c -
+          chmod +x /usr/local/bin/kind
+          kind version
       - name: Lint
         run: make lint
       - name: Type check
