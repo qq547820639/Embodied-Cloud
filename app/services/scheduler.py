@@ -1,16 +1,18 @@
 """GPU Scheduler：inventory 同步、原子分配/释放、crash recovery 支撑。
 
 并发安全设计（见 docs/ARCHITECTURE.md §3）：
-- 分配：`SELECT ... FOR UPDATE`（PostgreSQL 生效；SQLite 为 no-op）+
-  `gpu_allocations.workspace_id` 唯一约束兜底 —— 并发下至多一个事务插入成功。
+- 分配：`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`（PostgreSQL 生效；SQLite 为
+  no-op）—— 每轮只锁一行候选，候选被别人锁住时短暂退避重试；
+  `gpu_allocations.gpu_id/workspace_id` 唯一约束兜底 —— 并发下至多一个事务插入成功。
 - 释放：幂等；stop/delete 后 GPU 回 AVAILABLE。
 - UNHEALTHY 不参与调度；DRAINING 不再分配新 workspace。
 """
 
+import time
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -31,6 +33,10 @@ class GpuInfo:
     index: int = 0
 
 class GpuScheduler:
+    # 候选正被其他事务锁住时的重试窗口（0.05+0.1+0.15+0.2 ≈ 0.5s 上限）
+    ALLOCATE_MAX_ATTEMPTS = 5
+    ALLOCATE_BACKOFF_SECONDS = 0.05
+
     def __init__(self, session_factory):
         self.session_factory = session_factory
 
@@ -94,11 +100,17 @@ class GpuScheduler:
         """原子分配一张满足显存需求的 GPU；失败抛 RuntimeError。
 
         返回已标记 ALLOCATED 的 Gpu（同一 db 会话内）。
+
+        一次只锁**一行**候选（`FOR UPDATE SKIP LOCKED` + `LIMIT 1`）。不加 limit
+        会把整批候选一起锁住：并发启动时后来者扫到 0 行，会在卡其实空闲的情况下被
+        误判成「无卡可用」——这个缺陷只在真行锁的 PostgreSQL 上看得见（SQLite 下
+        FOR UPDATE 是 no-op），由 tests/test_postgres_concurrency.py 钉住。
+        因此「本轮没锁到」不等于「没卡」：仍有 AVAILABLE 行时短暂退避后重试。
         """
         # 统一单位：模板需求 GB → MiB（1 GiB = 1024 MiB），再扣掉厂商预留容差
         required_mib = gpu_requirement_gb * 1024 - VRAM_TOLERANCE_MIB
-        candidates = (
-            db.scalars(
+        for attempt in range(self.ALLOCATE_MAX_ATTEMPTS):
+            gpu = db.scalar(
                 select(Gpu)
                 .where(
                     Gpu.status == GpuStatus.AVAILABLE.value,
@@ -106,27 +118,36 @@ class GpuScheduler:
                 )
                 .order_by(Gpu.memory_total.asc())
                 .with_for_update(skip_locked=True)
+                .limit(1)
             )
-        ).all()
-        for gpu in candidates:
-            gpu.status = GpuStatus.ALLOCATED.value
-            gpu.workspace_id = workspace_id
-            gpu.updated_at = utcnow()
-            db.add(
-                GpuAllocation(
-                    id=str(uuid.uuid4()),
-                    gpu_id=gpu.id,
-                    workspace_id=workspace_id,
-                    host_id=gpu.host_id,
+            if gpu is not None:
+                gpu.status = GpuStatus.ALLOCATED.value
+                gpu.workspace_id = workspace_id
+                gpu.updated_at = utcnow()
+                db.add(
+                    GpuAllocation(
+                        id=str(uuid.uuid4()),
+                        gpu_id=gpu.id,
+                        workspace_id=workspace_id,
+                        host_id=gpu.host_id,
+                    )
                 )
+                try:
+                    db.commit()
+                except IntegrityError:
+                    # 并发竞争：另一事务已占用该 GPU → 回滚重试下一张
+                    db.rollback()
+                    continue
+                return gpu
+            # 没锁到候选：区分「真没卡」与「卡正被别人锁着」
+            still_waiting = db.scalar(
+                select(func.count())
+                .select_from(Gpu)
+                .where(Gpu.status == GpuStatus.AVAILABLE.value, Gpu.memory_total >= required_mib)
             )
-            try:
-                db.commit()
-            except IntegrityError:
-                # 并发竞争：另一事务已占用该 GPU → 回滚重试下一张
-                db.rollback()
-                continue
-            return gpu
+            if not still_waiting:
+                break
+            time.sleep(self.ALLOCATE_BACKOFF_SECONDS * (attempt + 1))
         raise RuntimeError(
             f"No GPU available with >= {gpu_requirement_gb} GB VRAM "
             f"(workspace {workspace_id[:8]})"

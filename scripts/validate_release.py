@@ -43,8 +43,90 @@ def count_tests_junit(report_path: Path) -> dict:
     }
 
 
+def integration_gate_statuses(junit_path: Path, gates: dict[str, dict]) -> dict[str, dict]:
+    """按 JUnit 的 `testcase@file` + `<skipped message>` 现算集成档状态。
+
+    三态分开：PASS（真后端上跑过）/ PENDING(原因)（整档因缺件跳过，原因来自 skip
+    文案本身）/ NOT_RUN（该档一条都没被收集到——例如文件被删或 selection 打错）。
+    不从"退出码"倒推原因，也不把普通 skip 折算成通过。
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(junit_path).getroot()  # noqa: S314 本地 pytest 产物
+    buckets: dict[str, dict[str, object]] = {}
+    for tc in root.iter("testcase"):
+        # pytest 的 JUnit 用 classname="tests.test_x"（无 file 属性）标模块归属；
+        # 参数化/类内用例会带 "::"，归属取第一段
+        module = (tc.get("classname") or "").split("::")[0]
+        if not module:
+            continue
+        b = buckets.setdefault(module, {"total": 0, "passed": 0, "bad": 0, "skipped": []})
+        b["total"] += 1
+        skipped = tc.find("skipped")
+        if skipped is not None:
+            b["skipped"].append(skipped.get("message") or "")
+        elif tc.find("failure") is not None or tc.find("error") is not None:
+            b["bad"] += 1
+        else:
+            b["passed"] += 1
+
+    out: dict[str, dict] = {}
+    for name, spec in gates.items():
+        b = buckets.get(spec["module"])
+        if b is None or b["total"] == 0:
+            out[name] = {"status": "NOT_RUN", "note": f"未收集到 {spec['module']} 的任何用例"}
+            continue
+        total, passed, bad = int(b["total"]), int(b["passed"]), int(b["bad"])
+        skipped_msgs = [str(m) for m in b["skipped"]]
+        sentinel = spec["sentinel"]
+        pending = [m for m in skipped_msgs if sentinel in m]
+        if bad:
+            out[name] = {"status": "FAIL", "note": f"{bad}/{total} 用例在真实后端上失败"}
+        elif passed == 0 and len(pending) == total:
+            reason = pending[0].split(":", 1)[-1].strip() if ":" in pending[0] else pending[0]
+            out[name] = {
+                "status": "PENDING",
+                "note": f"整档 {total} 用例未执行，原因：{reason}（哨兵 {sentinel}）",
+            }
+        elif skipped_msgs:
+            out[name] = {
+                "status": "PARTIAL",
+                "note": f"执行 {passed}/{total}，跳过 {len(skipped_msgs)}（哨兵 {sentinel} 命中 {len(pending)}）",
+            }
+        else:
+            out[name] = {"status": "PASS", "note": f"{passed}/{total} 用例在真实后端上执行"}
+    return out
+
+
+def _const_str(rel_path: str, name: str) -> str:
+    """从用例源码的 AST 里现取模块级字符串常量（哨兵不许手抄）。"""
+    import ast
+
+    tree = ast.parse((ROOT / rel_path).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name and isinstance(node.value, ast.Constant):
+                    return str(node.value.value)
+    raise LookupError(f"{rel_path} 里没有模块级字符串常量 {name}")
+
+
+def _integration_gates() -> dict[str, dict]:
+    return {
+        "k8s": {
+            "module": "tests.test_k8s_integration",
+            "sentinel": _const_str("tests/test_k8s_integration.py", "GATE_SENTINEL"),
+        },
+        "postgres": {
+            "module": "tests.test_postgres_concurrency",
+            "sentinel": _const_str("tests/pg_server.py", "GATE_SENTINEL"),
+        },
+    }
+
+
 def main() -> int:
     checks: dict[str, dict] = {}
+    gates = _integration_gates()
     import tempfile
 
     # 1) 全量 test run（JUnit 报告 → 稳定计数）
@@ -60,9 +142,14 @@ def main() -> int:
                 "skipped": counts["skipped"],
                 "failed": counts["failed"],
             }
+            checks.update({f"integration_{k}": v for k, v in integration_gate_statuses(junit, gates).items()})
         else:
             checks["test_collected"] = {"status": "FAIL", "count": 0}
             checks["test_run"] = {"status": "FAIL", "passed": 0, "skipped": 0, "failed": 0}
+            checks.update({
+                f"integration_{k}": {"status": "NOT_RUN", "note": "pytest 未产出 JUnit 报告"}
+                for k in gates
+            })
 
     # 3) lint / type / migration / build
     code, _ = run([PYTHON, "-m", "ruff", "check", "app", "tests"])
@@ -86,18 +173,12 @@ def main() -> int:
     code, _ = run([PYTHON, "-m", "build"])
     checks["build"] = {"status": "PASS" if code == 0 else "FAIL"}
 
-    # 4) 物理 gate：未执行 = NOT_RUN（不永久 hardcode PENDING；执行后按真实
-    #    acceptance 结果写 PASS/FAIL/BLOCKED）
-    physical = {
-        "GPU": "NOT_RUN",
-        "K8s": "NOT_RUN",
-        "Streaming": "NOT_RUN",
-        "Robot": "NOT_RUN",
-    }
-    for name, tag in physical.items():
-        checks[f"physical_{name.lower()}"] = {
-            "status": tag,
-            "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新",
+    # 4) 物理 gate：仍缺硬件的档保持 NOT_RUN（不假装 PASS，也不倒推原因）。
+    #    K8s/Postgres 不再写死在这里 —— 它们由上面的 integration_* 从 JUnit 现算。
+    for name in ("gpu", "streaming", "robot"):
+        checks[f"physical_{name}"] = {
+            "status": "NOT_RUN",
+            "note": "需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行",
         }
 
     # 5) 汇总
@@ -149,7 +230,10 @@ def _render_md(report: dict) -> str:
     )
     for key in ("lint", "typecheck", "migration", "build"):
         lines.append(f"| {key} | {c[key]['status']} | |")
-    for key in ("gpu", "k8s", "streaming", "robot"):
+    for key in ("k8s", "postgres"):
+        item = c[f"integration_{key}"]
+        lines.append(f"| Integration {key} | {item['status']} | {item.get('note', '')} |")
+    for key in ("gpu", "streaming", "robot"):
         item = c[f"physical_{key}"]
         lines.append(f"| Physical {key} | {item['status']} | {item.get('note', '')} |")
     lines.append("")

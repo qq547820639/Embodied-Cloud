@@ -19,12 +19,16 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
+# release gate 靠这个哨兵把"整档跳过"登记为 PENDING(原因)；
+# scripts/validate_release.py 用 AST 从本文件现读，不在别处再抄一份。
+GATE_SENTINEL = "K8S_PHYSICAL_VALIDATION_PENDING"
+
 pytestmark = [
     pytest.mark.k8s_integration,
     pytest.mark.skipif(
         os.environ.get("EMBODIEDCLOUD_K8S_TEST") != "1",
         reason=(
-            "K8S_PHYSICAL_VALIDATION_PENDING: 需要真实 Kubernetes 集群 + NVIDIA "
+            f"{GATE_SENTINEL}: 需要真实 Kubernetes 集群 + NVIDIA "
             "Device Plugin（export EMBODIEDCLOUD_K8S_TEST=1 且配置 kubeconfig 后运行）"
         ),
     ),

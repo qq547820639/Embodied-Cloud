@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 UV ?= uv
 VERSION ?= 0.4.0
 
-.PHONY: install dev test lint typecheck build smoke clean check demo \
+.PHONY: install dev test test-pg lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
         release api-docs validate
@@ -17,6 +17,11 @@ dev:
 
 test:
 	$(PYTHON) -m pytest
+
+# PostgreSQL 真并发档：需要 docker daemon + 本地 postgres 镜像，
+# 缺件时整档干净跳过并在 docs/VALIDATION.json 里登记 PENDING(原因)。
+test-pg:
+	$(PYTHON) -m pytest -m pg_integration
 
 lint:
 	$(PYTHON) -m ruff check app tests

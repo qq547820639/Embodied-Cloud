@@ -4,13 +4,21 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 335
+      "count": 353
     },
     "test_run": {
       "status": "PASS",
-      "passed": 334,
+      "passed": 352,
       "skipped": 1,
       "failed": 0
+    },
+    "integration_k8s": {
+      "status": "PENDING",
+      "note": "整档 1 用例未执行，原因：需要真实 Kubernetes 集群 + NVIDIA Device Plugin（export EMBODIEDCLOUD_K8S_TEST=1 且配置 kubeconfig 后运行）（哨兵 K8S_PHYSICAL_VALIDATION_PENDING）"
+    },
+    "integration_postgres": {
+      "status": "PASS",
+      "note": "14/14 用例在真实后端上执行"
     },
     "lint": {
       "status": "PASS"
@@ -26,19 +34,15 @@
     },
     "physical_gpu": {
       "status": "NOT_RUN",
-      "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新"
-    },
-    "physical_k8s": {
-      "status": "NOT_RUN",
-      "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新"
+      "note": "需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行"
     },
     "physical_streaming": {
       "status": "NOT_RUN",
-      "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新"
+      "note": "需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行"
     },
     "physical_robot": {
       "status": "NOT_RUN",
-      "note": "未在本次环境执行（无真实硬件）；执行后按 acceptance 结果更新"
+      "note": "需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行"
     }
   }
 }
