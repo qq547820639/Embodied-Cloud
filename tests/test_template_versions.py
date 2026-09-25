@@ -20,6 +20,7 @@ from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.docker import DockerProvider
 from app.services.providers.mock import MockProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
+from app.utils import utcnow
 
 ENGINE = create_engine("sqlite:///./test-template-version.db", connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
@@ -162,6 +163,9 @@ def _template_with_versions(db, template_id: str, image_a: str, image_b: str):
     )
     db.add(template)
     db.flush()
+    from datetime import timedelta
+
+    published_at = utcnow()
     v1 = TemplateVersion(
         id=f"tv-{template_id}-v1",
         template_id=template_id,
@@ -169,6 +173,7 @@ def _template_with_versions(db, template_id: str, image_a: str, image_b: str):
         image=image_a,
         entrypoint="",
         released=True,
+        created_at=published_at,
     )
     v2 = TemplateVersion(
         id=f"tv-{template_id}-v2",
@@ -177,6 +182,7 @@ def _template_with_versions(db, template_id: str, image_a: str, image_b: str):
         image=image_b,
         entrypoint="",
         released=True,
+        created_at=published_at + timedelta(minutes=5),
     )
     db.add_all([v1, v2])
     db.commit()
@@ -320,3 +326,52 @@ def test_deployment_uses_workspace_template_version():
         artifact = svc.create_artifact(db, user, ws, "out.pt")
         # 版本来自 Workspace 引用的 TemplateVersion（0.1.0），不是 Template.version(5.0.0)
         assert artifact.model_version == "0.1.0"
+
+
+def test_version_fallback_is_total_ordered_on_identical_created_at():
+    """同秒发布的两个 released 版本：兜底选择必须是全序规则的结果，且可重复。
+
+    只按 created_at 排时这一档会随扫描顺序漂移（实测过：整库并发跑时同一份数据
+    两次解析出不同镜像），即"新工作区用哪个镜像"不确定。
+    """
+    with Factory() as db:
+        _seed(db)
+        same = utcnow()
+        template = Template(
+            id="template-tie",
+            slug="template-tie",
+            name="tie",
+            version="0.1.0",
+            description="test",
+            category="test",
+            runtime="isaaclab",
+            image="registry/tie:0.1.0",
+            launch_command="echo ok",
+            enabled=True,
+            recommended_vram_gb=16,
+            estimated_hourly_cost_cny=1.0,
+        )
+        db.add(template)
+        db.flush()
+        for suffix, image in (("aaa", "registry/tie:0.1.0"), ("zzz", "registry/tie:0.2.0")):
+            db.add(
+                TemplateVersion(
+                    id=f"tv-tie-{suffix}",
+                    template_id="template-tie",
+                    version=image.split(":")[-1],
+                    image=image,
+                    entrypoint="",
+                    released=True,
+                    created_at=same,
+                )
+            )
+        db.commit()
+
+        orchestrator = WorkspaceOrchestrator(Factory, MockProvider("http://127.0.0.1:8000"), Path("/tmp/tv-tie"))  # noqa: S108
+        first = orchestrator.create(db, db.get(Template, "template-tie"), user_id="u1")
+        second = orchestrator.create(db, db.get(Template, "template-tie"), user_id="u1")
+
+        # 规则本身（created_at desc, id desc）可预测：id 更大的 zzz 胜出
+        assert first.image == "registry/tie:0.2.0", f"未按全序规则选版：{first.image}"
+        assert first.image == second.image, f"同一份数据两次解析出不同镜像：{first.image} vs {second.image}"
+        assert first.template_version_id == "tv-tie-zzz"

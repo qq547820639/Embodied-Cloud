@@ -80,7 +80,11 @@ class WorkspaceOrchestrator:
                     TemplateVersion.template_id == template.id,
                     TemplateVersion.released.is_(True),
                 )
-                .order_by(TemplateVersion.created_at.desc())
+                # 必须全序：同一次提交里发布的两个版本 created_at 可能完全相同，
+                # 只按 created_at 排会让"新工作区用哪个镜像"变成随机结果。
+                # 唯一确定的 active 指针仍是 template.current_version_id；
+                # 这里的次级键只为给无指针的历史数据一个稳定答案。
+                .order_by(TemplateVersion.created_at.desc(), TemplateVersion.id.desc())
             )
         workspace_id = str(uuid.uuid4())
         workspace = Workspace(
