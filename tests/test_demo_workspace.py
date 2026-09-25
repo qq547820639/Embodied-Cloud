@@ -7,19 +7,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.main import app
+from tests.http_auth import auth_headers as _auth
+from tests.http_auth import register_body
 
 
 def _register(client: TestClient, email: str, username: str) -> str:
-    resp = client.post(
-        "/api/auth/register",
-        json={"email": email, "username": username, "password": "password123"},
-    )
-    assert resp.status_code == 201, resp.text
-    return resp.json()["token"]
-
-
-def _auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
+    body = register_body(client, email, username)
+    return body["token"]
 
 
 def _promote_to_admin(email: str) -> None:

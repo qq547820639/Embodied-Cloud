@@ -9,19 +9,13 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.http_auth import auth_headers as _auth
+from tests.http_auth import register_body
 
 
 def _register(client: TestClient, email: str, username: str) -> dict:
-    resp = client.post(
-        "/api/auth/register",
-        json={"email": email, "username": username, "password": "password123"},
-    )
-    assert resp.status_code == 201, resp.text
-    return {"token": resp.json()["token"], "id": resp.json()["user"]["id"]}
-
-
-def _auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
+    body = register_body(client, email, username)
+    return {"token": body["token"], "id": body["user"]["id"]}
 
 
 def _register_agent(client: TestClient, headers: dict, name: str) -> dict:

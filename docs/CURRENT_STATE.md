@@ -32,6 +32,7 @@
 | F-3 | 修 **edge_agents 租户外键从未被创建**（模型声明有、迁移没有 → SQLite 与 PG 都没有），并补上"模型↔迁移"对账门 | `3f0c9a51b7e2` + `test_migrations.py` 用 `compare_metadata` 对账（改前红 2 条 `add_fk`，改后 0） |
 | F-4 | 修 **SQLite 外键默认不校验**：`make_engine` 逐连接 `PRAGMA foreign_keys=ON`；并把"SQLite 不提供行锁"钉成常驻断言 | `test_sqlite_semantic_baseline.py` 4 例 |
 | F-5 | 修 released-version 回退非全序（同秒并列导致 flake）；零秒运行段 leave pending hold → capture 改为无条件 | `test_template_versions.py`、`test_credit_holds.py` |
+| G-2 | **注册/鉴权夹具抽取**：4 份 `_register` 经逐字对比确认请求体、端点与 201 断言完全相同（只差返回值投影），`_auth` 四处一字不差 → 共享核心落到 `tests/http_auth.py`，各模块只留自己那一行投影；用例数与结果不变（410 passed） |
 | T-1 | **测试库进程隔离**：22 处模块级 `test-*.db` 文件库改为 pid 独占名（`tests/dbfiles.py`）。此前同一仓库并发跑两个 pytest 会互清对方的库。
 改前基线（HEAD 工作树、两进程并排）：一份 31 例假红 rc=1、另一份 26 例假红 rc=1；
 改后同一并发对照：两份 rc=0、FAILED 计数 0/0 | 正反两档都实测（并发即判据） |
@@ -55,7 +56,6 @@ NGC 凭据（镜像 digest 回填）· S3 凭据 · 物理机器人 · 真实 K8
 
 ### TECH DEBT（已知、有意延后）
 edge agent 独立包（§25）· `default_idle_timeout_minutes`（缺 runtime 活动信号，标注预留）·
-**测试公共 fixture 抽取**（4 组 `_setup`/`_register` 拷贝粘贴）·
 K8s provider 的 `wait_ready/rotate_credentials/supports_credential_rotation` 真实集群路径 ·
 Docker `--gpus` 设备透传分支 · S3 `ArtifactStore` 真实后端。
 

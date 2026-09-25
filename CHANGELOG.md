@@ -61,6 +61,12 @@
   隔离、账本类全断）且两份 rc=1；改后同一并发对照两份 rc=0、零 FAILED。`make clean`
   随之收 `test-*.db`。
 
+### 测试基建（续）
+- 抽取 4 份重复的注册/鉴权夹具到 `tests/http_auth.py`。先做逐字比对再动手：请求体、
+  端点、`assert 201` 四处完全相同，`_auth` 一字不差，只有"返回 token / token+id /
+  元组"这层投影各随用例需要 —— 所以共享的是会漂移的契约部分，投影留在原地。
+  抽取后用例数与结果不变。
+
 ### 供应链
 - 提交 universal `uv.lock`（多平台 marker + sha256），CI 跑 `make verify-lock`。
 - `uv.lock` 里本项目自身的版本也纳入版本一致性用例：只 bump `pyproject.toml` 而忘了

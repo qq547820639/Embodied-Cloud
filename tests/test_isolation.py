@@ -8,20 +8,13 @@ import time
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.http_auth import auth_headers as _auth
+from tests.http_auth import register_body
 
 
 def _register(client: TestClient, email: str, username: str) -> tuple[str, str]:
-    resp = client.post(
-        "/api/auth/register",
-        json={"email": email, "username": username, "password": "password123"},
-    )
-    assert resp.status_code == 201, resp.text
-    body = resp.json()
+    body = register_body(client, email, username)
     return body["token"], body["user"]["id"]
-
-
-def _auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
 
 
 def _create_running_workspace(client: TestClient, headers: dict, template_id: str = "cartpole") -> str:
