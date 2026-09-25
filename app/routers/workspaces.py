@@ -113,8 +113,12 @@ def stop_workspace(workspace_id: str, db: DB, user: CurrentUser):
     处理，任务持久化：控制面重启后 cleanup 不丢失）。"""
     workspace = _get_owned(db, workspace_id, user)
     op = worker.enqueue(workspace.id, OperationType.STOP)
-    if op is not None:
-        worker.tick_once()  # fast-path：立即执行（operation 已持久化）
+    if op is None:
+        # 同一 workspace 已有 active operation（部分唯一索引挡住了 STOP）→ 什么都没排队。
+        # 静默返回 200 会让调用方以为"已停止"，而 runtime 仍在跑、GPU 仍被占用、
+        # 计费仍在累加，所以如实报 409，由调用方稍后重试。
+        raise HTTPException(409, f"工作区 {workspace_id[:8]} 有生命周期操作正在执行，请稍后重试停止")
+    worker.tick_once()  # fast-path：立即执行（operation 已持久化）
     db.refresh(workspace)
     return workspace
 
@@ -169,8 +173,12 @@ def delete_workspace(workspace_id: str, db: DB, user: CurrentUser):
     （幂等 tombstone；重启不丢清理）。"""
     workspace = _get_owned(db, workspace_id, user)
     op = worker.enqueue(workspace.id, OperationType.DESTROY)
-    if op is not None:
-        worker.tick_once()  # fast-path：立即执行（operation 已持久化）
+    if op is None:
+        # enqueue 被"同一 workspace 已有 active operation"挡下时，DESTROY 根本没排队；
+        # 返回 204 等于告诉调用方"已删除"，而 runtime 仍在跑、GPU 仍被占用、
+        # 计费仍在累加（实测：provisioning 期间删除 → 204 + 行仍是 running）。
+        raise HTTPException(409, f"工作区 {workspace_id[:8]} 有生命周期操作正在执行，请稍后重试删除")
+    worker.tick_once()  # fast-path：立即执行（operation 已持久化）
 
 
 # ---------------------------------------------------------------------------

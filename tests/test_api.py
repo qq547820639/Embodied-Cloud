@@ -188,3 +188,74 @@ def test_standalone_user_usage_balance_matches_ledger():
         # 与 /api/ledger 聚合结果一致
         entries = client.get("/api/ledger", headers=headers).json()
         assert sum(e["amount"] for e in entries) == 500
+
+
+def test_lifecycle_conflict_is_reported_instead_of_faking_success():
+    """有 active operation 时 stop/delete 必须 409，不能谎报"已完成"。
+
+    复现的真实缺陷（浏览器档实测抓到）：provisioning 未落定时点删除 →
+    enqueue 被 uq_ops_active_per_workspace 挡下（worker 日志
+    "skip enqueue destroy … active operation exists"），而端点仍返回 204：
+    前端显示"已删除"，runtime 继续跑、GPU 继续占用、计费继续累加。
+    """
+    import uuid
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from app.deps import SessionFactory
+    from app.models import OperationStatus, OperationType, WorkspaceOperation
+    from app.utils import utcnow
+
+    with TestClient(app) as client:
+        token = _register(client, "conflict-lifecycle@example.org", "conflict")
+        headers = _auth(token)
+        created = client.post(
+            "/api/workspaces",
+            json={"template_id": "cartpole", "auto_start": False},
+            headers=headers,
+        )
+        assert created.status_code in (200, 201), created.text
+        workspace_id = created.json()["id"]
+
+        # 造一个"别人正在执行、且当前不可 reclaim"的 active operation：
+        # RUNNING + 未过期 lease → _claim_next 两档都跳得过它，判据与后台 worker 无关
+        with SessionFactory() as db:
+            blocker = WorkspaceOperation(
+                id=str(uuid.uuid4()),
+                workspace_id=workspace_id,
+                operation_type=OperationType.PROVISION.value,
+                status=OperationStatus.RUNNING.value,
+                attempts=1,
+                lease_owner="other-worker",
+                fencing_token="other-token",  # noqa: S106  测试用假 token，非真实凭据
+                heartbeat_at=utcnow(),
+                lease_expires_at=utcnow() + timedelta(hours=1),
+            )
+            db.add(blocker)
+            db.commit()
+            blocker_id = blocker.id
+
+        stopped = client.post(f"/api/workspaces/{workspace_id}/stop", headers=headers)
+        assert stopped.status_code == 409, stopped.text
+        deleted = client.delete(f"/api/workspaces/{workspace_id}", headers=headers)
+        assert deleted.status_code == 409, deleted.text
+        # 未被谎报：仍在列表里，且没有产生 DESTROY/STOP operation 行
+        listed = [w["id"] for w in client.get("/api/workspaces", headers=headers).json()]
+        assert workspace_id in listed
+        with SessionFactory() as db:
+            ops = list(
+                db.scalars(
+                    select(WorkspaceOperation).where(WorkspaceOperation.workspace_id == workspace_id)
+                )
+            )
+            assert [o.operation_type for o in ops] == [OperationType.PROVISION.value]
+
+        # 反向对照（must-not-fire）：占用释放后，同一条 DELETE 必须正常成功
+        with SessionFactory() as db:
+            row = db.get(WorkspaceOperation, blocker_id)
+            row.status = OperationStatus.SUCCEEDED.value
+            row.lease_expires_at = utcnow() - timedelta(minutes=5)
+            db.commit()
+        assert client.delete(f"/api/workspaces/{workspace_id}", headers=headers).status_code == 204
+        assert workspace_id not in [w["id"] for w in client.get("/api/workspaces", headers=headers).json()]
