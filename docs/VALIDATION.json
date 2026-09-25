@@ -4,11 +4,11 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 370
+      "count": 382
     },
     "test_run": {
       "status": "PASS",
-      "passed": 369,
+      "passed": 381,
       "skipped": 1,
       "failed": 0
     },
@@ -23,6 +23,10 @@
     "integration_docker": {
       "status": "PASS",
       "note": "17/17 用例在真实后端上执行"
+    },
+    "integration_browser": {
+      "status": "PASS",
+      "note": "11/11 用例在真实后端上执行"
     },
     "lint": {
       "status": "PASS"

@@ -125,6 +125,10 @@ def _integration_gates() -> dict[str, dict]:
             "module": "tests.test_docker_provider_integration",
             "sentinel": _const_str("tests/test_docker_provider_integration.py", "GATE_SENTINEL"),
         },
+        "browser": {
+            "module": "tests.test_browser_console",
+            "sentinel": _const_str("tests/test_browser_console.py", "GATE_SENTINEL"),
+        },
     }
 
 

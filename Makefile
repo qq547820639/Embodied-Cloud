@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 UV ?= uv
 VERSION ?= 0.4.0
 
-.PHONY: install dev test test-pg test-docker lint typecheck build smoke clean check demo \
+.PHONY: install dev test test-pg test-docker test-browser lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
         release api-docs validate lock verify-lock sbom audit supply-chain
@@ -27,6 +27,10 @@ test-pg:
 # 已本地缓存的测试镜像（缺件时整档干净跳过并登记 PENDING 原因）。
 test-docker:
 	$(PYTHON) -m pytest -m docker_integration
+
+# 浏览器档：Playwright 驱动真 DOM（复用系统 Chrome，免下载浏览器二进制）。
+test-browser:
+	$(PYTHON) -m pytest -m browser_integration
 
 lint:
 	$(PYTHON) -m ruff check app tests

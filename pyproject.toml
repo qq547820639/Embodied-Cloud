@@ -27,6 +27,9 @@ dev = [
   # PostgreSQL 并发语义用例（tests/test_postgres_concurrency.py）需要驱动；
   # 与 [postgres] 生产 extra 同版本区间，binary 变体免编译。
   "psycopg[binary]>=3.1,<4",
+  # 浏览器档默认复用系统 Chrome（channel=chrome），不自动下载浏览器二进制；
+  # 无系统 Chrome 的环境用 `playwright install chromium` 兜底。
+  "playwright>=1.55,<2",
 ]
 # 生产 PostgreSQL 驱动（alembic 迁移 + 运行时连接）。dev/默认安装不含，
 # 生产镜像用 `pip install ".[postgres]"` 安装；见 deploy/kubernetes/control-plane-production.yaml。
@@ -47,6 +50,7 @@ markers = [
     "streaming_physical: requires Isaac Sim streaming environment",
     "pg_integration: requires Docker daemon + cached postgres image (real row locks)",
     "docker_integration: requires Docker daemon (real containers)",
+    "browser_integration: requires Playwright + Chrome/Chromium (real DOM)",
 ]
 
 [build-system]
