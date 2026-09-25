@@ -642,11 +642,14 @@ class EdgeAgent(Base):
     device_info: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     # §6（P0）租户所有权：agent 归属用户/组织；匿名无主注册禁止（API 层强制认证）
+    # 约束显式命名：`c7c6f510d21f` 只加了列没加外键，靠名字才能被迁移与对账尺子认出来
     owner_user_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=True, index=True
+        String(36), ForeignKey("users.id", name="fk_edge_agents_owner_user_id"),
+        nullable=True, index=True,
     )
     organization_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("organizations.id"), nullable=True, index=True
+        String(36), ForeignKey("organizations.id", name="fk_edge_agents_organization_id"),
+        nullable=True, index=True,
     )
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

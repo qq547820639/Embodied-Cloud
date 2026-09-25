@@ -5,6 +5,12 @@ import sqlite3
 import subprocess
 import sys
 
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
+from sqlalchemy import create_engine
+
+from app.models import Base
+
 # 关键表清单：迁移真正「落地」的证据（空迁移/纯 no-op 迁移同样 returncode=0，
 # 但不会建出这些表；此断言防「迁移不建 schema」的伪通过）。
 EXPECTED_TABLES = {
@@ -20,6 +26,8 @@ EXPECTED_TABLES = {
     "gpus",
     "gpu_allocations",
     "credit_ledger",
+    "billing_accounts",
+    "credit_holds",
     "streaming_sessions",
     "courses",
     "course_members",
@@ -72,3 +80,28 @@ def test_migration_upgrade_downgrade_cycle(tmp_path):
 
     # 重复 up 是幂等的
     _run_alembic(["upgrade", "head"], env)
+
+
+def _metadata_diff(db_path) -> list:
+    """迁移产出的库 vs app/models.py 声明：返回 alembic 认为「还差什么」。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as conn:
+            return list(compare_metadata(MigrationContext.configure(conn), Base.metadata))
+    finally:
+        engine.dispose()
+
+
+def test_migrated_schema_declares_nothing_the_models_do_not(tmp_path):
+    """模型里声明的每一个对象（含外键）都必须真的被迁移建出来。
+
+    `c7c6f510d21f` 给 edge_agents 加了 owner_user_id/organization_id 两列并带上
+    ForeignKey，但迁移从未创建这两个约束 —— 于是 SQLite 与 PostgreSQL 的生产
+    schema 里都没有它：租户归属只是一个"看起来有约束"的应用层约定。此前的
+    迁移门只核表名，看不见这一类漂移。
+    """
+    db_path = tmp_path / "drift.db"
+    _run_alembic(["upgrade", "head"], {"EMBODIEDCLOUD_DATABASE_URL": f"sqlite:///{db_path}"})
+
+    diff = _metadata_diff(db_path)
+    assert not diff, f"迁移 schema 与模型声明漂移：{[repr(d)[:160] for d in diff]}"

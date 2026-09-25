@@ -211,6 +211,12 @@ def test_alembic_chain_schema_landing_on_postgres(pg_url):
                 "template_versions_template_id_fkey",
                 "course_members_course_id_fkey",
                 "users_organization_id_fkey",
+                # §6 租户归属：这两条曾长期只存在于模型声明里（3f0c9a51b7e2 才补进迁移）
+                "fk_edge_agents_owner_user_id",
+                "fk_edge_agents_organization_id",
+                # §17/§18 新表
+                "fk_credit_holds_account",
+                "fk_billing_accounts_owner_user",
             } <= fk_names, f"PG 缺关键外键：{sorted(fk_names)}"
     finally:
         engine.dispose()
