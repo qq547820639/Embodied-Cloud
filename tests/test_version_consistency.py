@@ -46,6 +46,27 @@ def test_openapi_version_matches():
     assert spec["info"]["version"] == _pyproject_version()
 
 
+def _locked_project_version(lock_text: str) -> str | None:
+    """从 uv.lock 里取本项目自己的版本（不能按行找：每个包都有 version 行）。"""
+    for block in lock_text.split("[[package]]"):
+        if 'name = "embodiedcloud"' not in block:
+            continue
+        for line in block.splitlines():
+            if line.startswith("version = "):
+                return line.split("=", 1)[1].strip().strip('"')
+    return None
+
+
+def test_lockfile_version_matches_pyproject():
+    """uv.lock 也是版本面的一部分。
+
+    只 bump pyproject 不重跑 `uv lock` 时，`uv lock --check` 会在 release 第 4.1 步
+    才红 —— 那已经是发布链后半段；这条把它提前到 `make test`。
+    """
+    version = _pyproject_version()
+    assert _locked_project_version(Path("uv.lock").read_text()) == version
+
+
 def test_pod_labels_hit_network_policy_selector():
     """§14：provider 创建的 Pod labels 必须命中 NetworkPolicy selector
     （embodiedcloud.workspace: true），禁止假安全配置。"""

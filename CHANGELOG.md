@@ -53,6 +53,8 @@
 
 ### 供应链
 - 提交 universal `uv.lock`（多平台 marker + sha256），CI 跑 `make verify-lock`。
+- `uv.lock` 里本项目自身的版本也纳入版本一致性用例：只 bump `pyproject.toml` 而忘了
+  `uv lock` 时，过去要等到 release 第 4.1 步才红，现在 `make test` 就红（本轮真实踩过）。
 - SBOM（`uv export --format cyclonedx1.5`）+ `uv audit --locked` 进 release 步骤与
   `dist/checksums.txt`；CI 要求"需要 docker 的集成档必须真 PASS，否则红"。
 

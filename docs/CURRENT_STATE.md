@@ -7,7 +7,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（408 passed + 1 skipped[k8s_integration]，collected 409）** |
+| Test | **PASS（409 passed + 1 skipped[k8s_integration]，collected 410）** |
 | Lint / Type | PASS（ruff 0 / mypy 40 files） |
 | Migration | PASS（clean DB empty→head **13 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS 17/17**（自建一次性容器，真行锁语义） |
@@ -41,7 +41,7 @@
 ## 3. 分项状态
 
 ### VERIFIED PASS
-408 tests 全绿（含 PG 真并发 17、真容器 17、真浏览器 11、SDK 线格式 6、预授权 14）；
+409 tests 全绿（含 PG 真并发 17、真容器 17、真浏览器 11、SDK 线格式 6、预授权 14）；
 lint/type/migration/build/smoke/release/供应链全链路。
 
 ### PHYSICAL_VALIDATION_PENDING / NOT_RUN（不假装 PASS）
