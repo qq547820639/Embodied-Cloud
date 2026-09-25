@@ -191,7 +191,7 @@ def test_standalone_user_usage_balance_matches_ledger():
 
 
 def test_lifecycle_conflict_is_reported_instead_of_faking_success():
-    """有 active operation 时 stop/delete 必须 409，不能谎报"已完成"。
+    """有 active operation 时 start/stop/delete 必须 409，不能谎报"已受理/已完成"。
 
     复现的真实缺陷（浏览器档实测抓到）：provisioning 未落定时点删除 →
     enqueue 被 uq_ops_active_per_workspace 挡下（worker 日志
@@ -235,6 +235,11 @@ def test_lifecycle_conflict_is_reported_instead_of_faking_success():
             db.add(blocker)
             db.commit()
             blocker_id = blocker.id
+
+        started = client.post(f"/api/workspaces/{workspace_id}/start", headers=headers)
+        assert started.status_code == 409, started.text
+        # 冲突期不得先把状态翻成 QUEUED：那等于"前端显示排队中、队列里什么都没有"
+        assert client.get(f"/api/workspaces/{workspace_id}", headers=headers).json()["status"] != "queued"
 
         stopped = client.post(f"/api/workspaces/{workspace_id}/stop", headers=headers)
         assert stopped.status_code == 409, stopped.text

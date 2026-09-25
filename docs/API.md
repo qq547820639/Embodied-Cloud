@@ -36,6 +36,16 @@
 | POST | `/api/workspaces/{id}/demo-checkpoint` | **仅 mock 演示模式**：生成模拟 checkpoint 供 Sim2Real 流程端到端演示；真实 provider 返回 400 |
 | GET | `/api/workspaces/admin/all` | admin：含 tombstone 的全量审计 |
 
+**生命周期冲突 → 409**：同一 workspace 的生命周期操作串行（部分唯一索引
+`uq_ops_active_per_workspace`）。当已有 active operation 在跑时，`start` / `stop` /
+`DELETE` 返回 `409`（"有生命周期操作正在执行，请稍后重试"），**不会**返回 2xx ——
+入队失败即未被受理，调用方必须重试。见 `docs/adr/0006-lifecycle-conflict-is-409.md`。
+
+**402 的口径**：创建/启动门禁比较的是「可用额度 = 个人+组织账本余额 − 处于 pending
+的预授权合计」。一次启动会先圈住 `minimum_launch_minutes` 的额度（`credit_holds`，
+见 `docs/adr/0004-credit-hold-as-table.md`），结算时转正、失败时退回，因此并发启动
+不能把同一份余额花两次。
+
 ## 用量与账本（不可变 Ledger）
 
 | 方法 | 路径 | 说明 |

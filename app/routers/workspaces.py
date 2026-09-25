@@ -99,10 +99,14 @@ def start_workspace(workspace_id: str, db: DB, user: CurrentUser):
     workspace = _get_owned(db, workspace_id, user)
     if workspace.status in {WorkspaceStatus.PROVISIONING.value, WorkspaceStatus.RUNNING.value}:
         return workspace
+    # 先入队再改状态：入队被"同 workspace 已有 active operation"挡下时，
+    # 不能先把 workspace 翻成 QUEUED（那等于前端显示"排队中"而队列里什么都没有）
+    op = orchestrator.start_async(workspace.id)
+    if op is None:
+        raise HTTPException(409, f"工作区 {workspace_id[:8]} 有生命周期操作正在执行，请稍后重试启动")
     workspace.status = WorkspaceStatus.QUEUED.value
     workspace.error_message = None
     db.commit()
-    orchestrator.start_async(workspace.id)
     db.refresh(workspace)
     return workspace
 
