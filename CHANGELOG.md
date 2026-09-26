@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 513 / passed 512 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 521 / passed 520 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -148,6 +148,51 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 为什么仍然不实现自动停机：可信活动信号只有真机 GPU 利用率（容器 CPU 在 GPU 训练下会长时间
   接近 0，据此停机会误杀长跑任务并照秒扣费），被 NVIDIA 设备阻塞。区别在于——**延后现在是
   被机器看着的延后**。
+
+### 真集群档的一条前提竞态：一次真实红换来的修法
+- 上一支（5eca7bf）之后的全量复算红了一条：`test_wait_ready_is_false_while_the_gpu_request_cannot_be_scheduled`
+  在 `IndexError: list index out of range` 上崩——**崩在断言之后的取 Pod 那一行**
+  （`_pods(api, name)[0]`）。同一次运行里其余 6 条真集群用例全绿、集群正常建起来了，
+  所以这既不是 kind 引导失败（那是另一类环境红，见 OPERATIONS §7）也不是产品缺陷：
+  `wait_ready` 的负向对照只给 6s 判定窗口，而 Pod 和它的 `conditions` 是集群控制器写的，
+  单档复跑要 254s（kind 建集群就占掉 4 分钟）——宿主忙时"Pod 还没被建出来"完全正常。
+- 修法不是把超时调大：判据行（`wait_ready is False`）留在最前，**佐证**两行改走
+  `tests/k8s_server.py` 新增的 `poll_until` / `await_pod` / `await_condition_reason`，
+  到点拿不到前提就抛 `AssertionError("前提未达成：…最后一次读数 …")`。
+  区别在于报告说的必须是发生过的事：崩溃是"我不知道它在说什么"，
+  "前提未达成"是"这条用例没资格给产品下结论"。
+- 两个小工具本身离线可测（喂一个假的 list 函数即可），常驻 2 例：晚出现的 Pod 要真的轮询到
+  第 3 次才返回、永不出现必须以"前提未达成"红、判词侧同理。全套 519 → 521。
+
+### 调度：把 `allocate()` 的排序策略量成表，再钉成判据
+- `order_by(Gpu.memory_total.asc())` 就是分配策略本身（best-fit），但写在 SQL 里的排序
+  没人知道它值多少：把它改成 `desc()` 全套用例照绿。本轮把排序抽成
+  `GpuScheduler.candidate_order()`（默认逐字不变），新增 `tests/scheduler_policy_lab.py`
+  与 `make policy-bench`：**同一个 `allocate()`、同一份工作负载，只换排序**。
+- 实测台的第一版是废的，如实记下：舰队 192 GiB、负载合计 336 GiB，四种策略一律
+  "接 8 拒 8、剩余 0"——那份读数只量出"池子不够"，分不出任何策略差别。
+  改成**负载合计恰好等于池子容量**（每档各两张 + 两个 48 GiB 排在最后）后差异才显形；
+  同时把卡片的入库顺序打乱，否则"按入库顺序"会因为 id 恰好与容量同序而与 best-fit 打平，
+  那是建表顺序造出来的假平局。
+- 本轮读数（`make policy-bench`）：best_fit 8/8、48 GiB 接 2 张、浪费率 1.00；
+  arrival 6/8、pack_host 6/8（各拒两个 48）；worst_fit 4/8、浪费率 3.00。
+  同一份硬件上排序改坏就少接 4 个工作区（吞吐 -50%）。
+  `pack_host` 这一维今天没有独立后果：一个 workspace 至多绑一张卡（`uq_gpus_workspace`），
+  它落后只是顺手浪费了小卡——多卡协同放置还不在这条路径上，这点如实写明而不是拿来邀功。
+- 判据（`tests/test_scheduler_policy.py` 4 例）不比对字面量而比对表达式，
+  并且**不经过实测台的认档函数**：变异读数 POL1（现产改 `desc()`）红 2 条、
+  POL2（换成 pack_host）红、POL3（实验室漏复原生产排序）红 2 条、
+  POL4（让排序根本不生效＝实测台失去区分力）红 2 条。
+  另外两条如实记：POL5（只让认档函数谎报 best_fit）今天不改判决、不红；
+  但配上 POL1 就会溜过去，所以直比那条断言是为此而留的——POL6（谎报 + 改向）红。
+- 登记本身的两个坑也被钉住了：本轮两次把新行"锚在上一格那一行后面"，结果一条判据行
+  落到 G0.30 之前、一条交付行落到 N-12 之前——**每行内容都对，只有顺序看得见**。
+  新增 release 门禁 `docs_row_order`（`scripts/validate_release.py::row_order_offenders`，
+  纯函数）：CURRENT_STATE 的 `N-x` 与 ACCEPTANCE_GATES 的 `G0.x` 必须按号递增出现且无重号，
+  解析不到两行以上即报"判据会恒真"。常驻对照两例（合规表不开火；倒序／重号／空表三种
+  都必须点名）。**它上线后几分钟就抓到我自己犯的同一种错**：下一节要加的 N-15 行锚在
+  `| N-14 |` 前面插了进去，一次 `doc_row_order_discrepancies()` 直接报
+  `编号非单调递增，相邻逆序对 [(15, 14)]`（读数原样留在本轮终端记录里）。
 
 ### 镜像 digest：从"建模了但从没人用"到写入入口 + 消费点
 - 上一支把**外部基础镜像**钉住了，这一支补的是**我们自己产物**那一半。普查读数：

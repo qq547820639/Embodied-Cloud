@@ -228,3 +228,27 @@ def test_pod_labels_hit_network_policy_selector():
     # NetworkPolicy selector 使用同一 label 值
     np_text = Path("deploy/kubernetes/workspace-network-policy.yaml").read_text()
     assert re.search(r'embodiedcloud\.workspace:\s*"true"', np_text)
+
+
+def test_registry_rows_are_numbered_in_order() -> None:
+    """带编号的登记表（本轮交付 N-x、门禁 G0.x）必须按号递增出现且无重号。
+
+    动机不是洁癖：本轮真实踩到两次"锚在上一格那一行后面"——新行内容完全正确，
+    却落在 N-12 之前 / G0.30 之前，只有顺序看得见。
+    """
+    validator = _load_validator()
+    assert len(validator.ORDERED_ROWS) == 2, "被盯的登记表少了一张，判据面在缩小"
+    for rel, _pat in validator.ORDERED_ROWS:
+        assert Path(rel).read_text(encoding="utf-8").strip(), f"{rel} 读出来是空的"
+    assert validator.doc_row_order_discrepancies() == []
+
+
+def test_row_order_criterion_can_fire() -> None:
+    """开火对照：倒序、重号、以及"一张表都没解析到"三种都必须点名。"""
+    validator = _load_validator()
+    fn = validator.row_order_offenders
+    pat = r"^\| N-(\d+) \|"
+    assert fn([("a.md", "| N-1 |\n| N-2 |\n| N-3 |\n", pat)]) == []
+    assert any("非单调" in s for s in fn([("a.md", "| N-1 |\n| N-3 |\n| N-2 |\n", pat)]))
+    assert any("重复" in s for s in fn([("a.md", "| N-1 |\n| N-1 |\n", pat)]))
+    assert any("恒真" in s for s in fn([("a.md", "没有编号行\n", pat)]))

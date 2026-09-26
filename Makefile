@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 UV ?= uv
 VERSION ?= 0.7.0
 
-.PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane \
+.PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane policy-bench \
         lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
@@ -42,6 +42,11 @@ test-s3:
 # 验 wait_ready 与凭据轮换。GPU 声明原样保留，只有资源请求按测试集群规格下调。
 test-k8s-control-plane:
 	$(PYTHON) -m pytest -m k8s_control_plane
+
+# 分配策略实测台：同一个分配器、同一份工作负载，只换候选排序，把 best-fit 值多少张卡量出来。
+# 常驻判据（tests/test_scheduler_policy.py）复用这里的 run_policy，读数与 CI 同源。
+policy-bench:
+	$(PYTHON) -m tests.scheduler_policy_lab
 
 lint:
 	$(PYTHON) -m ruff check app tests edge_agent

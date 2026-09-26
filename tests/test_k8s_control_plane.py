@@ -30,7 +30,13 @@ from app.config import Settings
 from app.models import Template, Workspace
 from app.services.providers.base import ResourceReservation
 from app.services.providers.k8s import KubernetesProvider
-from tests.k8s_server import GATE_SENTINEL, KindCluster, gate_reason
+from tests.k8s_server import (
+    GATE_SENTINEL,
+    KindCluster,
+    await_condition_reason,
+    await_pod,
+    gate_reason,
+)
 
 pytestmark = pytest.mark.k8s_control_plane
 
@@ -220,9 +226,15 @@ def test_wait_ready_is_false_while_the_gpu_request_cannot_be_scheduled(provider,
     workspace, template, _result = _provisioned(provider, cluster, node_name, tmp_path)
     try:
         assert provider.wait_ready(workspace, template, timeout_seconds=6) is False
-        pod = _pods(api, workspace.container_name)[0]
-        reasons = [c.reason for c in (pod.status.conditions or []) if c.status == "False"]
-        assert "Unschedulable" in reasons, reasons  # 集群自己的判词，不是我们编的
+        # 判据在上面那一行已经落定；这里两行是"集群确实自己拒了"的佐证。
+        # 佐证必须自己等：provider 只给了 6s 判定窗口，而 Pod 与它的 conditions 是
+        # 集群控制器写的，宿主忙时会晚于窗口结束——早先用 `_pods(...)[0]` 就这样
+        # 在 IndexError 上崩过一次（前提未达成被报成用例红）。
+        # 到点拿不到判词就抛"前提未达成"，不会把夹具竞态报成产品结论
+        await_condition_reason(
+            lambda: _pods(api, workspace.container_name),
+            "Unschedulable",  # 集群自己的判词，不是我们编的
+        )
     finally:
         provider.destroy(workspace)
 
@@ -239,7 +251,7 @@ def test_wait_ready_true_on_real_pod_ready_and_non_empty_endpoints(provider, clu
             name=workspace.container_name, namespace=NAMESPACE
         ).status
         assert (status.available_replicas or 0) >= 1
-        pod = _pods(api, workspace.container_name)[0]
+        pod = await_pod(lambda: _pods(api, workspace.container_name))
         assert pod.status.phase == "Running"
         assert {c.type: c.status for c in pod.status.conditions}["Ready"] == "True"
         endpoints = api.read_namespaced_endpoints(name=workspace.container_name, namespace=NAMESPACE)

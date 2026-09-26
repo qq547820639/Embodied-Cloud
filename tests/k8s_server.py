@@ -190,3 +190,51 @@ def _cleanup_leaked() -> None:
 
 
 atexit.register(_cleanup_leaked)
+
+
+def poll_until(read, settled, *, what: str, timeout_seconds: float = 90.0, interval: float = 0.5):
+    """等集群把某个事实做出来；到点仍不成立就报"前提未达成"，而不是抛 IndexError。
+
+    为什么需要它：`wait_ready` 的判定窗口（负向对照只给 6s）与
+    "Deployment→ReplicaSet→Pod 被控制器建出来 / 条件被写满"是两件事。宿主繁忙时
+    后者可以晚于前者，于是"直接取 pods[0]"会崩在 IndexError 上——把一条与产品无关的
+    夹具竞态报成用例红。本轮真实踩过一次（517 passed / 1 failed，红的正是负向对照里
+    取 Pod 那一行）。
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last = None
+    while True:
+        last = read()
+        done = settled(last)
+        if done is not None:
+            return done
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"前提未达成：{timeout_seconds}s 内 {what}；最后一次读数 {last!r}")
+        time.sleep(interval)
+
+
+def await_pod(list_pods, *, what: str = "Pod", timeout_seconds: float = 90.0):
+    """等到至少有一个 Pod 出现，返回第一个。"""
+    return poll_until(
+        list_pods,
+        lambda pods: pods[0] if pods else None,
+        what=f"{what} 尚未被集群建出来",
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def await_condition_reason(list_pods, reason: str, *, status: str = "False", timeout_seconds: float = 90.0):
+    """等到某个 Pod 的 conditions 里出现指定判词（如调度器的 Unschedulable），返回该原因列表。"""
+
+    def read():
+        pods = list_pods()
+        if not pods:
+            return []
+        return [c.reason for c in (pods[0].status.conditions or []) if c.status == status]
+
+    return poll_until(
+        read,
+        lambda reasons: reasons if reason in reasons else None,
+        what=f"没有任何 Pod 给出 {reason} 判词",
+        timeout_seconds=timeout_seconds,
+    )

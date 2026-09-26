@@ -214,3 +214,55 @@ def test_rotate_credentials_without_password_is_refused():
     ws.container_name = "ec-111111112222"
     assert provider.rotate_credentials(ws, {}) is False
     assert not [c for c in fake.calls if c[0] == "patch_deployment"], "无口令却写了 Deployment"
+
+
+# ---------------------------------------------------------------------------
+# 真集群档的两个"等前提"小工具（离线可测：只喂一个假的 list 函数）
+# ---------------------------------------------------------------------------
+
+
+def test_await_pod_returns_the_first_pod_once_it_exists() -> None:
+    from types import SimpleNamespace
+
+    from tests.k8s_server import await_condition_reason, await_pod
+
+    calls = {"n": 0}
+
+    def late_pods():
+        calls["n"] += 1
+        return [] if calls["n"] < 3 else [SimpleNamespace(status=SimpleNamespace(conditions=[]))]
+
+    pod = await_pod(late_pods, timeout_seconds=5)
+    assert pod is not None and calls["n"] == 3, f"没有轮询到第三次：{calls}"
+
+    def never():
+        return []
+
+    import pytest
+
+    with pytest.raises(AssertionError, match="前提未达成"):
+        await_pod(never, timeout_seconds=0.2)
+    # 判词侧同理：条件里出现了才返回，否则带着最后一次读数报错
+    with pytest.raises(AssertionError, match="前提未达成"):
+        await_condition_reason(never, "Unschedulable", timeout_seconds=0.2)
+
+
+def test_await_condition_reason_waits_for_the_cluster_verdict() -> None:
+    from types import SimpleNamespace
+
+    import pytest
+
+    from tests.k8s_server import await_condition_reason
+
+    def pods(*, ready: bool = False):
+        cond = SimpleNamespace(reason="Unschedulable", status="False") if ready else None
+        pod = SimpleNamespace(
+            status=SimpleNamespace(conditions=[] if cond is None else [cond])
+        )
+        return [pod]
+
+    assert await_condition_reason(lambda: pods(ready=True), "Unschedulable", timeout_seconds=1) == [
+        "Unschedulable"
+    ]
+    with pytest.raises(AssertionError, match="Unschedulable 判词"):
+        await_condition_reason(lambda: pods(ready=False), "Unschedulable", timeout_seconds=0.2)

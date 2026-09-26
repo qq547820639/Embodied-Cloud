@@ -37,6 +37,16 @@ class GpuInfo:
 _UNIQUE_VIOLATION = "23505"
 
 
+def candidate_order() -> list:
+    """候选排序就是分配策略本身：默认 best-fit —— 先用刚好够用的卡，把大卡留给大任务。
+
+    单列成一个函数（而不是把 ORDER BY 埋在 SQL 里）是为了能被实测对照：
+    `tests/test_scheduler_policy.py` 逐条换掉它、跑同一份工作负载与同一个分配器，
+    量出这个选择到底值多少张卡。埋在语句里的策略没人知道它比替代品好在哪。
+    """
+    return [Gpu.memory_total.asc()]
+
+
 def _is_unique_contention(exc: IntegrityError) -> bool:
     """这次 IntegrityError 是"卡被别人抢了"（唯一冲突），还是我们自己写坏了数据？
 
@@ -135,7 +145,7 @@ class GpuScheduler:
                     Gpu.status == GpuStatus.AVAILABLE.value,
                     Gpu.memory_total >= required_mib,
                 )
-                .order_by(Gpu.memory_total.asc())
+                .order_by(*candidate_order())
                 .with_for_update(skip_locked=True)
                 .limit(1)
             )

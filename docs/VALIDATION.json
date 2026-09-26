@@ -4,11 +4,11 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 513
+      "count": 521
     },
     "test_run": {
       "status": "PASS",
-      "passed": 512,
+      "passed": 520,
       "skipped": 1,
       "failed": 0,
       "failed_names": []
@@ -64,6 +64,10 @@
     "docs_test_counts": {
       "status": "PASS",
       "note": "CHANGELOG/CURRENT_STATE 计数串与本报告一致"
+    },
+    "docs_row_order": {
+      "status": "PASS",
+      "note": "带编号的登记表行均按号递增且无重号"
     }
   }
 }

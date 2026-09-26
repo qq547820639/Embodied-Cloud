@@ -249,6 +249,11 @@ def main() -> int:
         "status": "FAIL" if docs_offenders else "PASS",
         "note": "; ".join(docs_offenders) if docs_offenders else "CHANGELOG/CURRENT_STATE 计数串与本报告一致",
     }
+    row_offenders = doc_row_order_discrepancies()
+    checks["docs_row_order"] = {
+        "status": "FAIL" if row_offenders else "PASS",
+        "note": "; ".join(row_offenders) if row_offenders else "带编号的登记表行均按号递增且无重号",
+    }
 
     # 6) 汇总
     software_failed = any(
@@ -290,6 +295,40 @@ DOC_COUNT_RE = re.compile(
 
 def doc_count_tokens(text: str) -> list[tuple[int, int, int, int]]:
     return [tuple(int(x) for x in match) for match in DOC_COUNT_RE.findall(text)]
+
+
+# 带编号的登记表行：编号必须**按出现顺序单调递增且唯一**。
+# 插入新行时若锚在"上一轮那一行"或表中间，新行会落进倒序位置，而每行内容本身
+# 完全正确——只有顺序看得见。本轮真实踩到两次（一条判据行插进了 G0.30 之前、
+# 一条交付行插进了 N-12 之前）。
+ORDERED_ROWS: tuple[tuple[str, str], ...] = (
+    ("docs/CURRENT_STATE.md", r"^\| N-(\d+) \|"),
+    ("docs/ACCEPTANCE_GATES.md", r"^\| G0\.(\d+) "),
+)
+
+
+def row_order_offenders(named_texts: list[tuple[str, str, str]]) -> list[str]:
+    """(标签, 正文, 行首正则) → 倒序/重号/解析不到行的读数。纯函数，可喂夹具。"""
+    out: list[str] = []
+    for label, text, pattern in named_texts:
+        nums = [int(m.group(1)) for m in re.finditer(pattern, text, re.MULTILINE)]
+        if len(nums) < 2:
+            out.append(f"{label}: 只解析到 {len(nums)} 行编号（判据会恒真）")
+            continue
+        bad = [(nums[i - 1], nums[i]) for i in range(1, len(nums)) if nums[i] <= nums[i - 1]]
+        if bad:
+            out.append(f"{label}: 编号非单调递增，相邻逆序对 {bad}")
+        dup = sorted({n for n in nums if nums.count(n) > 1})
+        if dup:
+            out.append(f"{label}: 编号重复 {dup}")
+    return out
+
+
+def doc_row_order_discrepancies() -> list[str]:
+    named = [
+        (rel, (ROOT / rel).read_text(encoding="utf-8"), pat) for rel, pat in ORDERED_ROWS
+    ]
+    return row_order_offenders(named)
 
 
 def changelog_section(text: str, version: str) -> str:

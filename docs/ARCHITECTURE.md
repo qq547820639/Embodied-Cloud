@@ -62,6 +62,24 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
 - 分配顺序：AVAILABLE（显存满足模板需求，含 16MiB 厂商预留容差）→ ALLOCATED；
   释放：stop/destroy → AVAILABLE。
 - UNHEALTHY 不参与调度；DRAINING 不再分配新 workspace。
+- **候选排序 = 分配策略，且它是量过、被钉住的**：默认 best-fit（`memory_total asc`，
+  先用刚好够用的卡，把大卡留给大任务）。`make policy-bench` 用同一个 `allocate()`、
+  同一份合成工作负载（8/16/24/48 GiB 各一张 × 两台机，负载合计恰好等于池子容量 192 GiB）
+  换四种排序实测，本轮读数：
+
+  | 策略 | 接得下 | 拒 | 48 GiB 接得下 | 浪费率(占用/需求) |
+  |---|---|---|---|---|
+  | best_fit（现产） | 8/8 | 0 | 2 | 1.00 |
+  | arrival（按入库序） | 6/8 | 2 | 0 | 1.75 |
+  | pack_host（先填满一台机） | 6/8 | 2 | 0 | 1.75 |
+  | worst_fit（先用最大的卡） | 4/8 | 4 | 0 | 3.00 |
+
+  同一份硬件上，排序换成 worst-fit 就少接 4 个工作区（吞吐 -50%），且两张 48 GiB 的卡
+  全部被小任务吃掉。`tests/test_scheduler_policy.py` 把这张表钉成常驻判据：
+  按表达式直比生产排序（不经过实测台的认档函数），并要求其余三档**都接不满**——
+  改向即红，实测台失去区分力也红。多卡协同放置不在本分配器的讨论范围内：
+  一个 workspace 至多绑一张卡（`uq_gpus_workspace`），所以"按 host 打包"这一维今天
+  没有可观测的后果（表里 pack_host 只因为它顺手浪费了小卡才落后）。
 - 孤儿回收 `recover_stuck_gpu_allocations`：只释放「无 active operation 且非
   PROVISIONING/RUNNING/STOPPING」的 workspace 的绑定（防 PROVISIONING 竞态一卡双跑）。
 - 第一阶段一 Workspace 一整块 GPU，不做 MIG。
