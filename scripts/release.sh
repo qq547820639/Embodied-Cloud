@@ -14,6 +14,7 @@ set -euo pipefail
 #   1. make lint && make typecheck && make test（任一失败中止并输出原因）
 #   2. make build 生成 dist/*.whl 与 dist/*.tar.gz
 #   2.4 make verify-lock / sbom / audit（uv.lock 一致性 + CycloneDX SBOM + 漏洞审计）
+#   2.44 make validate（重生成 docs/VALIDATION.json，分级矩阵的唯一事实源）
 #   3. 生成 dist/checksums.txt（对 wheel / sdist / sbom.cdx.json 计算 sha256sum）
 #   4. 生成 dist/VALIDATION_STATUS.md（分级验证矩阵 + BLOCKED_EXTERNAL_DEPENDENCY 明细）
 #   5. 输出 release 产物清单，并提示 git tag（不自动打 tag、不 push）
@@ -90,13 +91,11 @@ make sbom
 make audit
 
 # ---------- 2.44 分级验证矩阵的唯一事实源：docs/VALIDATION.json ----------
-step "4.3 docs/VALIDATION.json 新鲜度（缺失或版本不符 → make validate）"
-# VALIDATION_STATUS.md 里的集成档表**由这份产物生成**，不在脚本里手抄：手抄的行
-# 在档位增减后会悄悄失真（"17 例"式漂移本轮修掉过一次）。
-if [[ ! -f docs/VALIDATION.json ]] || ! grep -q "\"version\": \"${VERSION}\"" docs/VALIDATION.json; then
-  say "docs/VALIDATION.json 缺失或版本不是 ${VERSION} → 执行 make validate"
-  make validate
-fi
+step "4.3 make validate（重生成 docs/VALIDATION.json / .md）"
+# 无条件重跑，不按"版本一致就复用"跳过：本轮实测过——发布链跑完后又加了一条判据用例，
+# 版本号没变，于是"版本一致"的判断让发布链复用了比工作树少一条用例的旧报告，
+# 而这正是 CI 的 `make validate && git diff --exit-code` 会红的形状。
+make validate
 VALIDATION_ROWS="$("$PYTHON" - <<'PY'
 import json
 
@@ -214,10 +213,10 @@ ${ARTIFACTS}
 | 依赖 | 状态 | 影响 |
 |---|---|---|
 | Docker daemon | 本环境可用（colima） | 容器档集成测试可跑（make test-pg / docker 档） |
-| NVIDIA GPU + NVIDIA Container Toolkit | 本机为 Apple Silicon，无 CUDA | G1–G4 无法执行（非软件缺陷）；容器**参数层**已由 docker 档在真守护进程上验收（HostConfig.DeviceRequests 记账），设备可见性仍待真机 |
+| NVIDIA GPU + NVIDIA Container Toolkit | 本机为 Apple Silicon，无 CUDA | G1–G4 无法执行（非软件缺陷）；容器参数层已由 docker 档在真守护进程上验收（回读 HostConfig.DeviceRequests），设备可见性仍待真机 |
 | NGC（nvcr.io/nvidia/isaac-sim:6.0.1） | 需 NGC 凭据 + x86 GPU 主机 | G2–G4 无法执行；构建配方内的下载/克隆已钉死并机检 |
-| 云对象存储真实账号 | 本机无凭据 | S3 **协议语义**已由自起的真服务端（VersityGW）覆盖，并用 MinIO 交叉核对；缺的只是云厂商那份实现 |
-| Kubernetes 集群 + Device Plugin | 控制面已由 kind 自起真集群覆盖（`make test-k8s-control-plane`）；节点带 `nvidia.com/gpu` 容量仍需 Device Plugin | G0.17 / G1 K8s GPU 全流程保持 PENDING |
+| 云对象存储真实账号 | 本机无凭据 | S3 协议语义已由自起的真服务端（VersityGW）覆盖，并用 MinIO 交叉核对；缺的只是云厂商那份实现 |
+| Kubernetes 集群 + Device Plugin | 控制面已由 kind 自起真集群覆盖（make test-k8s-control-plane）；节点带 nvidia.com/gpu 容量仍需 Device Plugin | G0.17 / G1 K8s GPU 全流程保持 PENDING |
 | 真实机器人硬件 | 本环境无真机 | G5 Sim2Real 无法执行 |
 
 ## 待办（开发者人工执行）
@@ -226,6 +225,14 @@ ${ARTIFACTS}
 - [ ] 更新 docs/CURRENT_STATE.md、docs/ACCEPTANCE_GATES.md
 - [ ] 手工 git tag v${VERSION} 并 push（本脚本不自动打 tag、不 push）
 EOF
+# 反引号在这个未加引号的 heredoc 里会被 bash 当命令替换**执行掉**：实测有人写了
+# `make test-k8s-control-plane` 之后，发布脚本真的又跑了一遍那个档位并把 pytest 的
+# 收尾行（含 "7 passed, 451 deselected ... in 64.66s"）抄进了发布工件，而脚本本身
+# 一声不响。写完之后强制检查产物，不再靠人眼。
+if grep -q '`' dist/VALIDATION_STATUS.md || grep -qE 'deselected|warnings summary' dist/VALIDATION_STATUS.md; then
+  say "release FAILED: dist/VALIDATION_STATUS.md 含反引号或用例运行输出 ⇒ heredoc 里有片段被 bash 执行了" >&2
+  exit 1
+fi
 say "已生成 dist/VALIDATION_STATUS.md"
 
 # ---------- 5. 产物清单 + git tag 提示 ----------

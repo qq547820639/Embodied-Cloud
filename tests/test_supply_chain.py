@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 RUNTIME = Path(__file__).resolve().parents[1] / "runtime"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DOWNLOAD_RE = re.compile(r"\b(?:curl\b[^|;&]*?-o\b|wget\b)")
 SHA_CHECK_RE = re.compile(r"sha256sum\s+-c")
@@ -76,3 +77,31 @@ def test_every_branch_clone_is_pinned_to_a_commit() -> None:
             if CLONE_RE.search(body) and not HEAD_PIN_RE.search(body):
                 offenders.append(f"{path.name}:{block[0].strip()[:80]}")
     assert not offenders, "以下 clone --branch 未把 HEAD 与钉住的 commit 比对：" + " | ".join(offenders)
+
+
+# ---------------------------------------------------------------------------
+# 发布脚本的 heredoc：反引号会被 bash 当命令替换执行掉
+# ---------------------------------------------------------------------------
+
+UNQUOTED_HEREDOC_RE = re.compile(
+    r"<<(?P<delim>(?!')[A-Za-z_]\w*)\n(?P<body>.*?)\n(?P=delim)\n",
+    re.DOTALL,
+)
+
+
+def _unquoted_heredoc_bodies(text: str) -> list[str]:
+    return [m.group("body") for m in UNQUOTED_HEREDOC_RE.finditer(text)]
+
+
+def test_release_script_heredocs_carry_no_backticks() -> None:
+    """模板文本里一个反引号就能让发布脚本执行任意命令并把输出抄进工件。
+
+    本轮真实踩过：BLOCKED 表里写 `make test-k8s-control-plane`，release.sh 于是
+    **又跑了一遍那个档位**，并把 "7 passed, 451 deselected ... in 64.66s" 写进
+    dist/VALIDATION_STATUS.md；同一轮的 `nvidia.com/gpu` 则报
+    "No such file or directory" 后被替换成空字符串。脚本自身全程退出码 0。
+    """
+    bodies = _unquoted_heredoc_bodies((REPO_ROOT / "scripts" / "release.sh").read_text(encoding="utf-8"))
+    assert bodies, "没解析到未加引号的 heredoc（判据会恒真）"
+    offenders = [i for i, body in enumerate(bodies) if "`" in body]
+    assert not offenders, f"release.sh 第 {offenders} 个 heredoc 含反引号（会被 bash 执行）"

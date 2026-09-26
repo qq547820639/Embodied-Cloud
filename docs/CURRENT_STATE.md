@@ -7,7 +7,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 458 / 457 passed + 1 skipped[k8s_integration]，failed 0）** |
+| Test | **PASS（collected 462 / passed 461 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
 | Lint / Type | PASS（ruff 0 / mypy 40 files） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS 18/18**（自建一次性容器，真行锁语义） |
@@ -33,6 +33,7 @@
 | O-7 | 修 **SDK 在 import 期固化 `KUBECONFIG`** 导致无法在进程生命周期内指路：新增 `EMBODIEDCLOUD_K8S_KUBECONFIG` | 本机复现 `Invalid kube-config file`，改后 7/7 绿 |
 | O-8 | **镜像配方钉死 + 机检**：code-server 两架构 tarball `sha256sum -c`（上游该版不发校验文件，摘要来源与限制如实登记）、IsaacLab tag→commit `ffff603e…`、新常驻判据要求每个下载/克隆步骤都校验且作用域非空 | `tests/test_supply_chain.py` 3 例；改钉前对两处开火（读数见 CHANGELOG） |
 | O-9 | **CI 顺序修正**：测试镜像拉取与 kind 安装移到 `make validate` 之前，否则 VALIDATION 读数来自镜像尚未缓存的那一刻 | `.github/workflows/ci.yml` |
+| O-10 | **文档 ↔ 实测计数对账**：CHANGELOG 当前版本节与本文的计数串必须等于本次报告。值对账放在 `validate_release.py` 汇总之前；pytest 只判"恰好一处"的形状，因为 pytest 阶段读到的必然是上一次的报告（把值比较放那儿会造出不收敛的自引用，本轮真实踩过） | `tests/test_version_consistency.py` 3 例 + `docs_test_counts` 门禁（开火对照：喂错数字必须两处点名） |
 
 ## 3. v0.5.0 交付（上一轮）
 
@@ -61,7 +62,7 @@
 ## 4. 分项状态
 
 ### VERIFIED PASS
-457 tests 全绿（collected 458，1 skip = `k8s_integration` GPU 档）。
+461 用例全绿（唯一 skip 是 `k8s_integration` GPU 档）。
 其中真后端档：PG 真并发 18/18、真容器 20/20、真浏览器 11/11、
 **对象存储真后端 20/20**、**K8s 控制面真集群 7/7**、SDK 线格式 6、预授权 14。
 lint/type/migration/build/smoke/release/供应链全链路。

@@ -43,15 +43,20 @@ make migrate-up   # 并在全新库上验证 up/down
 ## 5. 发布流程（脚本）
 
 ```bash
-make release VERSION=0.2.0   # scripts/release.sh：校验 → build → checksum → 生成验证矩阵 → tag
+make release   # scripts/release.sh：校验 → build → 供应链 → 验证矩阵 → 产物清单（不自动打 tag）
 ```
 
-`scripts/release.sh` 执行：
-1. G0 Gate 校验（lint/type/test/build）
-2. 构建 wheel
-3. 生成 `dist/checksums.txt`
-4. 生成 `dist/VALIDATION_STATUS.md`（分级矩阵 + BLOCKED 明细）
-5. 可选 `git tag v<version>`
+`scripts/release.sh` 实际执行（按脚本内 `==========` 步骤名读，编号只是排版）：
+1. `make lint` / `make typecheck` / `make test`（任一失败即中止并输出原因）
+2. `make build` 生成 wheel 与 sdist
+3. `make verify-lock` / `make sbom` / `make audit`（uv.lock 一致性、CycloneDX SBOM、漏洞审计）
+4. `make validate` 重生成 `docs/VALIDATION.json` / `.md`（分级矩阵的唯一事实源；
+   无条件重跑 —— "版本一致就复用旧报告"会让工件比工作树少几条用例）
+5. 校验 sdist 清洁度（不得含 `__pycache__` / `*.pyc` / cache / `test-*.db` / `.env` / `.venv`）
+6. 生成 `dist/checksums.txt`（wheel / sdist / sbom 的 SHA-256）
+7. 生成 `dist/VALIDATION_STATUS.md`（集成档表由 `docs/VALIDATION.json` 逐行生成，
+   不手抄；写完强制检查产物里不残留反引号或用例运行输出）
+8. 打印产物清单并**提示**人工执行 `git tag v<version>` 与 push（脚本本身不打 tag、不 push）
 
 ## 6. 镜像策略
 

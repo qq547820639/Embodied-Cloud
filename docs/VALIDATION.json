@@ -1,14 +1,14 @@
 {
   "version": "0.6.0",
-  "overall": "PASS_WITH_PHYSICAL_PENDING",
+  "overall": "FAIL",
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 458
+      "count": 462
     },
     "test_run": {
       "status": "PASS",
-      "passed": 457,
+      "passed": 461,
       "skipped": 1,
       "failed": 0
     },
@@ -59,6 +59,10 @@
     "physical_robot": {
       "status": "NOT_RUN",
       "note": "需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行"
+    },
+    "docs_test_counts": {
+      "status": "FAIL",
+      "note": "CHANGELOG 当前版本节: 文档写 (460, 459, 1, 0)，实测 (462, 461, 1, 0); docs/CURRENT_STATE.md: 文档写 (460, 459, 1, 0)，实测 (462, 461, 1, 0)"
     }
   }
 }

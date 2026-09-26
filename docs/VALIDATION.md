@@ -2,12 +2,12 @@
 
 > 版本：0.6.0（自动生成，勿手改）
 
-## 总览：**PASS_WITH_PHYSICAL_PENDING**
+## 总览：**FAIL**
 
 | Gate | 状态 | 明细 |
 |---|---|---|
-| Test collected | PASS | 458 |
-| Test run | PASS | passed=457 skipped=1 failed=0 |
+| Test collected | PASS | 462 |
+| Test run | PASS | passed=461 skipped=1 failed=0 |
 | lint | PASS | |
 | typecheck | PASS | |
 | migration | PASS | |

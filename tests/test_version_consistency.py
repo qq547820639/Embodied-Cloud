@@ -15,6 +15,61 @@ def test_pyproject_is_version_source_of_truth():
     assert _pyproject_version() == "0.6.0"
 
 
+def _load_validator():
+    """按路径加载 scripts/validate_release.py：计数串的解析只有那一份实现。"""
+    import importlib.util
+
+    path = Path("scripts/validate_release.py").resolve()
+    spec = importlib.util.spec_from_file_location("validate_release", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_docs_carry_exactly_one_test_count_token() -> None:
+    """形状判据：CHANGELOG 当前版本节与 CURRENT_STATE 各写且**只写一次**计数串。
+
+    数值对账不在这里，而在 scripts/validate_release.py：pytest 阶段读到的
+    docs/VALIDATION.json 必然是**上一次**产物，把值比较放这儿会造出不收敛的自引用
+    ——本轮真实踩过：新加一条判据用例后，报告说 failed=1 而文档说 failed=0，
+    而那个 failed 正是本判据自己报的，连跑两次 validate 都不收敛。
+    """
+    validator = _load_validator()
+    version = _pyproject_version()
+    blocks = {
+        "CHANGELOG 当前版本节": validator.changelog_section(
+            Path("CHANGELOG.md").read_text(encoding="utf-8"), version
+        ),
+        "docs/CURRENT_STATE.md": Path("docs/CURRENT_STATE.md").read_text(encoding="utf-8"),
+    }
+    for name, block in blocks.items():
+        found = validator.doc_count_tokens(block)
+        assert found, f"{name} 里没有 'collected N / passed N / skipped N / failed N' 计数串"
+        assert len(found) == 1, f"{name} 出现 {len(found)} 处计数串，只允许 1 处（多处必有一处会过期）"
+
+
+def test_doc_count_reconciliation_can_fire() -> None:
+    """开火对照：数字不符时值对账必须逐处点名，而不是安静地返回空。"""
+    validator = _load_validator()
+    checks = {
+        "test_collected": {"count": 999999},
+        "test_run": {"passed": 888888, "skipped": 777777, "failed": 666666},
+    }
+    offenders = validator.docs_counts_discrepancies(_pyproject_version(), checks)
+    assert len(offenders) == 2, offenders
+    assert all("实测" in line for line in offenders), offenders
+
+
+def test_release_script_owns_the_value_reconciliation() -> None:
+    """判据不许在"搬家"中丢失：值对账确实接在 validate 汇总之前。"""
+    source = Path("scripts/validate_release.py").read_text(encoding="utf-8")
+    assert "docs_test_counts" in source, "docs 计数串 ↔ 实测的对账判据被删了"
+    assert source.index("docs_counts_discrepancies(") < source.index("software_failed = any("), (
+        "对账必须发生在汇总之前，否则它的 FAIL 进不了 overall"
+    )
+
+
 def test_app_init_version_matches_pyproject():
     import app
 

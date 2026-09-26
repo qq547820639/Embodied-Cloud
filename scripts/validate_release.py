@@ -8,6 +8,7 @@ GPU/K8s/Streaming/Robot 物理状态。CURRENT_STATE 引用本文件输出；CI 
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -197,7 +198,15 @@ def main() -> int:
             "note": "需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行",
         }
 
-    # 5) 汇总
+    # 5) 文档 ↔ 实测计数对账（必须在这里做：pytest 阶段看不到这份新报告）
+    version = _read_version()
+    docs_offenders = docs_counts_discrepancies(version, checks)
+    checks["docs_test_counts"] = {
+        "status": "FAIL" if docs_offenders else "PASS",
+        "note": "; ".join(docs_offenders) if docs_offenders else "CHANGELOG/CURRENT_STATE 计数串与本报告一致",
+    }
+
+    # 6) 汇总
     software_failed = any(
         c["status"] == "FAIL" for c in checks.values()
     )
@@ -206,7 +215,7 @@ def main() -> int:
     # `make validate && git diff --exit-code docs/VALIDATION.*`，任何每次运行
     # 都变化的内容（如生成时间）都会让门禁必然失败。生成时间不入报告。
     report = {
-        "version": _read_version(),
+        "version": version,
         "overall": overall,
         "checks": checks,
     }
@@ -225,6 +234,58 @@ def _read_version() -> str:
         if line.startswith("__version__"):
             return line.split('"')[1]
     return "unknown"
+
+
+# 文档引用实测计数时的唯一合法写法（四元组齐全、顺序固定；空白/换行放开，
+# 因为 markdown 正文换行是排版需要）。解析只有这一份实现：pytest 判据与下面的
+# 值对账共用，避免"两处各抄一份正则、其中一份悄悄过期"。
+DOC_COUNT_RE = re.compile(
+    r"collected\s+(\d+)\s*/\s*passed\s+(\d+)\s*/\s*skipped\s+(\d+)\s*/\s*failed\s+(\d+)"
+)
+
+
+def doc_count_tokens(text: str) -> list[tuple[int, int, int, int]]:
+    return [tuple(int(x) for x in match) for match in DOC_COUNT_RE.findall(text)]
+
+
+def changelog_section(text: str, version: str) -> str:
+    """CHANGELOG 里属于某个版本的那一节（到下一个 `## ` 为止）。"""
+    head = f"## {version}"
+    start = text.find(head)
+    if start < 0:
+        return ""
+    rest = text[start + len(head) :]
+    end = rest.find("\n## ")
+    return rest if end < 0 else rest[:end]
+
+
+def docs_counts_discrepancies(version: str, checks: dict) -> list[str]:
+    """CHANGELOG 当前版本节 / CURRENT_STATE 里的计数串必须等于本次实测。
+
+    值对账只能发生在这里（报告刚算出来），不能放进 pytest 用例：pytest 看到的是
+    上一次运行的报告，新加一条用例就会造出不收敛的自引用（本轮真实踩过）。
+    """
+    run = checks["test_run"]
+    expected = (
+        int(checks["test_collected"]["count"]),
+        int(run["passed"]),
+        int(run["skipped"]),
+        int(run["failed"]),
+    )
+    sources = {
+        "CHANGELOG 当前版本节": changelog_section(
+            (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), version
+        ),
+        "docs/CURRENT_STATE.md": (ROOT / "docs" / "CURRENT_STATE.md").read_text(encoding="utf-8"),
+    }
+    out: list[str] = []
+    for name, text in sources.items():
+        found = doc_count_tokens(text)
+        if len(found) != 1:
+            out.append(f"{name}: 计数串 {len(found)} 处（要求恰好 1 处；多处必有一处会过期）")
+        elif found[0] != expected:
+            out.append(f"{name}: 文档写 {found[0]}，实测 {expected}")
+    return out
 
 
 def _render_md(report: dict) -> str:

@@ -2,11 +2,14 @@
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 458 / **passed 457** /
-skipped 1（仅 `k8s_integration`，需 NVIDIA Device Plugin）/ failed 0；
+`docs/VALIDATION.json`（`make validate` 生成）：collected 462 / passed 461 /
+skipped 1 / failed 0（唯一 skip 是 `k8s_integration`，需 NVIDIA Device Plugin）；
 lint/typecheck/migration/build 全 PASS；六个集成档中五档 **PASS**：
 postgres 18/18、docker 20/20、browser 11/11、**object_store 20/20**、
 **k8s_control_plane 7/7**。overall = `PASS_WITH_PHYSICAL_PENDING`。
+文档里这串计数由常驻判据与产物对账：值比较在 `make validate` 汇总之前做
+（pytest 阶段读到的必然是上一次报告），pytest 侧只钉"恰好一处 + 判据没被搬走"，
+另配一支"喂错数字必须两处点名"的开火对照。
 
 ### 对象存储：S3 后端第一次真正执行（ADR 0008）
 - 此前的"S3 覆盖"是零执行的：boto3 不在任何依赖组里（懒加载直接 ImportError），
@@ -80,6 +83,17 @@ postgres 18/18、docker 20/20、browser 11/11、**object_store 20/20**、
 - 顺带更正两条文档事实错误：code-server 下载不在 `scripts/build_workspace_image.sh`
   而在 `runtime/Dockerfile.isaaclab-workspace`；§14 的 Pod 标记实测是
   `embodiedcloud.workspace="true"`（workspace id 在 Deployment 标签上）。
+- **发布链自身的两处修正**（都是本轮踩出来的）：
+  - 生成 `dist/VALIDATION_STATUS.md` 的未加引号 heredoc 里，我在本轮新写的表格行用了反引号
+    ⇒ bash 把它当命令替换**执行**掉：`make test-k8s-control-plane` 在发布过程中又跑了一遍，
+    其收尾行（`7 passed, 451 deselected ... in 64.66s`）被抄进发布工件，另一处
+    （`nvidia.com/gpu`）替换为空串留下残句，而脚本全程退出码 0、`bash -n` 全绿。
+    现在：模板文本不再用反引号；写完强制检查产物（含反引号或测试输出即 `release FAILED`）；
+    并新增常驻静态判据（抽出 release.sh 所有未加引号 heredoc 正文，断言无反引号，
+    且"解析到 0 块"也算红）。对照臂：把改前那一版 `release.sh` 喂进同一条判据 ⇒ 命中 1 块。
+  - 原来的"版本一致就复用旧 `docs/VALIDATION.json`"在几分钟内就暴露了：发布链跑完后
+    新加了一条判据用例，版本号不变 ⇒ 报告会比工作树少一条（正是 CI freshness 门禁要抓的
+    形状）。现在 `make release` 无条件重跑 `make validate`。
 
 ## 0.5.0 — 2026-09-26（验证纵深 + 计费预授权）
 
