@@ -7,7 +7,10 @@
 - Docker + NVIDIA Container Toolkit
 - NGC 可拉取 `nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9`
   （与 `runtime/Dockerfile.isaaclab-workspace` 的 `FROM` 同一字符串，常驻判据 G0.30 逐字核对；
-  解析 digest 本身不需要凭据，**接受 NGC 条款后**才需要 `docker login nvcr.io` 拉层字节）
+  不需要 NGC 凭据：本机用一枚**匿名** pull 令牌就取到了 index／子清单、整份 config blob（9910 字节，
+  `sha256` 与清单一致）与层字节（`Range` → `206`）；完全不带 `Authorization` 才退 `401`。
+  读数见 `docs/SUPPLY_CHAIN.md` §8 第 1 项。**据此，下一节原先的 `docker login nvcr.io` 一步本轮已删**：
+  NVIDIA 的 6.0.1 容器安装页给出的就是裸 `docker pull`，许可在运行时以 `ACCEPT_EULA=Y` 接受）
 
 ## 0. 先做 NVIDIA 官方兼容性检查
 
@@ -28,10 +31,21 @@ docker run --entrypoint bash -it --gpus all --rm --network=host \
 ## 2. 构建 Workspace 镜像
 
 ```bash
-docker login nvcr.io
 ./scripts/build_workspace_image.sh
 # 构建成功后脚本会打印镜像摘要与回填命令；不回填则该版本仍按可变 tag 启动
 ```
+
+**这里原先的第一行是 `docker login nvcr.io`，本轮删掉，依据两条**：其一，NVIDIA 自己的
+Isaac Sim 6.0.1 容器安装页（`https://docs.isaacsim.omniverse.nvidia.com/6.0.1/installation/install_container.html`，
+本机取回 145,133 字节）写的拉取步骤是**一句不带任何登录前置的 `docker pull`**（它那份引用只写到 tag、
+没有 `@sha256:`；本手册一律用上面钉死的那一份，逐字相等由 G0.30 常驻判据核）。该页唯一出现
+"run docker login first" 的地方讲的是 **Docker Hub** 的匿名拉取限速（429），与 nvcr.io 无关；
+许可是在**运行**时以 `-e "ACCEPT_EULA=Y"` 接受的
+（同页原文："By using the -e \"ACCEPT_EULA=Y\" flag, you accept the license agreement of the image…"）。
+其二，本机实测同一枚**匿名** pull 令牌就能取回该镜像的 index／子清单与层字节（见
+`docs/SUPPLY_CHAIN.md` §8 第 1 项的返回码读数）。
+若你的客户端**已经**登录 nvcr.io，NGC 会去查你所在组织是否已接受该实体的条款——所以多出来的
+登录步骤只会增加一道可能卡住的检查，不解锁任何本来拿不到的字节。
 
 该镜像基于 Isaac Sim 6.0.1，固定 Isaac Lab `v3.0.0-beta2.patch1`，并加入 code-server。
 

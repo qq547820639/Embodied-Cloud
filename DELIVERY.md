@@ -4,7 +4,7 @@
 
 已把 BP 收敛成一个可以开始卖的产品本体：**Isaac Lab Cloud Workspace**。
 
-本仓库不是原 BP 全部愿景的“假完成”。已经完成当前环境能真实验证的全部开发闭环；所有依赖实体 NVIDIA GPU/NGC 的验收都被固化为脚本和 Gate，而不是口头 TODO。
+本仓库不是原 BP 全部愿景的“假完成”。已经完成当前环境能真实验证的全部开发闭环；所有依赖实体 NVIDIA GPU 与大容量构建机的验收都被固化为脚本和 Gate，而不是口头 TODO（NGC 那一侧本轮实测**不是**凭据问题：匿名 pull 令牌即可取回基础镜像的清单与层字节）。
 
 ## 已交付项目本体
 
@@ -34,7 +34,7 @@ A. 本地演示
 
 B. GPU 主机
    ./scripts/preflight_gpu_host.sh
-   docker login nvcr.io
+   # 无需 docker login nvcr.io：依据与实测读数见 docs/GPU_HOST.md §2
    ./scripts/build_workspace_image.sh
    ./scripts/gpu_acceptance.sh
 

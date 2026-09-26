@@ -627,6 +627,85 @@ docker 档 21 → 22，全套 531 → 532。
   表格里留下一个空行（会把一张表劈成两张、只有读回磁盘才看得见），是 `docs_row_order` 之外
   自己复算行号区间抓到的——写进记忆，别再靠"跑一遍没事"。
 
+### 又推翻一条自己写的"外部阻塞"：NGC 凭据并不挡 workspace 镜像的字节
+
+- 复算间隙顺手去量 `nvcr.io/nvidia/isaac-sim:6.0.1` 到底挡在哪一步，结果推翻了两句话：
+  §8 第 1 项写的**"阻塞于 NGC 条款"**，和本轮早些时候补进去的**"凭据只在拉层字节时才要"**。
+  一手读数（2026-09-27 本机 `curl`，全部不带任何 API key）：匿名 pull 令牌
+  （`https://nvcr.io/token?service=nvcr.io&scope=repository:nvidia/isaac-sim:pull` 回 200，token 1198 字节）
+  不只读得到 index（amd64 `b1c542b2…`／arm64 `2026973596…` 两个子清单）与 amd64 清单本身，
+  **层字节也读得到**：config blob 整份无 Range 下载走 `307 → layers.nvcr.io` 签名地址 → `200`、
+  实拿 **9910 字节**、`shasum -a 256` 与清单里的 `config.digest`（`2d4ebfef…`）**逐位相等**；
+  第一层（压缩 29,724,688 字节）`Range: bytes=0-1048575` 退 `206`、实拿 **1,048,576 字节**。
+- **同一句话我改宽了两次，第二次被自己的复测抓住**：先写"取字节不需要凭据"，再量才发现它把两件事混成一件——
+  反向对照（同一 blob、**完全不带 `Authorization`**、即使跟随重定向）退的是 **`401`**。
+  所以成立的说法是"**不需要 NGC 凭据（API key／登录）**，但**需要一枚匿名 pull 令牌**"；
+  不成立的是"不需要任何认证"。规则进了记忆：用 range／部分读数去支撑"整步可行"这种主张之前，
+  先把无 Range 的完整版本跑一遍，并且每一条正面前提都要把它的**无反面凭据极性**也量一次，
+  否则"不需要凭据"与"不需要登录但需要令牌"在终端上完全同形。
+- 真正挡住"把 workspace 镜像建出来、再回填 digest"的是**容量与验收口径**，两处都量了才敢写：
+  colima 虚拟机根分区 `df` 只剩 **7.6 GiB**（86% 已用），而这个基础镜像光压缩层就是
+  amd64 **9.96 GiB**／arm64 **8.78 GiB**（各 19 层，最大一层 9.85／8.67 GiB），解压还要再翻几倍；
+  G2–G4 的运行验收另外要求 NVIDIA x86 主机。所以 §8 第 1 项与 BLOCKED 那一格都改成了
+  "需要一台磁盘有数十 GiB 余量的构建机 ＋ 一台带 GPU 的 x86 主机做运行验收"，不再写"等 NGC 授权"。
+- **一次更正只推平了两面，剩下的面按数字找是找不到的**：改完 §8 与 BLOCKED 之后按事实关键词
+  （`NGC|nvcr.io`）跨全文重 grep，查出**七处**仍在复读被推翻的那句话，逐处改：
+  `docs/SUPPLY_CHAIN.md:12`（"真实构建需 NGC 凭据"）、同文件 §8 末尾那行**原样留着被推翻句子**的
+  闭合注记（"凭据只在拉层字节时才需要"）、`docs/GPU_HOST.md:10`、`scripts/release.sh:217`（发布报告
+  的 BLOCKED 明细表）、`docs/ACCEPTANCE.md:19`（"环境没有 NVIDIA GPU 与 NGC 登录态"）、
+  `docs/MASTER_PLAN.md:33`（遗留 BLOCKED 清单里列着"NGC 凭据"）、`DELIVERY.md:7`。
+  七处都不是数字、没有任何门禁读它们，所以"跑一遍没事"完全不构成证据——只有按关键词 grep 才算普查。
+  另修一处记账机械伤：`docs/CURRENT_STATE.md` 的 BLOCKED 段落里留着脚本拼字符串时的游离引号
+  （`令牌"` / `"就能读`），是上一轮 Write 之后才看见的，本轮就地清掉。
+- **更正之后又往前走了一步，而且这一步按老规矩自己重开了一手源**：派出去查"NGC 到底要不要登录"的
+  检索交回一份带原话的报告，我没有直接引用，而是自己 `curl` 了那个页面（HTTP 200／**145,133 字节**）
+  去标签后逐行读。Isaac Sim 6.0.1 容器安装页的拉取步骤就是裸的 `$ docker pull nvcr.io/nvidia/isaac-sim:6.0.1`，
+  **拉取之前没有任何登录步骤**；整页唯一那句 "run docker login first" 讲的是 **Docker Hub** 的匿名拉取
+  限速（429），与 nvcr.io 无关；许可是在**运行**时以 `-e "ACCEPT_EULA=Y"` 接受的
+  （同页原文："By using the -e \"ACCEPT_EULA=Y\" flag, you accept the license agreement of the image…"）。
+  **结论落到了文档面**：`docs/GPU_HOST.md` §2、`docs/RUNBOOK.md` §5、`DELIVERY.md` 三处的
+  `docker login nvcr.io` 一步删掉，GPU_HOST 那一格换成带出处的说明；删之前先 `grep login scripts/`
+  → **零命中**，所以那三行是纯 prose 步骤，删它不会机械断掉任何脚本行为。
+  两条**未找到**也如实记在这里：nvcr.io 的匿名拉取限速／大小上限没有一手出处（NGC 私有仓库指南的
+  "Single image layer size 10 GB / Total image size 1 TB" 是**发布与存储**侧配额，不是拉取侧），
+  `Other` 这个占位用户名的官方说法同样没找到（`$oauthtoken` 有，见同指南）。
+- **这次更正自己被自家门禁拦下一回**：往 `scripts/release.sh` 的 BLOCKED 明细表里写新句子时，
+  我用了 `` `sha256` ``／`` `Range` `` 这样的代码块，而那张表整个在**未加引号的 heredoc** 里 ⇒
+  反引号会被 bash 当命令替换执行。常驻用例 `test_release_script_heredocs_carry_no_backticks`
+  当场把这轮 validate 判红：`overall=FAIL`、`543 passed / 1 skipped / 1 failed`、
+  失败名 `tests.test_supply_chain::test_release_script_heredocs_carry_no_backticks`（`assert not [0]`）；
+  改成裸词之后 supply-chain 档 21 支全过。这条门是上一轮为一次真事故建的（当时模板里的
+  `make test-k8s-control-plane` 被真的执行了一遍、输出被抄进发布物），**它本轮第一次被我自己的改动
+  触发，就是它该存在的证据**——也顺手记一条：文档面 ≠ 自由文本，落进 shell 模板的那些面要先过形状判据。
+- **同一条改动又被第二条既有门拦下一次**：给 `docs/GPU_HOST.md` 写"为什么删掉 `docker login`"那段依据时，
+  我把 NVIDIA 原文那句**只写到 tag、没有 digest** 的 `docker pull` 当引文抄进了运维手册。
+  常驻判据 `test_pinned_base_ref_is_used_verbatim_by_every_consumer` 的消费侧清单里含 `docs/GPU_HOST.md`，
+  于是它把这轮 validate 判红：`543 passed / 1 skipped / 1 failed`，offender 逐字打出
+  `GPU_HOST.md: nvcr.io/nvidia/isaac-sim:6.0.1 != ['…@sha256:783444c7…']`。
+  **修的是措辞不是判据**：运维面改成"描述而不复现裸 tag"（原文只写到 tag ⇒ 本仓一律用钉死的那一份），
+  `docs/SUPPLY_CHAIN.md` 同一处一起改；只有本 CHANGELOG 保留那份原文当证据链，因为记录面不是操作入口。
+  本轮两条既有门各开火一次（heredoc 反引号、逐字相等），这是它们不是装饰的直接读数。
+- 这是同一个晚上**第二次**把"某条通道/某个前提不通"当成做不了（前一次是 ghcr 可达性，
+  这一次是 NGC 凭据）。共同点很一致：**当时没有真去请求那一样东西**。因此把这条方法论再收紧一步：
+  任何写成"阻塞于 X 凭据/条款"的句子，必须带上"我请求过 X 保护的那一步、并贴出返回码"的读数；
+  没有返回码，就把它当成未验证前提，不许当阻塞理由。
+
+### 撤掉一处自己写的过度声明，并给那条"接线"判据补上两支开火对照
+
+- `tests/test_supply_chain.py::test_image_sbom_step_forwards_the_lock_to_the_criterion` 的
+  文档字符串写着"形状按 AST 判（数关键字节点的实参位）"，而实现是一条正则扫 `image_sbom.sh`。
+  这句在三点上都不成立：被读的是 bash（仓里没有它的语法树）、同一份文档里前一句还写着
+  "AST 都比不出参数没转发"（自相矛盾）。按"只增不删会失效"的反面处理——**改措辞而不是改实现**：
+  文本判在这条上是挣得来的（判据被绑在同一逻辑行内，只让续行反斜杠跨过换行），换成 AST 反而
+  要先引入一个 bash 解析器。
+- 原实现只有正向断言（"文件里有这个形状"），没有反证——按本仓标准那就是一条可以恒真的规则。
+  补两支就地注入对照：摘掉 `--lock uv.lock`（保留判据名与其余参数）必须读成"没转发"；
+  把旗标从续行挪成独立一行（真实 shell 语义里那是另一条命令）也必须读成"没转发"。
+  两支都带 `mutated != text` 的落地断言，且变异靶点先数过 `count == 1`。
+- 判据判别力实测（同一份 `image_sbom.sh`，两条正则并排）：
+  真文本 命中／命中；摘旗标 无命中／无命中；挪出续行 **无命中／命中**——第三行正是第二支对照存在的理由：
+  若哪天有人把判据放宽成"整份文件里两个 token 都出现过"，只有它拦得住。supply-chain 档 21 支全过。
+
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 
 `docs/VALIDATION.json`（`make validate` 生成）：collected 462 / passed 461 /

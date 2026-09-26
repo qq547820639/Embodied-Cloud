@@ -110,12 +110,17 @@ GPU 真机（G1–G4 脚本就绪，本机无 NVIDIA 设备）· K8s 上 `nvidia
 Streaming 媒体面（Isaac Sim WebRTC）· Robot 真机 · Warm pool SLA。
 
 ### BLOCKED_EXTERNAL_DEPENDENCY
-NGC 凭据（**构建并推送 workspace 镜像**后回填 `TemplateVersion.image_digest`）·
+workspace 镜像的构建与 digest 回填（**原因本轮重测纠正**：挡路的不是 NGC 凭据——一枚匿名 pull 令牌
+就能读 index／子清单与层字节（实测：config blob 整份 9910 字节、`sha256` 与清单里的 `config.digest`
+逐位相等；第一层 `Range: bytes=0-1048575` 退 `206`）。要分清两层：**不需要 API key/登录**，
+但**裸请求（无 `Authorization`）退 `401`**。真挡住的是容量与口径——本机 colima 虚拟机根分区只剩 **7.6 GiB**，
+而 `nvcr.io/nvidia/isaac-sim:6.0.1` 光压缩层就是 amd64 9.96 GiB／arm64 8.78 GiB（各 19 层、
+最大一层 9.85／8.67 GiB），解压还要再翻几倍；验收口径另要求 NVIDIA x86 主机）·
 云 S3 真实账号凭据（协议语义已由本地真服务端覆盖，缺的只是"云厂商那份实现"）·
 物理机器人 · 带 GPU 的 K8s 集群凭据。
 > 已解除：docker daemon、postgres 镜像（v0.5.0）、S3 兼容服务端与真 K8s 集群（v0.6.0，
 > 本机自起自删）、**`nvcr.io` 基础镜像钉 digest**（v0.7.0：这条曾被登记为"阻塞于 NGC 凭据"，
-> 实测不成立——manifest 与 digest 用匿名 pull 令牌即可解析，凭据只在拉层字节时才要）、
+> 实测不成立——manifest、digest 与层字节用同一枚匿名 pull 令牌都取得到（config blob 整份 9910 字节、`sha256` 与清单一致；层 blob `Range` 退 `206`）；**当晚另记的「凭据只在拉层字节时才要」同样不成立**，而它当晚那句"取字节不需要凭据"也写宽了一格——完全不带 `Authorization` 的同一请求退 `401`，所以免掉的是 API key/登录，不是认证本身）、
 > **Docker Hub 权威 digest**（v0.7.0：登记理由写的是"本机三条路径均不可达"，而那三条全是
 > CLI/curl 那条传输；守护进程自己的出网路径从没试过，一试就通 ⇒ `python:3.12-slim` 已钉索引
 > digest、例外登记表清空）。两条同为"把我试过的某条通道不通记成这件事做不了"——

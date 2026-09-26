@@ -49,7 +49,8 @@ curl -s http://127.0.0.1:8000/metrics | head
 
 ```bash
 ./scripts/preflight_gpu_host.sh        # G1.1
-docker login nvcr.io                   # NGC 凭据
+# 不需要 docker login nvcr.io（本轮删掉）：NVIDIA 的 isaac-sim 6.0.1 容器安装页给出的就是裸
+# docker pull，本机实测一枚匿名 pull 令牌可取回清单与层字节——依据与读数见 docs/GPU_HOST.md §2
 ./scripts/build_workspace_image.sh     # 构建 workspace 镜像（打印摘要）
 # 回填该版本摘要，之后的工作区快照与容器启动都会带 @sha256: 引用：
 #   python -m app.cli record-image-digest --template-id <id> --version <ver> --digest sha256:<64hex>

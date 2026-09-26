@@ -9,7 +9,7 @@
 | workspace 镜像 tag | `embodiedcloud/isaaclab-workspace:0.1.0`（seed.py `TEMPLATE_IMAGE`） | VERIFIED：immutable tag，**禁止 latest**（seed 模板与 TemplateVersion 均检查） |
 | 镜像 digest | `TemplateVersion.image_digest` 现在**有写入入口也有读者**：`python -m app.cli record-image-digest --template-id … --version … --digest sha256:…`（拒收形制不对的串、拒改已钉在另一摘要上的 released 版本），消费点 `app/services/image_ref.py:pinned_ref` 在 workspace 快照那一刻把 digest 拼进 `image`（`reg/img:1.0.0@sha256:…`），docker/k8s 两条 provider 因此启动的都是钉死的引用 | 机制 VERIFIED（本轮；4 支变异对照 PIN1–PIN4，见 CHANGELOG 0.7.0）；**取值仍 BLOCKED**：本机没有可核实的 workspace 镜像 digest（镜像没建出来）。本轮实测过摘要来源：`docker image inspect --format {{.Id}}` 与 `.RepoDigests[0]` 同值（本地构建、从未推送的 scratch 镜像、以及拉取来的 `postgres:16-alpine` 两例皆然），脚本据此回填并**拿不到就退出**，不写"看起来像 digest"的串 |
 | Template 镜像来源 | TemplateVersion.image → workspace.image 快照 → provider 启动（§15 已落地） | VERIFIED：`test_template_versions.py` 证明 Template A→image A、B→image B |
-| 构建配方 | `runtime/Dockerfile.isaaclab-workspace`（`scripts/build_workspace_image.sh` 只是 docker build 的包装，下载步骤在 Dockerfile 内） | PARTIAL：真实构建需 NGC 凭据；配方内的下载/克隆已钉死（见 §2/§3） |
+| 构建配方 | `runtime/Dockerfile.isaaclab-workspace`（`scripts/build_workspace_image.sh` 只是 docker build 的包装，下载步骤在 Dockerfile 内） | PARTIAL：配方内的下载/克隆与基础镜像 digest 都已钉死并机检；**没做的是真跑一次构建**——而挡它的不是 NGC 凭据（本轮实测：匿名 pull 令牌可整份取回 config blob 并读到层字节，见 §8 第 1 项），是构建机容量与 x86 GPU 验收口径 |
 
 ## 2. Isaac Lab / Isaac Sim 版本
 
@@ -107,9 +107,27 @@
 
 1. **对真镜像跑一次 digest 回填**：机制本轮已闭（`build_workspace_image.sh` 构建后打印摘要，
    `python -m app.cli record-image-digest` 写入，`image_ref.pinned_ref` 在快照时消费，
-   常驻用例把整条链连起来跑）。剩下的只是"没人拿真镜像跑过它"——阻塞于 NGC 条款 + x86 GPU 主机
-   （要的是把 workspace 镜像**建出来**；本机是 Apple Silicon，且 G2–G4 的验收口径本来就要求
-   NVIDIA x86 主机）
+   常驻用例把整条链连起来跑）。剩下的只是"没人拿真镜像跑过它"。**这一项的阻塞理由本轮被重测纠正过一次**：
+   原先写的是"阻塞于 NGC 条款 + x86 GPU 主机"，前半句是错的——匿名 pull 令牌不只读得到
+   index 与两个子清单（`linux/amd64` `b1c542b2…`／`linux/arm64` `2026973596…`），层 blob 也读得到：
+   第一层（压缩 29,724,688 字节）做 `Range: bytes=0-1048575` 退 `206`、实拿 1,048,576 字节；
+   config blob **不带 Range 整份**取回：`307` 跳到 `layers.nvcr.io` 的签名地址后 `200`、实拿 9910 字节，
+   `shasum -a 256` 与清单里的 `config.digest`（`2d4ebfef…`）逐位相等。这条主张要精确到两层：
+   **不需要 NGC 凭据（API key／登录）**，但**需要一枚匿名 pull 令牌**——同一条 blob 完全不带
+   `Authorization`（即使跟随重定向）退的是 `401`。真正挡住"把 workspace 镜像建出来"的是容量与验收口径：
+   这台机器的 colima 虚拟机根分区 `df` 只剩 7.6 GiB（86% 已用），而 isaac-sim 6.0.1 光是压缩层
+   就有 amd64 9.96 GiB／arm64 8.78 GiB（各 19 层，最大一层 9.85／8.67 GiB），解压还要再翻几倍；
+   而 G2–G4 的验收口径本来就要求 NVIDIA x86 主机。所以这一项现在的准确说法是：
+   **需要一台磁盘放得下（≥ 数十 GiB 余量）的构建机，加上一台带 GPU 的 x86 主机做运行验收**；
+   不是"等 NGC 授权"——**NVIDIA 那一侧也没有要求登录**：6.0.1 容器安装页（本机取回 145,133 字节，
+   `docs.isaacsim.omniverse.nvidia.com/6.0.1/installation/install_container.html`）写的拉取步骤是
+   **一句不带任何登录前置的 `docker pull`**（它那份引用只写到 tag、没有 `@sha256:`，本仓一律用
+   §2 钉死的那一份，逐字相等由 G0.30 核），许可是在**运行**时以 `-e "ACCEPT_EULA=Y"` 接受的，
+   整页唯一那句 "run docker login first" 讲的是 **Docker Hub** 的匿名拉取限速（429），与 nvcr.io 无关。
+   据此，`docs/GPU_HOST.md` §2、`docs/RUNBOOK.md` §5 与 `DELIVERY.md` 三处的 `docker login nvcr.io`
+   一步本轮已删（`grep login scripts/` 零命中 ⇒ 删的是纯 prose 步骤，不机械断任何脚本行为）。
+   （另记一条方法论：这已经是本轮第二次撞到"把某条通道/某个前提当成做不了"
+   ——上一条是 ghcr 可达性，这一条是 NGC 凭据；两者的共同点是当时没有真去请求那一样东西。）
 2. ~~**`python:3.12-slim` 钉 digest**~~ **本轮闭合**（见 §2 同一行：权威索引 digest 已从 docker.io 取到并钉进
    `runtime/Dockerfile.control-plane`，登记表同步清空）。留一条方法论记账：上一条登记写的阻塞理由是
    "本机三条路径均不可达"，而那三条全是 **CLI/curl 那条传输**（`auth.docker.io`、`hub.docker.com`、
@@ -136,7 +154,9 @@
 6. ~~**镜像里的 wheel 与 `uv.lock` 不一致**（本轮由镜像层清单量出的缺陷，登记表 N-22）~~ **本轮闭合**：配方改成两段构建（builder 用 `uv sync --frozen --extra postgres --no-install-project` 从锁装、运行层只 COPY 那份 `.venv`），重建后逐个核对＝**47 个 pypi 组件里 46 个与 `uv.lock` 逐名逐版本相等**，唯一剩下的 `pip 25.0.1` 是基础镜像自带的、由判据里一张只认它的白名单接住。取证原文（当时的形状，行号是改造前的）：`runtime/Dockerfile.control-plane` 第 14 行 ＝ `RUN pip install --no-cache-dir ".[postgres]"`，构建时对 PyPI **现解析**。两笔现算差异：镜像里是 `pkg:pypi/sqlalchemy@2.1.1`、`uv.lock` 钉 `2.1.0`；镜像里 `pkg:pypi/pip@25.0.1` 在锁文件里根本没有条目（基础镜像自带）。也就是说当时**发布物的 Python 侧内容没有任何一份锁文件能描述**——`make verify-lock` 验的是仓库里的解析，管不到镜像里实际装上了什么。做法与选型（四档对比，全部开过官方文档）：多阶段 `uv sync --frozen`＋COPY `.venv`／`uv export` 出 requirements 再 `pip --require-hashes`／`uv pip sync` 直读锁／pip-tools 自解析——第三条被文档自己否掉（`uv pip sync` 枚举的支持格式里没有 `uv.lock`），第四条等于再造一个解析器（两份真源），第二条的唯一真源问题被 uv 文档点破（不建议同时保留 `uv.lock` 与 `requirements.txt`），所以引依赖走第一条；而第二条换来的哈希校验，实测在第一条里也有：把 `uv.lock` 里 **wheel** 的 sha256 整条置零后 `uv sync --frozen` 退 `1` 并打印 "Computed: …"，还原后同命令退 `0`（这两档是我自己跑的；**记账一次自己的无效测试**：头两次我把 sdist 那一行的哈希改了、而安装走的是 wheel，于是得到两次"uv 不校验哈希"的错误读数——错的不是 uv，是夹具没打在该打的那一行上）。常驻判据两条：配方层 `test_control_plane_recipe_installs_from_the_lock`（三条注入档：退回旧配方／摘掉 `--frozen`／换成 `pip install --require-hashes -r` 的合规变体；判的是"这一组依赖由 uv.lock 决定"这个谓词，不是工具名字，且只看去掉注释、折好续行之后的指令行——这一点也是被自己的反例逼出来的：注释里那句讲 `uv sync --frozen` 的话一度替被摘掉旗标的 RUN 行背书）；产物层 `check_image_sbom.py --lock uv.lock`，反证不是编的，是从旧配方那台真镜像（`sha256:cd371b31…`）上跑真 trivy 得到的清单里裁出来的 `tests/fixtures/sbom.image.prefix-drift.json`，判据对它开出 1 条并点名 `sqlalchemy 2.1.1 vs 2.1.0`；把那一处版本改回锁里钉的那份，同一把尺子整体不开火。顺带钉一条形状事实：真产物里名字写的是 `SQLAlchemy`（大写）而锁里是 `sqlalchemy`，所以判据按 PEP 503 归一化比名，大小写敏感的裸名比对会把它读成"锁里没这个包"那种假红
 7. ~~**发布 wheel 清单少报了产品实际装的那一组依赖**~~ **本轮闭合**（登记表与 §4 同一行）：`make sbom` 用的 `uv export --frozen --format cyclonedx1.5` 默认只导主依赖集——实测导出的 44 个组件里**没有** `psycopg`、`psycopg-binary`（这正是生产镜像装的 `[postgres]` 驱动，`deploy/kubernetes` 的迁移动作要用它）、也没有 `boto3`（`[s3]` 后端）。`dist/sbom.cdx.json` 是进 `dist/checksums.txt` 的发布产物（`scripts/release.sh:150`），少报一组就是给审计交了一份不全的清单。改成 `--extra postgres --extra s3` 后实测 **51** 个组件、三条到齐、dev 组（pytest/ruff）仍然不进——用点名而不是 `--all-extras`，免得把开发工具混进生产清单。同轮补上的一格：不能拿这份清单与镜像层清单（`pkg:pypi` 47 条）比**基数**——前者是"可安装的两组 extra"、后者是"这一份镜像里装了什么"，本来就不该相等。钉成的是**单边子集、权威侧是配方**：镜像真装的每一组 extra 都必须出现在 `make sbom` 的导出命令里（`test_image_recipe_extras_are_declared_in_the_release_sbom`，两侧非空各有一道守卫，空对空会被读成合规）。配方侧解析走"去掉注释、折好续行"那份逻辑——`Dockerfile.control-plane:25` 的注释里就有一个字面的 `--extra postgres`，不剥注释就会多算一组
 （原"Isaac Sim 基础镜像钉 digest"一项已于本轮闭合：它曾被登记为"阻塞于 NGC 凭据"，实测**不成立**——
-nvcr.io 的 manifest 与 digest 用匿名 pull 令牌即可解析，凭据只在拉层字节时才需要。
+nvcr.io 的 manifest、digest **与层字节**用一枚匿名 pull 令牌就取得到（整份 config blob 9910 字节、
+`sha256` 与清单一致；层 blob Range 读 `206`），只有"完全不带 `Authorization`"才是 `401`；
+这一句原先写的"凭据只在拉层字节时才需要"同样已被本轮复测推翻，见 §8 第 1 项。
 原第 2 项 code-server SHA256 与原第 3 项 IsaacLab exact revision 已于 v0.6.0 落地，见 §2/§3。
 原第 1 项 Python lockfile 与原第 4 项 SBOM 已于 v0.5.0 落地，见 §4/§5。）
 

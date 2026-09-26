@@ -30,7 +30,8 @@
 ## 当前状态
 
 见 `docs/CURRENT_STATE.md`。当前 v0.7.0：边缘设备取件通路（发现/开门/取件 + 遥测回读）与真进程 Sim2Real 回环已进常驻门禁；上一轮 v0.6.0 把对象存储真后端（VersityGW）与 K8s 控制面真集群（kind）接进了门禁；上一轮 v0.5.0 做的是 PostgreSQL 真并发、Docker provider 真容器、真实浏览器 DOM 三档已进常驻门禁（docker daemon 已可用，不再是遗留项）。
-遗留 BLOCKED：NVIDIA GPU/容器运行时 / NGC 凭据 / S3 凭据 / 真实 K8s 集群 / 真机机器人。
+遗留 BLOCKED：NVIDIA GPU（G1–G4）/ 放得下 Isaac Sim 层的构建机磁盘（workspace 镜像构建与 digest 回填）/ 云 S3 凭据 / 带 GPU 的真实 K8s 集群 / 真机机器人。
+（清单里原先有"NGC 凭据"这一项：本轮实测一枚匿名 pull 令牌即可取回该镜像的清单与层字节，它不再是阻塞理由，改记为容量问题，见 `docs/SUPPLY_CHAIN.md` §8 第 1 项。）
 
 ## 商业 Gate（预留）
 

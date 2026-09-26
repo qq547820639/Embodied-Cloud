@@ -16,7 +16,9 @@
 
 ## 无法在当前执行环境完成的外部验收
 
-原因不是代码权限，而是当前运行环境没有 **NVIDIA GPU 与 NGC 登录态**。
+原因不是代码权限，而是当前运行环境没有 **NVIDIA GPU**，以及**放得下这些镜像的构建机磁盘**。
+（原先这里写的"NGC 登录态"本轮被复测推翻：一枚匿名 pull 令牌就能取回该镜像的清单与层字节，
+读数见 `docs/SUPPLY_CHAIN.md` §8 第 1 项——免掉的是 API key/登录，不是认证本身。）
 
 这里曾把"Docker daemon"一起列进缺失项，与 `scripts/release.sh` 的依赖表（"Docker daemon |
 本环境可用（colima）"）自相矛盾，本轮按读数更正：`docker version` 读出 Server 29.5.2，

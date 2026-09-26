@@ -214,7 +214,7 @@ ${ARTIFACTS}
 |---|---|---|
 | Docker daemon | 本环境可用（colima） | 容器档集成测试可跑（make test-pg / docker 档） |
 | NVIDIA GPU + NVIDIA Container Toolkit | 本机为 Apple Silicon，无 CUDA | G1–G4 无法执行（非软件缺陷）；容器参数层已由 docker 档在真守护进程上验收（回读 HostConfig.DeviceRequests），设备可见性仍待真机 |
-| NGC（nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9） | 拉取层字节需接受 NGC 条款 + x86 GPU 主机；解析 digest 不需要凭据（本机已匿名解析并钉死） | G2–G4 无法执行（非软件缺陷）；构建配方的下载/克隆与基础镜像 digest 均已钉死并机检 |
+| NGC（nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9） | **不是凭据问题**（本轮复测推翻旧措辞）：一枚匿名 pull 令牌即可解析 index／子清单／digest 并取到层字节（config blob 整份 9910 字节且 sha256 与清单一致；层 blob Range 读退 206；完全不带 Authorization 才退 401）。挡住构建的是**构建机磁盘容量**（本机 colima 虚拟机根分区仅剩 7.6 GiB，而压缩层 amd64 9.96 GiB／arm64 8.78 GiB）＋ **x86 GPU 主机** | G2–G4 无法执行（非软件缺陷）；构建配方的下载/克隆与基础镜像 digest 均已钉死并机检；digest 回填留待有容量余量的构建机 |
 | 云对象存储真实账号 | 本机无凭据 | S3 协议语义已由自起的真服务端（VersityGW）覆盖，并用 MinIO 交叉核对；缺的只是云厂商那份实现 |
 | Kubernetes 集群 + Device Plugin | 控制面已由 kind 自起真集群覆盖（make test-k8s-control-plane）；节点带 nvidia.com/gpu 容量仍需 Device Plugin | G0.17 / G1 K8s GPU 全流程保持 PENDING |
 | 真实机器人硬件 | 本环境无真机 | G5 Sim2Real 无法执行 |

@@ -846,12 +846,25 @@ def test_lock_criterion_fires_on_a_real_drifted_artifact() -> None:
 def test_image_sbom_step_forwards_the_lock_to_the_criterion() -> None:
     """新参数不转发就是死缝：`--lock` 必须由产出这一步真的传进去。
 
-    判据侧缺省会红（那条自己有档位），但**接线**这一面只有在这里才看得见——AST/文本都比不出
-    "参数没转发"，除非有人去读调用行。形状按 AST 判（数关键字节点的实参位），不用 ±N 行窗口。
+    判据侧缺省会红（那条自己有档位），但**接线**这一面只有在这里才看得见。形状按文本判，
+    不按 AST：被读的是 `image_sbom.sh`（bash，仓里没有它的语法树可用），而"参数没转发"本来就
+    落在一条调用行上。因此判据被刻意绑在**同一逻辑行**内——只让续行反斜杠跨过换行，不用 ±N 行
+    窗口，也不允许顺着后面某条不相干命令里的 `--lock` 判成绿。两张开火对照把这两条都钉住。
     """
     text = IMAGE_SBOM_SCRIPT.read_text(encoding="utf-8")
-    assert re.search(r"check_image_sbom\.py[^\n]*(?:\\\n[^\n]*)*?--lock\s+uv\.lock", text), (
+    call = re.compile(r"check_image_sbom\.py[^\n]*(?:\\\n[^\n]*)*?--lock\s+uv\.lock")
+    assert call.search(text), (
         "image_sbom.sh 没把 uv.lock 交给判据——锁一致性那条主张在生产路径上无人调用"
+    )
+    # 开火一：摘掉旗标本身。若哪天有人把判据放宽成"看见 check_image_sbom.py 就算"，这里先红。
+    assert text.count("--lock uv.lock") == 1, "变异靶点不唯一，下面两张开火对照读数为无效"
+    dropped = text.replace("--lock uv.lock", "--lock-removed-by-fixture")
+    assert dropped != text and not call.search(dropped), "摘掉 --lock 之后仍判为已转发：恒真断言"
+    # 开火二：把旗标从续行上挪成独立一行（真实 shell 语义里那是另一条命令）。
+    # 若判据退化成"整份文件里两个 token 都出现过"，这一支会读成绿——它证明的是"同一逻辑行"这半边。
+    joined = text.replace(" \\\n  --lock uv.lock", "\n  --lock uv.lock")
+    assert joined != text and not call.search(joined), (
+        "旗标挪出续行后仍判为已转发：判据没绑在同一逻辑行，会顺着别条命令误判成绿"
     )
 
 
