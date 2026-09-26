@@ -1,10 +1,9 @@
-import time
-
 from fastapi.testclient import TestClient
 
 from app.main import app
 from tests.http_auth import auth_headers as _auth
 from tests.http_auth import register_body
+from tests.settle import await_workspace_settled
 
 
 def _register(client: TestClient, email: str, username: str) -> str:
@@ -30,6 +29,15 @@ def test_end_to_end_workspace_lifecycle():
             assert "latest" not in (t["image"] or "")
             assert t["slug"]
 
+        # 这一支要真起一个 workspace：空闲卡是前提，得自己达成并写明
+        # （全套共用一个库 + mock 只 seed 8 张卡，见 tests/gpu_pool.py）
+        from app.deps import SessionFactory
+        from app.deps import scheduler as app_scheduler
+        from tests.gpu_pool import ensure_free_gpus
+
+        with SessionFactory() as db:
+            ensure_free_gpus(db, app_scheduler)
+
         created = client.post(
             "/api/workspaces",
             json={"template_id": "cartpole", "auto_start": True},
@@ -38,12 +46,7 @@ def test_end_to_end_workspace_lifecycle():
         assert created.status_code == 201
         workspace_id = created.json()["id"]
 
-        state = None
-        for _ in range(40):
-            state = client.get(f"/api/workspaces/{workspace_id}", headers=headers).json()
-            if state["status"] in {"running", "failed"}:
-                break
-            time.sleep(0.05)
+        state = await_workspace_settled(client, workspace_id, headers)
         assert state["status"] == "running"
         assert state["ide_url"].endswith(workspace_id)
 
@@ -120,15 +123,8 @@ def test_workspace_logs_endpoint_owner_isolated():
         assert created.status_code == 201
         workspace_id = created.json()["id"]
 
-        # 等待终态
-        state = None
-        for _ in range(40):
-            state = client.get(f"/api/workspaces/{workspace_id}", headers=headers).json()
-            if state["status"] in {"running", "failed"}:
-                break
-            import time
-
-            time.sleep(0.05)
+        # 等到终态再读日志（前提，见 tests/settle.py）
+        await_workspace_settled(client, workspace_id, headers)
 
         resp = client.get(f"/api/workspaces/{workspace_id}/logs", headers=headers)
         assert resp.status_code == 200

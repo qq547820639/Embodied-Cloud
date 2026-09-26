@@ -340,9 +340,20 @@ class OperationWorker:
         ):
             raise LeaseLostError(f"operation {op.id[:8]} lease lost")
 
+    @classmethod
+    def will_retry(cls, op: WorkspaceOperation) -> bool:
+        """这一次尝试失败之后**还会不会**再有一次尝试。重试判据全场只有这一份。
+
+        `finish_failure` 用它决定 operation 写 RETRYING 还是 FAILED；orchestrator 用它的
+        反面决定 workspace 的 status 能不能写成终态。两处各写一遍
+        `attempts >= MAX_ATTEMPTS` 时，任何一侧改动（新增不可重试错误、调上限）都会让
+        "operation 还在重试"和"workspace 已 FAILED"同时成立——那正是本轮修掉的谎。
+        """
+        return int(op.attempts or 0) < cls.MAX_ATTEMPTS
+
     def finish_failure(self, db: Session, op: WorkspaceOperation, error: str) -> None:
         """失败：attempts 未达上限 → RETRYING（backoff 后自动回到可执行）；否则 FAILED。"""
-        if op.attempts >= self.MAX_ATTEMPTS:
+        if not self.will_retry(op):
             values = {
                 "status": OperationStatus.FAILED.value,
                 "completed_at": utcnow(),

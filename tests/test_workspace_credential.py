@@ -24,6 +24,7 @@ from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
 from tests.dbfiles import db_url
+from tests.settle import await_workspace_settled
 
 ENGINE = create_engine(db_url("credential"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
@@ -109,15 +110,8 @@ def test_access_endpoint_returns_plaintext_password():
         assert created.status_code == 201
         workspace_id = created.json()["id"]
 
-        # 等待 RUNNING
-        state = None
-        for _ in range(40):
-            state = client.get(f"/api/workspaces/{workspace_id}", headers=headers).json()
-            if state["status"] in {"running", "failed"}:
-                break
-            import time
-
-            time.sleep(0.05)
+        # 等待 RUNNING：前提要等得到底（预算＝worker 的重试节奏），判据不许等
+        state = await_workspace_settled(client, workspace_id, headers)
         assert state["status"] == "running", (
             f"provision 没收在 running：{state.get('error_message')}"
             "（'No GPU available' 说明共享库的 mock 卡池被上游用例占满，"

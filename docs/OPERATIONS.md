@@ -108,6 +108,21 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
   而 `POST /api/workspaces` 会占住一张、用例结束不还。新加"批量建 workspace"的文件
   能把后面的 GPU 用例饿死（报错是 `No GPU available with >= 8 GB VRAM`，不是断言失败）。
   需要空闲卡的用例请显式达成前置条件：`tests/gpu_pool.py:ensure_free_gpus`。
+  **还有一条引信**：app 每次启动跑 `reconcile_all()`，其中"QUEUED/CREATED 且无 active operation
+  ⇒ 重新入队 PROVISION"——于是任何模块留下的 CREATED 行，都会由**下一个**起 TestClient 的模块
+  的 worker 去执行、去抢卡。留下行的模块必须自己收尾（删行 + 还卡），否则它看起来"已经绿过"
+  却把红留给后面不相干的用例。
+- **第三句要分清的话：`failed` 不一定是死了**。共享卡池被借走的那 1s 里 provision 的第 1 次尝试
+  会报 `No GPU available`，而 worker 还打算再试两次——旧实现在那一刻就把 workspace 写成 FAILED，
+  几秒后重试成功又把它改回 RUNNING（读者看到的是一次假死，而且没人替它翻案：
+  `workspace_operations` 在 API 层零读者）。现在只有 `OperationWorker.will_retry(op)` 为假
+  （最后一次尝试）才写 FAILED，非终态停在 QUEUED 且保留 `error_message`。
+  运维读法：`status=queued` + 有 `error_message` ＝ 正在重试，看 `last_error` 与 attempts；
+  `status=failed` ＝ 三次尝试都用尽，这才是终态。
+- **两句"分配失败"不是一回事**：`GpuPoolContendedError` 说的是"N 张满足容量的空闲卡
+  正被并发事务锁住，0.5s 预算内没等到"——该重试、该看谁在抢；
+  `No GPU available with >= X GB VRAM` 才是容量结论——该扩卡或下调模板需求。
+  旧实现两者共用后一句，本轮在真 PG 行锁上把它拆开（读法见 ARCHITECTURE §3）。
 - **前提要等，判据不许等**。同一轮里两条红都是这个形状（一次真集群档、一次 docker 档），
   且都在"已经通过判据之后"的那一行：判据是"未就绪的容器/Pod 不该被读成就绪"，
   而"容器已退出""Pod 已被控制器建出来"是**别人异步做的事**，宿主忙时就晚到。
@@ -115,6 +130,9 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
   docker 档的 `wait_exited`），但等不到必须报**"前提未达成 + 最后一次读数"**；
   判据自己的超时预算（`wait_ready` 的 6s、`wait_running` 的 30s）是被测主张的一部分，
   红了也不能调大——那等于把主张改小。两类都各有开火对照。
+  同一族的第三处是 4 份 `for _ in range(40): sleep(0.05)` 的 workspace 轮询：**2s 不是判据预算，
+  是 worker 的重试节奏**（backoff 1s + 2s ⇒ 第 3 次尝试最早落在 3s 之后），现已统一到
+  `tests/settle.py:await_workspace_settled`（终态才返回，等不到就报前提未达成 + 池内空闲卡数）。
 - **真集群档在"引导阶段"整档红，先看宿主负载再看代码**。本轮实测到一次
   `kind create cluster` 失败在 `Preparing nodes ✗`，原因行是
   `could not find a log line that matches "Reached target .*Multi-User System.*|detected cgroup v1"`

@@ -23,7 +23,7 @@
 | G0.15 GPU admin & release | `pytest tests/test_gpu_admin.py` | admin inventory + 分配→释放真实断言 | VERIFIED PASS |
 | G0.16 Frontend 安全/课程 onboarding | `pytest tests/test_demo_workspace.py tests/test_course_onboarding.py tests/test_demo_checkpoint.py` | demo 页转义/鉴权、slug 加入、member 可见、mock checkpoint | VERIFIED PASS |
 | G0.17 K8s integration | `pytest -m k8s_integration` | 无集群 → 整档 PENDING 并在 VALIDATION 登记原因（哨兵，不用 skip 冒充） | K8S_PHYSICAL_VALIDATION_PENDING（不假装 PASS） |
-| G0.18 PostgreSQL 真并发 | `make test-pg` | 自建一次性 PG 容器；`FOR UPDATE`/`SKIP LOCKED`/CAS/部分唯一索引在真行锁下成对验证 | VERIFIED PASS（18/18） |
+| G0.18 PostgreSQL 真并发 | `make test-pg` | 自建一次性 PG 容器；`FOR UPDATE`/`SKIP LOCKED`/CAS/部分唯一索引在真行锁下成对验证；**锁等待与容量不足分别报**（`GpuPoolContendedError` vs `No GPU available`），重试预算与真实持锁时长都量过读数 | VERIFIED PASS（21/21） |
 | G0.19 Docker provider 真容器 | `make test-docker` | 真守护进程跑 health/start/logs/wait_ready/reconcile/流式占用；会话级容器泄漏守卫；`--gpus device=N` 由**守护进程自己的 HostConfig 记账**验收（DeviceIDs/Capabilities）、生产 argv 原样交给 daemon 且不残留孤儿容器 | VERIFIED PASS（21/21） |
 | G0.20 浏览器真 DOM | `make test-browser` | Playwright + 系统 Chrome：XSS 载荷不执行、轮询真的停、控制台零错误 | VERIFIED PASS（11/11） |
 | G0.21 K8s 线格式合规 | `pytest tests/test_k8s_model_conformance.py` | provider 生成的对象过真实 SDK 的 `sanitize_for_serialization` | VERIFIED PASS（6/6） |
@@ -39,6 +39,7 @@
 | G0.31 惰性开关不说谎 | `pytest tests/test_config_docs.py` | 按 AST 数 `app/`（排除声明文件）里每个 `Settings` 字段的读取位置（属性访问与字符串形式两态都算）；**零读取字段集合必须恰好等于 `INERT_SETTINGS`**（漏登记＝运维按"设了就生效"设值，死登记＝文档宣称不生效而代码已在读）；登记项在其 `.env.example` 条目紧邻上方注释块必须带"未启用"标记（"预留"二字不算澄清） | VERIFIED PASS（34 字段中恰好 1 个零读取；CFG1 接上读取者→点名死登记、CFG2 抹掉标记→点名该字段、CFG3 用已知有读取者的 `ide_port_start` 证明探针不是恒真） |
 | G0.32 workspace 镜像 digest 闭环 | `pytest tests/test_template_versions.py tests/test_cli.py` | `TemplateVersion.image_digest` 必须有写入入口（CLI `record-image-digest`：形制校验、幂等、released 版本已钉别处则拒改）与消费点（`image_ref.pinned_ref` 在 workspace 快照时拼 `image@sha256:…`，坏形制/摘要冲突/超列宽一律拒绝，不静默退回可变 tag）；整条链在同一份真库上连跑到 docker argv，并断言回填不改历史工作区快照 | VERIFIED PASS（PIN1–PIN4 四支变异各自翻红；本机 `docker image inspect` 的 .Id 与 .RepoDigests[0] 同值，两例独立实测） |
 | G0.33 分配策略是量过的 | `make policy-bench` + `pytest tests/test_scheduler_policy.py` | GPU 候选排序（=分配策略）抽成 `candidate_order()`；同一个 `allocate()` 跑同一份工作负载换四种排序成表：现产 best-fit 必须接满（8/8、两个 48 GiB 都留得住、浪费率 1.00），其余三档（worst_fit／arrival／pack_host）必须都接不满；生产排序**按表达式直比**，不经认档函数；实测表逐格钉值；跑完必须复原生产排序 | VERIFIED PASS（POL1/POL2/POL3/POL4/POL6 五支变异各自翻红；POL5 单支不改今天判决，如实记为未变） |
+| G0.34 终态不由第一次失败决定 | `pytest tests/test_worker.py tests/test_gpu_pool_guard.py` | `OperationWorker.will_retry(op)` 是"还有没有下一次尝试"的**唯一**判据，`finish_failure`（写 RETRYING/FAILED）与 `orchestrator._fail(terminal=...)`（写 workspace 状态）同读它；非终态失败停 QUEUED 且保留 `error_message`、归还卡，终态才 FAILED。两支极性常驻对照都在场：①注入"只失败一次"→ 第 1 轮后 workspace 必须不是 failed、op 是 retrying、卡回到 AVAILABLE，第 2 轮成功且 `error_message` 清空；②"每次都失败"→ 前 `MAX_ATTEMPTS-1` 轮逐轮不得出现 failed，最后一轮 workspace 与 op 同时 failed 且原因就是最后一次的。判据被短路成"永远终态"（变异 CONT2）时这两支必须翻红而其余 10 支照旧绿。另钉夹具侧：`tests/settle.py:await_workspace_settled` 的终态集合 `{running, failed}` 现在确实是终态，等不到要报"前提未达成 + 最后一次读数 + 池内空闲卡数"（正反两支：永远 queued 必红；`running`/`failed` 都不红且首读数未收敛 ⇒ 真在轮询） | VERIFIED PASS（本轮新增，起因与两份现场读数见 CHANGELOG 0.7.0 / CURRENT_STATE N-17；全套两连绿 528 passed / 1 skipped @ 宿主 load 15.7、28.4） |
 
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 

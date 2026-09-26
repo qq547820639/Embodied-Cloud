@@ -3,13 +3,12 @@
 越权一律 404，不泄露资源存在性。
 """
 
-import time
-
 from fastapi.testclient import TestClient
 
 from app.main import app
 from tests.http_auth import auth_headers as _auth
 from tests.http_auth import register_body
+from tests.settle import await_workspace_settled
 
 
 def _register(client: TestClient, email: str, username: str) -> tuple[str, str]:
@@ -25,11 +24,8 @@ def _create_running_workspace(client: TestClient, headers: dict, template_id: st
     )
     assert created.status_code == 201
     wid = created.json()["id"]
-    for _ in range(40):
-        st = client.get(f"/api/workspaces/{wid}", headers=headers).json()["status"]
-        if st in {"running", "failed"}:
-            break
-        time.sleep(0.05)
+    # 前提：等它收敛到终态（预算是 worker 的重试节奏，不是 2s 拍脑袋，见 tests/settle.py）
+    await_workspace_settled(client, wid, headers)
     return wid
 
 

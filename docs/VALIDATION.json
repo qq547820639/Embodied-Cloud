@@ -4,11 +4,11 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 522
+      "count": 529
     },
     "test_run": {
       "status": "PASS",
-      "passed": 521,
+      "passed": 528,
       "skipped": 1,
       "failed": 0,
       "failed_names": []
@@ -19,7 +19,7 @@
     },
     "integration_postgres": {
       "status": "PASS",
-      "note": "18/18 用例在真实后端上执行"
+      "note": "21/21 用例在真实后端上执行"
     },
     "integration_docker": {
       "status": "PASS",

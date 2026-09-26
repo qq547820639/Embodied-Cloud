@@ -37,6 +37,16 @@ class GpuInfo:
 _UNIQUE_VIOLATION = "23505"
 
 
+class GpuPoolContendedError(RuntimeError):
+    """池子里**有**满足需求的空闲卡，只是每一张都被并发事务锁住，且在重试预算内没等到。
+
+    与"真的没有卡"必须分开报：前者是可重试的等待（也是"卡其实空闲"这一事实的唯一记录），
+    后者是容量结论。两者共用一句话时，运维看到"无卡可用"、用户看到工作区一路重试到
+    FAILED，而桌上还摆着空闲卡——本轮在真 PostgreSQL 行锁上把这个形状量了出来
+    （tests/test_postgres_concurrency.py::test_allocate_retry_window_...）。
+    """
+
+
 def candidate_order() -> list:
     """候选排序就是分配策略本身：默认 best-fit —— 先用刚好够用的卡，把大卡留给大任务。
 
@@ -138,6 +148,7 @@ class GpuScheduler:
         """
         # 统一单位：模板需求 GB → MiB（1 GiB = 1024 MiB），再扣掉厂商预留容差
         required_mib = gpu_requirement_gb * 1024 - VRAM_TOLERANCE_MIB
+        waiting = 0  # 最后一次看到的"空闲但被别人锁着"的候选数
         for attempt in range(self.ALLOCATE_MAX_ATTEMPTS):
             gpu = db.scalar(
                 select(Gpu)
@@ -183,7 +194,16 @@ class GpuScheduler:
             )
             if not still_waiting:
                 break
+            waiting = int(still_waiting)
             time.sleep(self.ALLOCATE_BACKOFF_SECONDS * (attempt + 1))
+        if waiting:
+            budget = self.ALLOCATE_BACKOFF_SECONDS * sum(
+                range(1, self.ALLOCATE_MAX_ATTEMPTS)
+            )
+            raise GpuPoolContendedError(
+                f"{waiting} 张 >= {gpu_requirement_gb} GB 的卡处于 AVAILABLE，但都被并发事务锁住；"
+                f"重试预算 {budget:.2f}s 内没有等到（不是容量不足）(workspace {workspace_id[:8]})"
+            )
         raise RuntimeError(
             f"No GPU available with >= {gpu_requirement_gb} GB VRAM "
             f"(workspace {workspace_id[:8]})"

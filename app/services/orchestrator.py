@@ -28,9 +28,18 @@ from .ledger import CreditLedgerService
 from .providers.base import ResourceReservation, RuntimeState, WorkspaceProvider
 from .scheduler import GpuScheduler, recover_stuck_gpu_allocations
 from .streaming import StreamingSessionService
-from .worker import enqueue_operation
+from .worker import OperationWorker, enqueue_operation
 
 logger = logging.getLogger("embodiedcloud.orchestrator")
+
+
+def _failure_is_terminal(operation: "WorkspaceOperation | None") -> bool:
+    """这一次失败是不是最后一次：判据从 worker 那一侧来，不在这里重抄一遍。
+
+    `operation is None` = 同步路径（`WorkspaceOrchestrator._start`）：没有 worker 接管，
+    这一次就是最后一次，维持既有的 FAILED 语义（ADR 0002 修订）。
+    """
+    return operation is None or not OperationWorker.will_retry(operation)
 
 
 class WorkspaceOrchestrator:
@@ -253,40 +262,51 @@ class WorkspaceOrchestrator:
             workspace.stopped_at = None
             record_workspace_launch_duration(template.id, time.monotonic() - launch_started)
         except Exception as exc:
-            # 盲捕获是有意设计：provider/scheduler 边界任意异常 → FAILED（ADR 0002）
+            # 盲捕获是有意设计：provider/scheduler 边界任意异常不得泄漏到 API（ADR 0002）
             record_workspace_launch_failure(template.id, workspace.provider)
-            self._fail(db, workspace, str(exc))
+            self._fail(db, workspace, str(exc), terminal=_failure_is_terminal(operation))
             raise
         db.commit()
 
-    def _fail(self, db: Session, workspace: Workspace, message: str) -> None:
-        """置 FAILED 并尽力释放 GPU。
+    def _fail(
+        self, db: Session, workspace: Workspace, message: str, *, terminal: bool = True
+    ) -> None:
+        """记录这一次尝试的失败原因，并尽力释放 GPU；只有终态才写 FAILED。
 
-        FAILED 置位必须持久化：release 异常时回滚只撤销 release 的局部修改，
-        随后重新置位 FAILED + error_message + 清 GPU 字段；GPU 残留由 reconcile 补做。
+        `terminal=False`（worker 还会按 attempts 重试）时，status 停在 QUEUED：
+        把"还要再试"的失败写成 FAILED，等于对读者宣布一个还没下的结论——
+        `workspace_operations` 在 API 层零读者，status 是"还在重试"这件事的唯一出口。
+        实测形状：共享卡池被借走的那 1s 里第 1 次尝试报 `No GPU available` → 旧写法
+        当场 FAILED → 第 2 次尝试成功 → 同一个 workspace 又回到 RUNNING（FAILED→RUNNING
+        的复活），期间 GET /api/workspaces/{id} 读到的是假死。常驻对照见
+        tests/test_worker.py::test_retryable_provision_failure_is_not_published_as_terminal。
+
+        终态那一路的持久化要求不变：release 异常时回滚只撤销 release 的局部修改，
+        随后重新置位 + error_message + 清 GPU 字段；GPU 残留由 reconcile 补做。
         """
-        # §18：启动失败 → 圈住的额度原样退回（不产生任何账本条目）
+        settled = WorkspaceStatus.FAILED.value if terminal else WorkspaceStatus.QUEUED.value
+        # §18：启动失败 → 圈住的额度原样退回（不产生任何账本条目；重试那一轮会重新圈）
         if self.billing is not None:
             try:
                 self.billing.release_hold(db, workspace.id, reason="provision failed")
-            except Exception as exc:  # 释放失败不得掩盖 FAILED 置位（盲捕获有意，见 ADR 0002）
+            except Exception as exc:  # 释放失败不得掩盖状态置位（盲捕获有意，见 ADR 0002）
                 logger.warning("hold release failed for %s: %s", workspace.id[:8], exc)
-        workspace.status = WorkspaceStatus.FAILED.value
+        workspace.status = settled
         workspace.error_message = message
-        # 先 flush：release 成功时其内部 commit 会连同 FAILED 置位一并落库
+        # 先 flush：release 成功时其内部 commit 会连同状态置位一并落库
         db.flush()
         try:
             self.scheduler.release(db, workspace.id)
         except Exception as exc:
             db.rollback()
-            # 不得因 release 失败回滚 FAILED 置位：重新置位（release 失败可被 reconcile 补做）
+            # 不得因 release 失败回滚状态置位：重新置位（release 失败可被 reconcile 补做）
             logger.warning(
                 "workspace %s GPU release failed during fail: %s (will be reconciled)",
                 workspace.id[:8], exc,
             )
-            workspace.status = WorkspaceStatus.FAILED.value
+            workspace.status = settled
             workspace.error_message = message
-        # FAILED 的 workspace 不得声称占有 GPU（字段一并清除）
+        # 这一次尝试没有留下运行时：workspace 不得继续声称占有 GPU（字段一并清除）
         workspace.gpu_id = None
         workspace.gpu_index = None
         workspace.gpu_name = None

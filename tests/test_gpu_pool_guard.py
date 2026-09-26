@@ -9,6 +9,10 @@
 这里量的是回收内核（不点它就只能停在 0 张空闲），并且**只用自己的 workspace 行**
 ——不拿别人的占用当夹具，免得本文件的读数受上游用例残留状态摆布。
 
+同文件还量 `tests/settle.py` 的收敛判据（正反两支）。本文件自己也欠一次收尾更正：
+`rig` 过去只还卡、不删行，而它留下的 CREATED 行会被下一个模块启动时的 `reconcile_all()`
+重新入队 PROVISION（＝让别人的 worker 替本文件抢卡），现在 teardown 连行一起删。
+
 不声称"某一轮配对变绿是守卫单独给的"：真起 TestClient 时 app 的
 `run_crash_recovery()` 也会把查无 runtime 的分配放掉；同一读数有两个可能成因，
 就不能拿它当单因证据（如实写明）。
@@ -18,12 +22,22 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.deps import SessionFactory, scheduler
 from app.main import app
-from app.models import Gpu, GpuStatus, Role, Template, User, Workspace, WorkspaceStatus
+from app.models import (
+    Gpu,
+    GpuStatus,
+    Role,
+    Template,
+    User,
+    Workspace,
+    WorkspaceOperation,
+    WorkspaceStatus,
+)
 from tests.gpu_pool import allocated_workspaces, count_big_enough, ensure_free_gpus, reclaim_gpus
+from tests.settle import await_workspace_settled
 
 HOSTS = 8  # 抽干池需要的挂点数；mock seed 的卡数小于它时按实际卡数收
 
@@ -60,9 +74,21 @@ def rig():
             db.add(ws)
             hooks.append(ws.id)
         db.commit()
-        yield {"cards": cards, "hooks": hooks}
-    # 本文件会故意抽干池：收尾必须自己放回，否则自己变成下一个受害者
+        state = {"cards": cards, "hooks": hooks}
+        yield state
+    # 收尾要还的不止"卡"。上面那 8 行 CREATED workspace 是一把延时引信：
+    # app 每次启动都跑 `run_crash_recovery()` → `reconcile_all()`，其中
+    # "QUEUED/CREATED 且无 active operation ⇒ 重新入队 PROVISION"
+    # （app/services/orchestrator.py 的 CREATED/QUEUED 分支）。于是下一个模块起
+    # TestClient 时，它自己的 worker 会先替本文件的残骸去抢卡。实测：本文件 +
+    # test_api 配对，test_api 的 provision 被报成 `No GPU available with >= 8 GB VRAM`
+    # （日志 4 条 `provision(ws-guard) failed, retrying`），终态判据当场翻红。
     with SessionFactory() as db:
+        for hook in state["hooks"]:
+            scheduler.release(db, hook)  # 自己借的卡自己还（顺带清 Gpu.workspace_id）
+        db.execute(delete(WorkspaceOperation).where(WorkspaceOperation.workspace_id.in_(state["hooks"])))
+        db.execute(delete(Workspace).where(Workspace.id.in_(state["hooks"])))
+        db.commit()
         if count_big_enough(db, 8) == 0:
             reclaim_gpus(db, scheduler)
 
@@ -128,3 +154,52 @@ def test_ensure_free_gpus_leaves_draining_cards_alone(rig):
         assert ensure_free_gpus(db, scheduler, need=1) == free_before - 1
         still = list(db.scalars(select(Gpu).where(Gpu.status == GpuStatus.DRAINING.value)))
         assert still, "DRAINING 的卡被放回 AVAILABLE：会抹掉别的用例故意设出来的状态"
+
+
+class _StubResponse:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _StubClient:
+    """只满足 await_workspace_settled 的读取形状：按脚本依次返回状态，并记次数。"""
+
+    def __init__(self, script: list[dict]):
+        self.script = script
+        self.calls = 0
+
+    def get(self, url: str, headers: dict | None = None) -> _StubResponse:
+        payload = self.script[min(self.calls, len(self.script) - 1)]
+        self.calls += 1
+        return _StubResponse(payload)
+
+
+def test_await_settled_fires_when_the_workspace_never_settles(rig):
+    """反向对照：一直 queued 就必须按"前提未达成"翻红，且把最后读数和池子现场一起报出来。
+
+    没有这一支，"等不到就说没说清"的那类红又会退回成 `assert 'queued' == 'running'`。
+    """
+    client = _StubClient([{"status": "queued", "error_message": "No GPU available with >= 8 GB VRAM"}])
+    with pytest.raises(AssertionError) as got:
+        await_workspace_settled(client, "ws-" + "0" * 30, {}, timeout_seconds=0.2, interval=0.01)
+    text = str(got.value)
+    assert "前提未达成" in text, text
+    assert "'queued'" in text, text  # 最后一次读数必须在串里
+    assert "No GPU available" in text, text  # 以及它为什么还没收敛
+    assert "空闲卡" in text, text  # 域内现场：池子读数真的接上了（不是恒真的占位串）
+    assert client.calls >= 2, client.calls  # 它确实轮询过，不是读一次就下结论
+
+
+def test_await_settled_returns_on_either_terminal_status():
+    """正向对照：running／failed 都是终态，都不该抛；provisioning 则要继续等。
+
+    这一支同时证明判据不是恒真（queued/provisioning 那一路会走满超时）也不是恒假。
+    """
+    for terminal in ("running", "failed"):
+        client = _StubClient([{"status": "provisioning"}, {"status": terminal}])
+        state = await_workspace_settled(client, "ws-x", {}, timeout_seconds=1.0, interval=0.01)
+        assert state["status"] == terminal
+        assert client.calls == 2, (terminal, client.calls)  # 第一次没收敛⇒它真的在等

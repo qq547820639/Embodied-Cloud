@@ -7,10 +7,10 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 522 / passed 521 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
+| Test | **PASS（collected 529 / passed 528 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
 | Lint / Type | PASS（ruff 0 / mypy 45 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
-| Integration PostgreSQL | **PASS 18/18**（自建一次性容器，真行锁语义） |
+| Integration PostgreSQL | **PASS 21/21**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
 | Integration Docker | **PASS 21/21**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册） |
 | Integration Browser | **PASS 11/11**（Playwright 驱动系统 Chrome 真 DOM） |
 | Integration Object store | **PASS 20/20**（一次性 VersityGW 容器 + 真实 boto3；MinIO 交叉核对读数一致） |
@@ -40,6 +40,8 @@
 | N-13 | **`TemplateVersion.image_digest` 从装饰性字段变成有写入入口、也有读者的一列**：普查读数是"自 v0.4 建模以来 0 处写入、0 处读取"（列存在不等于镜像被钉住，provider 一直启动可变 tag）。新增 `app/services/image_ref.py:pinned_ref`（workspace 快照那一刻拼成 `image@sha256:…`，形制不对／与 image 内已有摘要冲突／拼完超过列宽则**拒绝**而不是静默退回 tag）+ CLI `record-image-digest`（幂等；已钉在另一摘要的 released 版本拒改，退码 3 表示"该发布新版本而不是就地改写"）+ `build_workspace_image.sh` 构建后打印摘要、拿不到就退 2 | 整条链在同一份真库上连跑（回填→新建工作区快照→docker argv 里的 token），另有"回填不改历史工作区快照"的断言；变异对照 PIN1（快照处退回原写法）／PIN2（放过坏形制）／PIN3（允许就地挪针）／PIN4（吞掉退码）各自翻红，`image_digest` 有生产读者的普查判据带 `current_version_id` 作非恒真对照 |
 | N-14 | **GPU 分配策略从"写在 SQL 里的习惯"变成量过并被钉住的判据**：`allocate()` 的 ORDER BY 抽成 `candidate_order()`，新增 `tests/scheduler_policy_lab.py`（同一个分配器、同一份工作负载，只换排序）与 `make policy-bench`。实测（合成舰队 192 GiB、负载合计恰等于容量）：best_fit 8/8 全接、48 GiB 两张都留得住、浪费率 1.00；arrival 与 pack_host 各 6/8、worst_fit 4/8，三者一个大任务都接不下 | `tests/test_scheduler_policy.py` 4 例：现产排序**按表达式直比**（不经过认档函数）、其余三档必须都接不满、实测表逐格钉值、跑完必须复原生产排序。变异 POL1 改向→2 红、POL2 换 pack_host→红、POL3 漏复原→2 红、POL4 让排序不生效（实测台失去区分力）→2 红、POL6「认档函数说谎 + 生产改向」组合→直比那条红（POL5 只说谎不改今天的判决，如实记为未变） |
 | N-15 | **两条"前提竞态"各由一次真实红抓出并修掉，判据的超时一分没加**：①真集群档负向对照在 `wait_ready(...) is False` 之后直接 `_pods(...)[0]` —— Pod 及其 conditions 由集群控制器写，provider 只给 6s 窗口（主树全量复算 517 passed / 1 failed，红的就是取 Pod 那行的 `IndexError`，其余 6 条真集群用例同轮全绿 ⇒ 既非 kind 引导失败也非产品缺陷）；②换树换环境复算又红一条 docker 档：`exit 0` 的"已启动→已退出"只差几毫秒，工作区又无 ide_port/healthcheck，`wait_ready` 首次 inspect 抓到 running 便返回 True（519 passed / 1 failed，`assert True is False`，同一内容主树刚绿过；这个 True 本身是产品正确行为，另有用例钉着） | 两处同法：判据行留在最前，前提改走 `tests/k8s_server.poll_until/await_pod/await_condition_reason` 与新加的 `wait_exited`（超时抛"前提未达成 + 最后一次读数"，不返回 False 冒充结论）；工具自身各有开火对照（假 list 函数三种边界 / 不起 exit 的容器 2s 内必须红）。复跑：真集群档 7/7（254s）、docker 档 21/21（57.6s），全套 519 → 522 |
+| N-16 | **`allocate()` 的重试预算被量过，"等不到"与"没卡"分成两句话**：参数（5 次 × 0.05s 退避）此前无从解释；实测预算 0.500s、真实放弃发生在 0.816s / 0.821s，16 线程抢 4 卡 ×3 轮里单个分配事务 median 30.5→43.1ms、max 35.5→70.8ms 且每轮赢家 4/4 ⇒ 参数保持不动，"改成 deadline 式长等待"被同一批读数否掉（只是把假空换成更慢的首包）。真正的缺陷是可确定性复现的谎话：唯一候选被别的会话 `FOR UPDATE` 持住时，`still_waiting` 每轮都数得到 1 张，却仍抛 `No GPU available` | 新增 `GpuPoolContendedError`（含等待卡数与预算）+ 窗口/持锁两支实测常驻用例 + `truly_empty` 反面档；`test_unbounded_candidate_read_starves_concurrent_allocate` 的断言就地反转（从钉住谎话改为钉住"必须报 contention 且不得出现容量那句"）；变异 CONT1 短路 contention 分支 → 两支红、反面那支照旧绿。pg 档 18 → 21，全套 522 → 525 |
+| N-17 | **workspace 在「还要重试」的那一刻被宣布死亡**：`make validate` 连两轮同一条红（`tests.test_workspace_credential::test_access_endpoint_returns_plaintext_password`，`assert 'failed' == 'running'`）。归因靠仓库外临时诊断插件打出的两份现场读数：失败瞬间 8 张卡里 6 张 ALLOCATED、victim 自己没卡；而**收尾**读数里同一个 workspace 已经 `running`、它的 `provision` op 是 `succeeded(2)` —— 那句「这个任务失败了」是第 1 次尝试替第 2 次尝试下的结论。放大器另有一处：`tests/test_gpu_pool_guard.py` 的 `rig` 留 8 行 CREATED workspace，app 每次启动都跑 `reconcile_all()`（「QUEUED/CREATED 且无 active op ⇒ 重新入队 PROVISION」），于是下一个模块的 worker 先替残骸抢卡（本文件 + `test_api` 配对即红，日志 4 条 `provision(ws-guard) failed, retrying`） | ①重试判据收成一个函数 `OperationWorker.will_retry(op)`，`finish_failure` 与 `orchestrator._fail(terminal=...)` 同读它（两侧各写一遍 `attempts >= MAX_ATTEMPTS` 时，任何一侧改动都会让「op 在重试」和「workspace 已 FAILED」同时成立）；非终态失败写 QUEUED + 保留 `error_message` + 归还卡。`workspace_operations` 在 API 层零读者（`grep -rn WorkspaceOperation app/routers/` = 0），所以 status 是「还在重试」的唯一出口；②`tests/settle.py::await_workspace_settled`：终态集合 + 前提预算 30s（旧轮询 2s < backoff 1+2s）+ 失败回显池子现场，4 处 `{running, failed}` 轮询全部接上；③守卫收尾归还自己借的卡并删自己的行；④`test_api` 补上它一直缺的前置声明。反证两支：CONT2 把判据短路成「永远终态」→ 新增两支红、其余 10 支照旧绿；settle 助手带正反两支（永远 queued 必须红且报「前提未达成」+ 池子读数；running/failed 都不红，且首读数未收敛 ⇒ 它真在轮询）。复跑：全套两连绿 528 passed / 1 skipped（宿主 load 15.7 与 28.4），全套 525 → 529 |
 
 
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
@@ -90,7 +92,7 @@
 全套用例全绿（唯一 skip 是 `k8s_integration` GPU 档）。四元组计数只在 §1 出现一处，
 由 `make validate` 的值对账钉住——**本节刻意不再复读绝对数字**，多抄一份就多一处会静过期、
 且门禁看不见的位置。
-其中真后端档：PG 真并发 18/18、真容器 21/21、真浏览器 11/11、
+其中真后端档：PG 真并发 21/21、真容器 21/21、真浏览器 11/11、
 对象存储真后端 20/20、K8s 控制面真集群 7/7、SDK 线格式 6、预授权 14、
 **边缘设备真进程 e2e（真 uvicorn 子进程 + 真 agent 子进程 + mock 驱动）**。
 lint/type/migration/build/smoke/release/供应链全链路。

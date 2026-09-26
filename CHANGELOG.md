@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 522 / passed 521 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 529 / passed 528 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -149,6 +149,27 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   接近 0，据此停机会误杀长跑任务并照秒扣费），被 NVIDIA 设备阻塞。区别在于——**延后现在是
   被机器看着的延后**。
 
+### 调度并发：量出重试预算，然后把"等不到"和"没卡"分开报
+- 优化对象是 `allocate()` 的重试预算（`ALLOCATE_MAX_ATTEMPTS=5`、`BACKOFF=0.05s`，
+  注释里从没写过它们怎么来的）。真 PG 行锁上量：预算 0.500s、实际放弃发生在
+  **0.816s / 0.821s**；16 线程抢 4 张卡 ×3 轮，成功分配的单个事务 median 30.5→43.1ms、
+  max 35.5→70.8ms（两次运行），每轮赢家都是 **4/4**。⇒ 参数**不动**（最坏持锁 ≈70ms
+  对 0.5s 窗口有 ≥7× 余量）；"改成 deadline 式等待"也被同一批读数否掉——拉长上界只是
+  把假空概率换成更慢的首包，而真实缺陷是**两种原因共用一句话**。
+- 那个缺陷可确定性复现（另一会话 `SELECT … FOR UPDATE` 持住唯一候选不放）：
+  `allocate()` 每轮都数得到 `still_waiting = 1`，却仍抛
+  `No GPU available with >= X GB VRAM`。现在分两句话：
+  `GpuPoolContendedError`（"N 张卡在等锁，0.50s 预算内没等到，**不是容量不足**"）
+  与原来的容量结论。SQLite 下 `FOR UPDATE` 是 no-op ⇒ 这类谎话只有真 PG 档看得见。
+- 一条常驻用例的断言随之反转：`test_unbounded_candidate_read_starves_concurrent_allocate`
+  过去只能钉住那句谎话（`match="No GPU available"`），现在它钉"整批候选被锁走时必须报
+  contention、且不得出现容量那句"；反面同批补一档（需求 999 GB 压根不进等锁分支，
+  仍报容量结论），保证新分支不是"什么都算 contention"。
+- 变异对照 CONT1（把 contention 分支短路成 `if False`）：窗口那支与 starvation 那支
+  同时红、`truly_empty` 那支照旧绿 —— 极性正确。
+- 读法进 OPERATIONS：看到 `GpuPoolContendedError` 意味着"有人在同一批卡上抢"，
+  不是池子配小了。全套 522 → 525（pg 档 18 → 21，§1/G0.18/§4 三处同步）。
+
 ### 两条前提竞态：各由一次真实红换来的修法（判据超时不动）
 - 上一支（5eca7bf）之后的全量复算红了一条：`test_wait_ready_is_false_while_the_gpu_request_cannot_be_scheduled`
   在 `IndexError: list index out of range` 上崩——**崩在断言之后的取 Pod 那一行**
@@ -235,6 +256,55 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   **PIN2** `pinned_ref` 放过坏形制 → `test_pinned_ref_arms` DID NOT RAISE；
   **PIN3** 允许就地挪针 → `test_record_image_digest_refuses_to_move_a_released_pin` 红；
   **PIN4** 分发处吞掉退码 → `test_main_record_image_digest_dispatch` 红。
+
+### 连红两轮的谎话：workspace 在「还要重试」的那一刻被宣布死亡
+
+`make validate` 连两轮给出同一条红，且这轮的报告第一次带得出用例名（G0.29 的 `failed_names`
+在这里兑现）：`tests.test_workspace_credential::test_access_endpoint_returns_plaintext_password`，
+`assert 'failed' == 'running'`。归因没有靠"再跑一遍看看"，而是临时挂了一个**仓库外**的 pytest
+插件（`/tmp/gpu_trace.py`，跑完即删），把"失败瞬间"和"整轮收尾"两份域内现场一起打出来：
+
+- 失败瞬间：8 张卡里 6 张 ALLOCATED、victim 自己一张都没拿到（容量那句 `No GPU available`
+  在当时**是真的**，`still_waiting == 0`，不是上一轮那条 contention 谎话）；
+- 整轮收尾：**同一个 workspace** 已经 `running`，它的 `provision` op 是 `succeeded(2)`。
+
+两句合起来才是根因：那句"这个任务失败了"是第 1 次尝试替第 2 次尝试下的结论。
+`_fail()` 每一轮失败都写 FAILED，而 worker 手里还有两次尝试；`workspace_operations` 在 API 层
+零读者（`grep -rn WorkspaceOperation app/routers/` = 0），所以 status 是"还在重试"的唯一出口，
+下一轮尝试开头还会把 `error_message` 清成 None——假死连痕迹都不留。
+
+放大器另有一处，是本轮自己踩出来的：`tests/test_gpu_pool_guard.py` 的 `rig` 留下 8 行 CREATED
+workspace，而 app 每次启动都跑 `reconcile_all()`，其规则包含"QUEUED/CREATED 且无 active op
+⇒ 重新入队 PROVISION"——于是**下一个**起 TestClient 的模块的 worker 先替这份残骸去抢卡。
+配对复算（本文件 + `test_api`）当场让 `test_api` 的 provision 报 `No GPU available`，
+日志里 4 条 `provision(ws-guard) failed, retrying` 是它自己的 worker 在替别人重试。
+
+修四处：
+
+- **重试判据只留一份**：`OperationWorker.will_retry(op)`；`finish_failure`（写 RETRYING/FAILED）
+  与 `orchestrator._fail(terminal=...)`（写 workspace 状态）同读它。两侧各写一遍
+  `attempts >= MAX_ATTEMPTS` 时，任何一侧改动（调上限、新增不可重试错误）都会让
+  "op 在重试"与"workspace 已 FAILED"同时成立。非终态失败写 QUEUED + 保留 `error_message`
+  + 归还卡；终态才 FAILED。ADR 0002 两句原文都保留（异常不得泄漏、失败必带可诊断原因），
+  只把"任何异常 ⇒ FAILED"这一句按尝试轮次分流，并加了修订小节。
+- **前提预算与判据预算分开**：新增 `tests/settle.py:await_workspace_settled`，4 处
+  `for _ in range(40): sleep(0.05)` 全部接上。旧的 2s 不是判据预算，是**误把 worker 的
+  重试节奏（backoff 1s + 2s ⇒ 第 3 次尝试最早 3s 之后）当成被测主张的时限**；
+  助手在终态才返回，等不到就报"前提未达成 + 最后一次读数 + 池内空闲卡数/ALLOCATED 数"。
+  **没有任何一条判据的超时被调大**（`wait_ready` 6s、`wait_running` 30s 原样）。
+- **谁留的行谁收尾**：`rig` 的 teardown 改成先 `scheduler.release` 还自己借的卡，再删自己的
+  operation 与 workspace 行；`test_api::test_end_to_end_workspace_lifecycle` 补上它一直缺的
+  `ensure_free_gpus` 前置声明（全套 8 张 mock 卡的共用池里，需要卡的用例必须自己达成前提）。
+- **反证两支**：CONT2 把 `_failure_is_terminal` 短路成"永远终态"（＝修法之前）→ 本轮新增两支
+  红、`tests/test_worker.py` 其余 10 支照旧绿，说明判据真接在它们身上；`await_workspace_settled`
+  带正反两支（永远 queued 必须红且报出池子读数；`running`/`failed` 都不红，且第一次读数
+  未收敛 ⇒ 它真在轮询而不是读一次就下结论）。
+
+复算：全套两连绿 528 passed / 1 skipped（宿主 `vm.loadavg` 1 分钟值 15.7 与 28.4 各一轮，
+这一族的复现本来就依赖负载窗口），全套 525 → 529。
+
+**本轮明确不做**：不给共用池加 per-test 配额或改造成每用例独立库——那只是把"谁借谁还"的责任
+挪进框架，而 N-17 的读数指向的正是"留下行的模块没收尾"这一条已经写进文档、这次被机器追上的规矩。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

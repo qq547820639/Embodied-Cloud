@@ -37,7 +37,7 @@ Browser (Dashboard / code-server / WebRTC viewer)
 ```
 CREATED → QUEUED → PROVISIONING → RUNNING → STOPPING → STOPPED
            │          │              │                        │
-           └──────────┴──────────────┴── FAILED ←── 任何异常/就绪超时
+           └──────────┴──────────────┴── FAILED ←── 最后一次尝试的异常/就绪超时
 DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达，
         行保留 deleted_at 供计费/审计/部署历史追溯）
 ```
@@ -46,9 +46,18 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
 - 状态持久化于 DB；生命周期操作（PROVISION/START/STOP/DESTROY/RECONCILE）落库为
   `workspace_operations`，由 DB-backed worker 执行（lease + fencing token + heartbeat，
   重启后 PENDING/RETRYING 不丢）。
+- **FAILED 只能由"最后一次尝试"写**。provision 的任一底层异常都不泄漏到 API（ADR 0002），
+  但异常落在哪一轮决定状态：`OperationWorker.will_retry(op)` 为真（还有下一次尝试）时
+  workspace 停在 QUEUED 并保留 `error_message`；为假才写 FAILED。判据只有这一份，
+  `finish_failure` 与 `orchestrator._fail` 同读它——两侧各写一遍阈值时，任何一侧改动都会让
+  「operation 还在重试」与「workspace 已 FAILED」同时成立，读者看到的是一次还没发生的死亡
+  （常驻对照：`tests/test_worker.py::test_retryable_provision_failure_is_not_published_as_terminal`）。
 - 启动恢复走 `reconcile_all()`：基于 runtime 事实收敛（DB RUNNING + runtime ALIVE → adopt；
   RUNNING + MISSING → 结算置 FAILED 并归还 GPU；PROVISIONING + MISSING → 重新入队 PROVISION；
   QUEUED/CREATED → 重新入队；mock/UNKNOWN → 保守不动）。
+  注意最后那条"QUEUED/CREATED 且无 active op ⇒ 重新入队"是**测试夹具的引信**：任何模块留下的
+  CREATED 行，都会被下一个起 TestClient 的模块的 worker 当成待办去抢共享卡池——留下行的模块
+  必须自己收尾（`tests/test_gpu_pool_guard.py` 的 `rig`）。
 - RUNNING 期间的 stop/destroy 结算 GPU 秒数 → 写入 CreditLedger（USAGE，幂等）。
 - provision 补偿式事务：外部副作用失败 → `provider.destroy` 补偿 + `scheduler.release` 归还，
   绝不残留孤儿容器/Pod/GPU。
@@ -62,6 +71,17 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
 - 分配顺序：AVAILABLE（显存满足模板需求，含 16MiB 厂商预留容差）→ ALLOCATED；
   释放：stop/destroy → AVAILABLE。
 - UNHEALTHY 不参与调度；DRAINING 不再分配新 workspace。
+- **等不到 ≠ 没卡**（本轮在真 PG 行锁上量出来后分开报）：`allocate()` 每轮都数得到
+  `still_waiting`（AVAILABLE 且容量足够的行数），预算耗尽时若它还大于 0 就抛
+  `GpuPoolContendedError`（"N 张卡在等锁"），只有真没候选才抛 `No GPU available with >= X GB`。
+  之前两件事共用一句话：运维看到"无卡可用"、用户看到工作区一路重试到 FAILED，
+  而桌上还摆着空闲卡（SQLite 下 `FOR UPDATE` 是 no-op，永远复现不出来）。
+  参数本身是量过的，不是拍的：重试预算 0.500s（5 次退避之和），实测放弃发生在
+  0.816s / 0.821s 两次读数；16 线程抢 4 张卡 ×3 轮里成功分配的单个事务
+  median 30.5→43.1ms、max 35.5→70.8ms，且**每轮赢家都是 4/4**。
+  结论：`ALLOCATE_MAX_ATTEMPTS=5 / ALLOCATE_BACKOFF_SECONDS=0.05` 保持不动
+  （最坏持锁 ≈70ms 对 0.5s 有 ≥7× 余量），改成 deadline 式长等待被同一批读数否掉
+  ——那只是把假空概率换成更慢的首包。本轮改的是这句话。
 - **候选排序 = 分配策略，且它是量过、被钉住的**：默认 best-fit（`memory_total asc`，
   先用刚好够用的卡，把大卡留给大任务）。`make policy-bench` 用同一个 `allocate()`、
   同一份合成工作负载（8/16/24/48 GiB 各一张 × 两台机，负载合计恰好等于池子容量 192 GiB）

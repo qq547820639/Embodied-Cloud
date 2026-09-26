@@ -12,6 +12,7 @@ warm pool claim 的 CAS 也只是靠 SQLite 单写者"顺带"成立。本文件�
 """
 
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -38,7 +39,7 @@ from app.models import (
     WorkspaceOperation,
 )
 from app.services.ledger import CreditLedgerService
-from app.services.scheduler import GpuScheduler
+from app.services.scheduler import GpuPoolContendedError, GpuScheduler
 from app.services.worker import OperationWorker, enqueue_operation
 
 pytestmark = pytest.mark.pg_integration
@@ -464,9 +465,17 @@ def test_unbounded_candidate_read_starves_concurrent_allocate(pg_factory):
     starver.begin()
     assert len([g.id for g in starver.scalars(lock_all)]) == 2, "无 limit 的读法本应锁走两张候选"
     try:
-        with pg_factory() as db, pytest.raises(RuntimeError, match="No GPU available"):
+        with pg_factory() as db, pytest.raises(RuntimeError) as got:
             ensure_workspace(pg_factory, "ws-starved")
             scheduler.allocate(db, "ws-starved", gpu_requirement_gb=0)
+        # 断言反转（与修法同批落地）：旧写法下这条只能钉住那句谎话
+        # ——两张卡明明 AVAILABLE，却被报成 "No GPU available"。现在它钉的是
+        # "报告说的必须是发生过的事"：锁导致的等待要按等待报。
+        assert isinstance(got.value, GpuPoolContendedError), (
+            f"候选被整批锁走时报的仍是容量结论：{got.value}"
+        )
+        assert "No GPU available" not in str(got.value), str(got.value)
+        assert "2" in str(got.value), f"没说清有几张卡在等：{got.value}"
     finally:
         starver.rollback()
         starver.close()
@@ -924,3 +933,128 @@ def test_missing_workspace_is_not_reported_as_no_capacity(pg_factory):
     with pg_factory() as db, pytest.raises(RuntimeError, match="非并发争用") as exc:
         GpuScheduler(pg_factory).allocate(db, "ws-does-not-exist", gpu_requirement_gb=0)
     assert "No GPU available" not in str(exc.value), "外键冲突又被误报成容量不足"
+
+
+# ---------------------------------------------------------------------------
+# 重试预算：把"拍出来的 5×0.05s"量成读数（本轮）
+# ---------------------------------------------------------------------------
+
+
+def test_allocate_retry_window_gives_up_while_a_card_is_still_free(pg_factory):
+    """唯一候选被并发事务锁住时，预算耗尽后 allocate 会报"没有卡"——卡其实是空闲的。
+
+    这句话同时骗两拨人：运维看到"无卡可用"，用户看到工作区一路 RETRYING 到 FAILED。
+    本用例把窗口量出来（elapsed），并证明"锁一放，同一张卡立刻能分配"。
+    """
+    ids = seed_gpus(pg_factory, 1)
+    scheduler = GpuScheduler(pg_factory)
+
+    holder = pg_factory()
+    holder.begin()
+    assert holder.execute(
+        select(Gpu).where(Gpu.id == ids[0]).with_for_update()
+    ).scalar_one().id == ids[0]
+
+    started = time.monotonic()
+    ensure_workspace(pg_factory, "ws-budget")
+    error: Exception | None = None
+    try:
+        with pg_factory() as db:
+            scheduler.allocate(db, "ws-budget", gpu_requirement_gb=0)
+    except RuntimeError as exc:
+        error = exc
+    spent = time.monotonic() - started
+    holder.rollback()
+    holder.close()
+
+    assert isinstance(error, GpuPoolContendedError), (
+        f"卡是空闲的、只是被锁住，报的却是容量结论：{error}"
+    )
+    assert "No GPU available" not in str(error) and "1 张" in str(error), str(error)
+    budget = GpuScheduler.ALLOCATE_BACKOFF_SECONDS * sum(
+        range(1, GpuScheduler.ALLOCATE_MAX_ATTEMPTS)
+    )
+    assert spent >= budget, f"重试预算没有真的用尽：{spent:.3f}s < {budget:.3f}s"
+    assert spent <= budget + 1.0, f"窗口远超预算，等待没被约束住：{spent:.3f}s"
+    print(
+        f"\n[window] attempts={GpuScheduler.ALLOCATE_MAX_ATTEMPTS} "
+        f"backoff={GpuScheduler.ALLOCATE_BACKOFF_SECONDS}s "
+        f"budget={budget:.3f}s measured={spent:.3f}s"
+    )
+
+    # 卡一直都在：刚才那句"没有卡"是假空
+    with pg_factory() as db:
+        assert db.get(Gpu, ids[0]).status == GpuStatus.AVAILABLE.value
+    ensure_workspace(pg_factory, "ws-after-budget")
+    with pg_factory() as db:
+        assert db.get(Gpu, ids[0]).id == scheduler.allocate(db, "ws-after-budget", 0).id
+
+
+def test_real_contention_hold_time_leaves_no_capacity_behind(pg_factory):
+    """真实并发下量两件事：单个分配事务要跑多久，以及会不会把空闲卡留在桌上。
+
+    每轮 16 个线程抢 4 张新卡（超配 4 倍，卡与卡之间 memory_total 互异 ⇒ 都要抢同一
+    个顺序）。主张是 `successes == 4`：只要有一个线程"以为池子空了"，桌上就会剩卡。
+    持锁时长用成功线程的 elapsed 近似（分配事务从进来到 commit 就是别人等不到的那段）。
+    """
+    n_gpus, n_threads, reps = 4, 16, 3
+    scheduler = GpuScheduler(pg_factory)
+    holds: list[float] = []
+    per_rep: list[int] = []
+
+    for rep in range(reps):
+        seed_gpus(pg_factory, n_gpus)  # 每轮自己的 host + 4 张卡，不复用上轮状态
+        barrier = threading.Barrier(n_threads)
+        stamp = threading.Lock()
+        outcomes: list[tuple[str | None, float]] = []
+
+        def worker(
+            idx: int, *, _rep: int = rep, _bar=barrier, _stamp=stamp, _out=outcomes
+        ) -> None:
+            wid = f"ws-hold-{_rep}-{idx}-{uuid.uuid4().hex[:6]}"
+            ensure_workspace(pg_factory, wid)
+            _bar.wait()
+            began = time.monotonic()
+            with pg_factory() as db:
+                try:
+                    won = scheduler.allocate(db, wid, gpu_requirement_gb=0).id
+                except RuntimeError:
+                    won = None
+            with _stamp:
+                _out.append((won, time.monotonic() - began))
+
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+            list(pool.map(worker, range(n_threads)))
+
+        won = [o for o in outcomes if o[0] is not None]
+        assert len(won) == n_gpus, (
+            f"第 {_label(rep)} 轮只分配出 {len(won)}/{n_gpus} 张：有空闲卡被留在桌上（假空）"
+        )
+        assert len({o[0] for o in won}) == n_gpus, f"同一张卡被分配两次：{won}"
+        holds.extend(elapsed for _, elapsed in won)
+        per_rep.append(len(won))
+
+    p_max = max(holds)
+    print(
+        f"\n[hold] contention={n_threads}threads x {n_gpus}cards reps={reps} "
+        f"successful allocate elapsed: max={p_max * 1000:.1f}ms "
+        f"median={sorted(holds)[len(holds) // 2] * 1000:.1f}ms "
+        f"p90={sorted(holds)[int(len(holds) * 0.9) - 1] * 1000:.1f}ms n={len(holds)} "
+        f"per-rep winners={per_rep}"
+    )
+
+
+def _label(rep: int) -> str:
+    return f"#{rep + 1}"
+
+
+def test_truly_empty_pool_still_says_no_capacity(pg_factory):
+    """反面：没有候选（不是被锁）时，那句话必须还是容量结论，不能被 contention 分支吞掉。"""
+    seed_gpus(pg_factory, 1)
+    scheduler = GpuScheduler(pg_factory)
+    ensure_workspace(pg_factory, "ws-oversize")
+    with pg_factory() as db, pytest.raises(RuntimeError) as got:
+        # 需求 999 GB → 一张都不满足，压根不进入"被锁住"的分支
+        scheduler.allocate(db, "ws-oversize", gpu_requirement_gb=999)
+    assert not isinstance(got.value, GpuPoolContendedError), str(got.value)
+    assert "No GPU available with >= 999 GB" in str(got.value), str(got.value)
