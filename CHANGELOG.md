@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 531 / passed 530 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 532 / passed 531 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -336,6 +336,44 @@ supply-chain 档 10 → 12（两支注入夹具：表级双向 + 条目级三把
 同类假阻塞——"Isaac Sim 钉 digest 阻塞于 NGC 凭据"（匿名 pull 令牌就能解析 manifest/digest）
 与这条"三条路径不可达"（漏了守护进程）。规则改写成：**写"取不到"之前必须先把通道列全**
 （CLI 直连／守护进程／构建器／另一台机器），并逐条记下哪几条试过、怎么试的、失败形状是什么。
+
+### 把"外部阻塞"查到根：一条是假的，一条是真的；顺手给配方补上第一把运行时门禁
+
+`integration_k8s` 从 v0.3.0 起一直挂着同一个原因："需要真实集群 + NVIDIA Device Plugin"。
+本轮按最高指令的技术选型规矩先做候选调研，再回到被测代码定位绑定约束，结论是
+**这句话把两道门混写成了一道**：
+
+- 调研侧（逐个一手源，看到什么写什么）：`NVIDIA/k8s-device-plugin` README 里**没有** fake/mock
+  模式，只有 `FAIL_ON_INIT_ERROR`——原文是"allow the plugin to deploy successfully on nodes that
+  don't have GPUs"，即"没 GPU 的节点上不崩"，不是伪造可分配设备；HAMi README 的前置条件仍写着
+  `NVIDIA driver >= 440`（检索命中的"Fake GPU + HAMi 教程"来自内容聚合站，未采信为证据）；
+  kubernetes.io 的 device-plugins 概念页正文被截断，`#examples` 一节没读到，所以只能说"可见部分
+  没提到假设备插件"；GitHub 仓库检索两次返回 0 命中，按既有教训记为**工具盲区**而不是"生态没有"。
+- 代码侧才是决定性的：那个用例的 Pod 镜像取自 `app/services/providers/k8s.py:190` 的
+  `workspace.image or template.image or settings.workspace_image`，夹具建的 Template 不带 image
+  ⇒ 落到 `settings.workspace_image`，也就是 **amd64 + NGC 基座、本机既没构建也没推送**的 workspace
+  镜像。就算假造出容量，Pod 只会停在 ImagePullBackOff，300s 就绪窗口照样红。
+  **绑定约束是镜像与 x86 主机，与 device plugin 无关。**
+
+决定：不做假 device plugin 档，把这段调研写进 `docs/ACCEPTANCE_GATES.md` 末尾附注与 §1 的 PENDING 行
+（用途：下一个读这格的人不必再花一轮去试"能不能假造"）。
+
+同轮把上一轮那次一次性构建实测提成常驻门禁。此前**没有任何常驻门禁构建过控制面镜像**
+（`make validate` 的 build 检查量的是 `python -m build` 出的 wheel），"钉进去的 digest 其实取不到"
+这类错误只会在别人 `make control-image` 的那一刻暴露。新增
+`tests/test_docker_provider_integration.py::test_pinned_base_of_the_control_plane_recipe_is_fetchable`：
+用守护进程那条传输真的 pull 配方里的钉死引用，并要求 `inspect` 出非空架构与 `sha256:` 开头的 Id。
+
+- 负向对照（digest 首位翻转后必须取不到）本轮实测开火：
+  `Error response from daemon: failed to resolve reference "docker.io/library/python@sha256:077ac9e4…"`。
+- 它的代价也实测了：同一台 daemon 上正向 pull 37.7s、翻转后 91.8s（registry 一趟就是几十秒），
+  所以控制档默认只出读数、置 `EMBODIEDCLOUD_RECIPE_BASE_CONTROL=1` 才开火——要证的那件事
+  （pull 按 digest 而非按 tag 解析）不随每轮代码变化。默认档整支 21.99s。
+- 附带读数：`python:3.12-slim` 今天的 `RepoDigests[0]` 与钉住的那份**相等**，尚无漂移；
+  判据刻意不断言这个等式（钉住的内容本来就该在 tag 移动后保持不变，断言相等等于制造
+  一个"每漂移必红"的项，把配方钉反）。
+
+docker 档 21 → 22，全套 531 → 532。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

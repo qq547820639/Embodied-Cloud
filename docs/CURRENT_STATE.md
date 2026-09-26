@@ -7,16 +7,16 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 531 / passed 530 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
+| Test | **PASS（collected 532 / passed 531 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
 | Lint / Type | PASS（ruff 0 / mypy 45 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS 21/21**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
-| Integration Docker | **PASS 21/21**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册） |
+| Integration Docker | **PASS 22/22**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册） |
 | Integration Browser | **PASS 11/11**（Playwright 驱动系统 Chrome 真 DOM） |
 | Integration Object store | **PASS 20/20**（一次性 VersityGW 容器 + 真实 boto3；MinIO 交叉核对读数一致） |
 | Integration K8s control plane | **PASS 7/7**（kind 真集群：真 kubelet/调度器/endpoints，无需 GPU） |
 | Edge agent 真进程通路 | **PASS**（真 uvicorn 子进程 + 真 `python -m edge_agent` 子进程 + mock 驱动：一轮到 VERIFIED、落盘摘要核对、第二轮不重复上机；服务端另有 10 例鉴权/防线 + 设备侧 12 例坏响应形状） |
-| Integration K8s（GPU 全流程） | PENDING（原因登记：需要节点带 `nvidia.com/gpu` 容量 = Device Plugin；控制面路径已由上一行覆盖） |
+| Integration K8s（GPU 全流程） | PENDING（原因登记：需要节点带 `nvidia.com/gpu` 容量 = Device Plugin；控制面路径已由上一行覆盖。**本轮把这条原因查到根**：假 device plugin 既没检索到成熟实现、也不是绑定约束——Pod 镜像取自 `app/services/providers/k8s.py:190` 的 `settings.workspace_image`，那是 amd64 + NGC 基座、本机没构建也没推送的镜像，容量造假只会停在 ImagePullBackOff。源头逐条见 ACCEPTANCE_GATES 附注） |
 | 供应链 | PASS（`uv.lock` 一致性 + SBOM + `uv audit --locked` + 镜像配方下载/克隆钉死机检 + **外部基础镜像钉 digest 且消费侧逐字同源** + **workspace 镜像 digest 有写入入口与读者**） |
 | OpenAPI / VALIDATION freshness | PASS（`make api-docs` / `make validate` 无 diff） |
 | overall | `PASS_WITH_PHYSICAL_PENDING`（物理待验：GPU 真机、Isaac 流媒体面、真机器人） |
@@ -43,6 +43,7 @@
 | N-16 | **`allocate()` 的重试预算被量过，"等不到"与"没卡"分成两句话**：参数（5 次 × 0.05s 退避）此前无从解释；实测预算 0.500s、真实放弃发生在 0.816s / 0.821s，16 线程抢 4 卡 ×3 轮里单个分配事务 median 30.5→43.1ms、max 35.5→70.8ms 且每轮赢家 4/4 ⇒ 参数保持不动，"改成 deadline 式长等待"被同一批读数否掉（只是把假空换成更慢的首包）。真正的缺陷是可确定性复现的谎话：唯一候选被别的会话 `FOR UPDATE` 持住时，`still_waiting` 每轮都数得到 1 张，却仍抛 `No GPU available` | 新增 `GpuPoolContendedError`（含等待卡数与预算）+ 窗口/持锁两支实测常驻用例 + `truly_empty` 反面档；`test_unbounded_candidate_read_starves_concurrent_allocate` 的断言就地反转（从钉住谎话改为钉住"必须报 contention 且不得出现容量那句"）；变异 CONT1 短路 contention 分支 → 两支红、反面那支照旧绿。pg 档 18 → 21，全套 522 → 525 |
 | N-17 | **workspace 在「还要重试」的那一刻被宣布死亡**：`make validate` 连两轮同一条红（`tests.test_workspace_credential::test_access_endpoint_returns_plaintext_password`，`assert 'failed' == 'running'`）。归因靠仓库外临时诊断插件打出的两份现场读数：失败瞬间 8 张卡里 6 张 ALLOCATED、victim 自己没卡；而**收尾**读数里同一个 workspace 已经 `running`、它的 `provision` op 是 `succeeded(2)` —— 那句「这个任务失败了」是第 1 次尝试替第 2 次尝试下的结论。放大器另有一处：`tests/test_gpu_pool_guard.py` 的 `rig` 留 8 行 CREATED workspace，app 每次启动都跑 `reconcile_all()`（「QUEUED/CREATED 且无 active op ⇒ 重新入队 PROVISION」），于是下一个模块的 worker 先替残骸抢卡（本文件 + `test_api` 配对即红，日志 4 条 `provision(ws-guard) failed, retrying`） | ①重试判据收成一个函数 `OperationWorker.will_retry(op)`，`finish_failure` 与 `orchestrator._fail(terminal=...)` 同读它（两侧各写一遍 `attempts >= MAX_ATTEMPTS` 时，任何一侧改动都会让「op 在重试」和「workspace 已 FAILED」同时成立）；非终态失败写 QUEUED + 保留 `error_message` + 归还卡。`workspace_operations` 在 API 层零读者（`grep -rn WorkspaceOperation app/routers/` = 0），所以 status 是「还在重试」的唯一出口；②`tests/settle.py::await_workspace_settled`：终态集合 + 前提预算 30s（旧轮询 2s < backoff 1+2s）+ 失败回显池子现场，4 处 `{running, failed}` 轮询全部接上；③守卫收尾归还自己借的卡并删自己的行；④`test_api` 补上它一直缺的前置声明。反证两支：CONT2 把判据短路成「永远终态」→ 新增两支红、其余 10 支照旧绿；settle 助手带正反两支（永远 queued 必须红且报「前提未达成」+ 池子读数；running/failed 都不红，且首读数未收敛 ⇒ 它真在轮询）。复跑：全套两连绿 528 passed / 1 skipped（宿主 load 15.7 与 28.4），全套 525 → 529 |
 | N-18 | **上一轮那条"取不到权威 digest"的登记，错在通道清单没列全**：`python:3.12-slim` 的例外理由写的是"本机三条路径均不可达"，而那三条全是 **CLI/curl 那条传输**（`auth.docker.io` / `hub.docker.com` / `registry-1.docker.io`）；**守护进程自己的出网路径从没被试过**。这与 N-11 拆掉的"Isaac Sim 钉 digest 阻塞于 NGC 凭据"是同一类错：把"我试过的那条通道不通"记成"这件事做不了" | 权威读数取自 docker.io 本身：`docker pull --platform linux/amd64 python:3.12-slim` 打印的 `Digest` ＝ `sha256:f77ac9e4…`，与上一轮独立从 `public.ecr.aws` 读到的索引 digest 逐字同值；再按该 digest 直拉一次成功。钉进 `runtime/Dockerfile.control-plane`（多架构索引，tag 仅留可读性）并从例外登记表删除。**登记表清空会让 `unpinned == registered` 与恒真同形**，所以双向对账抽成纯函数 `_exception_table_offenders`，配常驻注入夹具（漏登记、死登记各开一次火；两侧皆空与两侧相等都不开火），作用域判据同时改为"真实树必须零个未钉外部镜像"。构建侧实跑：`make control-image` 的 `Step 1/10` 用的正是这条引用，`Successfully built`，产物容器内 `python -V` ＝ `Python 3.12.14`（本次构建产物随后 `docker rmi` 删除）。supply-chain 档 10 → 12，全套 529 → 531 |
+| N-19 | **两条挂了很多轮的"外部阻塞"里，只有一条是真的**：`integration_k8s` 那句"需要 Device Plugin"被查到根——按技术选型规矩先做候选调研（`NVIDIA/k8s-device-plugin` README：无 fake 模式，`FAIL_ON_INIT_ERROR` 只是"没 GPU 的节点上不崩"；HAMi README：前置条件仍写 `NVIDIA driver >= 440`；kubernetes.io device-plugins 页正文被截断，`#examples` 没读到，故只说"可见部分没提"；GitHub 仓库检索 0 命中按工具盲区记账，不当结论），再读被测代码定位绑定约束：Pod 镜像取自 `app/services/providers/k8s.py:190` 的 `settings.workspace_image`（amd64 + NGC 基座，本机没构建也没推送），**假容量只会让 Pod 停在 ImagePullBackOff**，这一格真正的门与 G1–G4 是同一道 | ①把这条调研连同"为什么不做假插件"写进 `docs/ACCEPTANCE_GATES.md` 末尾附注与 §1 的 PENDING 行，让下一读者不必重跑；②顺手把上一轮的一次性构建实测提成常驻门禁：`tests/test_docker_provider_integration.py::test_pinned_base_of_the_control_plane_recipe_is_fetchable` 用守护进程那条传输真的 pull 配方里钉死的引用（pull 成功 + `inspect` 出 arm64/linux 与非空 Id 才算过），因为在此之前**没有任何常驻门禁构建过控制面镜像**（`make validate` 的 build 检查量的是 wheel）。负向对照（把 digest 首位翻转后必须取不到）本轮实测开火：`failed to resolve reference "docker.io/library/python@sha256:077ac9e4…"`，但它的代价是实测 91.8s（正向 pull 37.7s，本机 daemon 到 registry 一趟就是几十秒），所以默认档只出读数、用 `EMBODIEDCLOUD_RECIPE_BASE_CONTROL=1` 打开——要证的事不随每轮代码变化。同轮附带读数：`python:3.12-slim` tag 今天的 `RepoDigests[0]` 与钉住的那份**相等**（尚无漂移）。docker 档 21 → 22（默认档 21.99s），全套 531 → 532 |
 
 
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
@@ -93,7 +94,7 @@
 全套用例全绿（唯一 skip 是 `k8s_integration` GPU 档）。四元组计数只在 §1 出现一处，
 由 `make validate` 的值对账钉住——**本节刻意不再复读绝对数字**，多抄一份就多一处会静过期、
 且门禁看不见的位置。
-其中真后端档：PG 真并发 21/21、真容器 21/21、真浏览器 11/11、
+其中真后端档：PG 真并发 21/21、真容器 22/22、真浏览器 11/11、
 对象存储真后端 20/20、K8s 控制面真集群 7/7、SDK 线格式 6、预授权 14、
 **边缘设备真进程 e2e（真 uvicorn 子进程 + 真 agent 子进程 + mock 驱动）**。
 lint/type/migration/build/smoke/release/供应链全链路。

@@ -661,3 +661,70 @@ def test_provider_argv_is_accepted_by_the_daemon_and_gpu_failure_is_not_a_usage_
     assert "gpu" in stderr, result.stderr  # 实测：failed to discover GPU vendor from CDI
     # 失败之后不能再有同名容器（否则 provision 重试会被名字冲突卡住）
     assert _docker("inspect", "-f", "{{.State.Status}}", name).returncode != 0
+
+
+def test_pinned_base_of_the_control_plane_recipe_is_fetchable():
+    """配方里钉死的基础镜像必须能被"构建用的那条传输"取到：把一次性实测变常驻判据。
+
+    本轮之前没有任何常驻门禁构建过控制面镜像——`make validate` 的 build 检查量的是
+    `python -m build` 出的 wheel，`make control-image` 只在人手上跑过。于是"钉进去的
+    digest 其实取不到"这类错误（上一轮就差点犯：第三方镜像站的读数与本机缓存不吻合时，
+    钉错方向是让所有人的构建当场失败）只会在别人 build 的那一刻暴露。
+    本轮实测过一次完整构建（`Step 1/10 : FROM python:3.12-slim@sha256:f77ac9e4…`，
+    `Successfully built`，产物 `python -V` = 3.12.14，约 160s），这一支把其中"基础镜像取得到"
+    这一半变成每轮都算的判据；完整构建因 pip 层要重装（实测约 2.5 分钟）不常驻，如实记下。
+
+    刻意**不**断言"tag 现在仍指向这个 digest"：钉住的内容本来就该在 tag 移动后保持不变，
+    那样断言等于把配方钉成一个每漂移必红的项。tag 是否已移动只作为读数打印。
+    """
+    # 判据只有一份实现：解析 FROM 与"有没有钉"都复用供应链档的那对纯函数
+    from tests.test_supply_chain import REPO_ROOT, _base_refs, _is_pinned
+
+    refs = [r for _, r in _base_refs([REPO_ROOT / "runtime" / "Dockerfile.control-plane"])]
+    pinned = [r for r in refs if _is_pinned(r)]
+    assert pinned, f"控制面配方里没有钉 digest 的 FROM，逐字相等判据会失去权威侧：{refs}"
+    ref = pinned[0]
+
+    pulled = _docker("pull", ref, timeout=300)
+    if pulled.returncode != 0:
+        low = (pulled.stderr or "").lower()
+        if any(k in low for k in ("timeout", "dial tcp", "no such host", "connection refused", "unreachable")):
+            pytest.skip(f"{GATE_SENTINEL}: 基础镜像引用无法核验（registry 不可达）：{pulled.stderr[-200:]}")
+        raise AssertionError(
+            f"钉进配方的基础镜像取不到（这条引用一旦被构建使用就会红）：{ref}\n{pulled.stderr[-400:]}"
+        )
+
+    info = _docker("image", "inspect", "--format", "{{.Architecture}}|{{.Os}}|{{.Id}}", ref, timeout=60)
+    assert info.returncode == 0, f"pull 成功但 inspect 读不到：{info.stderr[-200:]}"
+    arch, os_name, image_id = info.stdout.strip().split("|")
+    assert arch and os_name == "linux" and image_id.startswith("sha256:"), info.stdout
+
+    # 负向对照（这支判据的牙）：把 digest 首位改掉后必须取不到。
+    # 它若不开火，说明上面的 pull 根本没在按 digest 解析（例如被 daemon 当成 tag 处理）。
+    #
+    # 默认不跑，用 `EMBODIEDCLOUD_RECIPE_BASE_CONTROL=1` 打开，理由是一条实测代价：
+    # 本机同一台 daemon 上 `docker pull <正确 digest>` 37.7s、`docker pull <翻转一位>` 91.8s
+    # ——负向档要走完整趟 registry 才能拿到"取不到"这个答案，把它折进每轮就是 +90s，
+    # 而它要证的事（pull 是按 digest 而不是按 tag 解析）不随每轮代码变化。
+    # 2026-09-26 实测跑过：翻转首位后 pull 失败且给出 manifest 未知类错误，故默认档只出读数。
+    digest = ref.rsplit("@sha256:", 1)[1]
+    flipped = ("0" if digest[0] != "0" else "1") + digest[1:]
+    bogus = ref.rsplit("@sha256:", 1)[0] + "@sha256:" + flipped
+    if os.environ.get("EMBODIEDCLOUD_RECIPE_BASE_CONTROL") == "1":
+        neg = _docker("pull", bogus, timeout=300)
+        if neg.returncode == 0:
+            raise AssertionError(
+                f"改掉 digest 一位之后仍然 pull 成功——上面的判据没有按 digest 解析：{bogus}"
+            )
+        assert (neg.stderr or "").strip(), "负向对照 pull 失败却没有任何错误文本，读数不可归因"
+        control = f"开火（pull 失败：{neg.stderr.strip().splitlines()[-1][:120]}）"
+    else:
+        control = "未跑（置 EMBODIEDCLOUD_RECIPE_BASE_CONTROL=1 开火；2026-09-26 已实测开火）"
+
+    tag_ref = ref.split("@", 1)[0]
+    tag_info = _docker("image", "inspect", "--format", "{{index .RepoDigests 0}}", tag_ref, timeout=60)
+    drift = tag_info.stdout.strip() if tag_info.returncode == 0 else "(本机没有该 tag 的缓存条目)"
+    print(
+        f"\n[recipe-base] {ref} pull=OK arch={arch}/{os_name} id={image_id[:19]}…；"
+        f"负向对照（翻转首位成 {bogus.rsplit('@sha256:', 1)[1][:12]}…）{control}；tag 侧当前读数 {drift}"
+    )

@@ -35,7 +35,7 @@
 | G0.27 镜像配方下载钉死 | `pytest tests/test_supply_chain.py` | `runtime/Dockerfile*` 内每个下载步骤必须同块 `sha256sum -c`、每个 `git clone --branch` 必须比对 HEAD commit；并断言判据作用域非空（防恒真） | VERIFIED PASS（改钉之前对两处开火，读数见 CHANGELOG 0.6.0） |
 | G0.28 边缘设备真进程通路 | `pytest tests/test_edge_agent_api.py tests/test_edge_agent_client.py tests/test_edge_agent_e2e.py` | 设备侧三个新端点（发现 / begin / 取件）+ 遥测回读；e2e 是**真 uvicorn 子进程 + 真 agent 子进程 + mock 驱动**：一轮跑到 VERIFIED、落盘字节 sha256 与登记一致、`.part` 无残留、第二轮不重复上机；三道防线各有拆掉即红的读数（M1 前缀复核、M2 取件状态前提、M3 部署期绑定）；取件不得下发 `Content-Disposition`，错误文本不得含 token | VERIFIED PASS（变异读数见 ADR 0007） |
 | G0.29 发布报告自证 | `pytest tests/test_version_consistency.py` | `failed ≥ 1` 的报告必须带出**是哪条用例**（名字取自 JUnit，不取日志文本）；全绿报告不得凭空造名字；`make lint/typecheck` 与 release 门禁的 ruff/mypy 目标集必须同源相等（钉住 `edge_agent` 在册）；`wait_status` 的正/反两档在"后台 worker 线程被掐住"这一确定前提下反向 | VERIFIED PASS（本轮新增，起因见 CHANGELOG 0.7.0） |
-| G0.30 基础镜像钉 digest 且全仓同源 | `pytest tests/test_supply_chain.py` | 非 `embodiedcloud/` 命名空间的 `FROM` 必须带 `@sha256:`；未钉者必须与例外登记表**双向**对账（多登记＝死免检、漏登记＝新裸 tag，都红），例外须带固定词表的证据等级 + ≥40 字理由并与 `docs/SUPPLY_CHAIN.md` 逐字互核；消费侧（三脚本 + `docs/GPU_HOST.md`）引用同一镜像时必须与 Dockerfile 钉死的那份**逐字相等**（归属键剥掉 tag，否则 tag 漂移看不见），并按"必须覆盖到哪几个文件"做子集断言；三条判据作用域均须非空，且真实树现在必须**零个**未钉的外部基础镜像 | VERIFIED PASS（真实内容变异电池 SC1–SC6 六支全开火、干净副本 control 不开火；`python:3.12-slim` 本轮从"已登记例外"升级为钉死（权威 digest 取自 docker.io 的 pull 读数，并与上一轮第三方镜像站同值），例外登记表已空；空表下两个方向的开火夹具改由常驻注入用例 `test_exception_reconciliation_fires_in_both_directions` 承担（漏登记、死登记各开一次火，两侧皆空/两侧相等都不开火），构建侧实跑读数见 SUPPLY_CHAIN §2） |
+| G0.30 基础镜像钉 digest 且全仓同源 | `pytest tests/test_supply_chain.py` | 非 `embodiedcloud/` 命名空间的 `FROM` 必须带 `@sha256:`；未钉者必须与例外登记表**双向**对账（多登记＝死免检、漏登记＝新裸 tag，都红），例外须带固定词表的证据等级 + ≥40 字理由并与 `docs/SUPPLY_CHAIN.md` 逐字互核；消费侧（三脚本 + `docs/GPU_HOST.md`）引用同一镜像时必须与 Dockerfile 钉死的那份**逐字相等**（归属键剥掉 tag，否则 tag 漂移看不见），并按"必须覆盖到哪几个文件"做子集断言；三条判据作用域均须非空，且真实树现在必须**零个**未钉的外部基础镜像；本轮再加**运行时**一侧：钉死的那份必须真能被构建侧那条传输取到（docker 档 `test_pinned_base_of_the_control_plane_recipe_is_fetchable`，默认档实测 21.99s；负向对照翻转 digest 首位后必须取不到，实测开火但代价 91.8s，故默认只出读数） | VERIFIED PASS（真实内容变异电池 SC1–SC6 六支全开火、干净副本 control 不开火；`python:3.12-slim` 本轮从"已登记例外"升级为钉死（权威 digest 取自 docker.io 的 pull 读数，并与上一轮第三方镜像站同值），例外登记表已空；空表下两个方向的开火夹具改由常驻注入用例 `test_exception_reconciliation_fires_in_both_directions` 承担（漏登记、死登记各开一次火，两侧皆空/两侧相等都不开火），构建侧实跑读数见 SUPPLY_CHAIN §2） |
 | G0.31 惰性开关不说谎 | `pytest tests/test_config_docs.py` | 按 AST 数 `app/`（排除声明文件）里每个 `Settings` 字段的读取位置（属性访问与字符串形式两态都算）；**零读取字段集合必须恰好等于 `INERT_SETTINGS`**（漏登记＝运维按"设了就生效"设值，死登记＝文档宣称不生效而代码已在读）；登记项在其 `.env.example` 条目紧邻上方注释块必须带"未启用"标记（"预留"二字不算澄清） | VERIFIED PASS（34 字段中恰好 1 个零读取；CFG1 接上读取者→点名死登记、CFG2 抹掉标记→点名该字段、CFG3 用已知有读取者的 `ide_port_start` 证明探针不是恒真） |
 | G0.32 workspace 镜像 digest 闭环 | `pytest tests/test_template_versions.py tests/test_cli.py` | `TemplateVersion.image_digest` 必须有写入入口（CLI `record-image-digest`：形制校验、幂等、released 版本已钉别处则拒改）与消费点（`image_ref.pinned_ref` 在 workspace 快照时拼 `image@sha256:…`，坏形制/摘要冲突/超列宽一律拒绝，不静默退回可变 tag）；整条链在同一份真库上连跑到 docker argv，并断言回填不改历史工作区快照 | VERIFIED PASS（PIN1–PIN4 四支变异各自翻红；本机 `docker image inspect` 的 .Id 与 .RepoDigests[0] 同值，两例独立实测） |
 | G0.33 分配策略是量过的 | `make policy-bench` + `pytest tests/test_scheduler_policy.py` | GPU 候选排序（=分配策略）抽成 `candidate_order()`；同一个 `allocate()` 跑同一份工作负载换四种排序成表：现产 best-fit 必须接满（8/8、两个 48 GiB 都留得住、浪费率 1.00），其余三档（worst_fit／arrival／pack_host）必须都接不满；生产排序**按表达式直比**，不经认档函数；实测表逐格钉值；跑完必须复原生产排序 | VERIFIED PASS（POL1/POL2/POL3/POL4/POL6 五支变异各自翻红；POL5 单支不改今天判决，如实记为未变） |
@@ -85,3 +85,30 @@
   边缘设备取件通路与真进程 Sim2Real 回环（G0.28）
 - FAILED：无
 - BLOCKED_EXTERNAL_DEPENDENCY：G1.1–G4（Docker/NVIDIA/NGC）、G5.2（真机）
+
+### 附注：K8s GPU 全流程那一格为什么不能靠"伪造 device plugin"关掉（本轮调研，2026-09-26）
+
+`integration_k8s` 长期登记为 PENDING，理由写的是"需要节点带 `nvidia.com/gpu` 容量 = Device Plugin"。
+本轮按技术选型规矩先去查"有没有成熟的假 GPU 方案"，结论是**这条路不能把那格关掉**，两条独立理由：
+
+1. **假容量这一半没找到现成成熟实现。** 读过的源头（逐条注明看到什么）：
+   `NVIDIA/k8s-device-plugin` 的 README（经 raw.githubusercontent 取原文）里**没有** fake/mock 模式，
+   只有一个 `FAIL_ON_INIT_ERROR`——它的措辞是"allow the plugin to deploy successfully on nodes
+   that don't have GPUs"，即**在没有 GPU 的节点上不崩**，而不是伪造出可分配的设备；
+   HAMi 的 README（同一取法）通篇前置条件仍写着 `NVIDIA driver >= 440`，未提供假设备模式
+   （检索命中的"Fake GPU + HAMi 教程"来自内容聚合站，未采信为证据）；
+   kubernetes.io 的 device-plugins 概念页正文被截断，`#examples` 一节没取到，
+   所以只能说"该页可见部分没有提到假设备插件"，不能说"官方没有示例插件"。
+   GitHub 仓库检索（`fake gpu device plugin…`、`sample-device-plugin kubernetes`）返回 0 命中——
+   按既有教训记为**工具盲区**，不是"生态里没有"。
+2. **更关键：即便容量是假的，这一格也关不掉。** 该用例的 Pod 镜像取自
+   `workspace.image or template.image or settings.workspace_image`
+   （`app/services/providers/k8s.py:190`），而夹具建的 Template 不带 image ⇒ 落到
+   `settings.workspace_image`，也就是那个 **amd64 + NGC 基座、本机既没构建也没推送**的
+   workspace 镜像。假容量只会让 Pod 停在 ImagePullBackOff，300s 就绪窗口照样红。
+   **绑定约束是镜像与 x86 主机（G1–G4 同一口径），不是 device plugin。**
+
+因此本轮决定：**不做**假 device plugin 档。真正值得补的正向臂（"节点通告了 `nvidia.com/gpu`
+容量 ⇒ 带该资源限定的 Pod 真能被调度并跑起来"）需要的是**一台 amd64、且 workspace 镜像已推到
+集群拉得到的主机**——与 G4 同一个前置；控制面侧对应的负向臂（无容量 ⇒ `Unschedulable`）
+已由 G0.26 常驻钉住。这条附注的用途：让下一个读这格 PENDING 的人不必再花一轮去试"能不能假造"。
