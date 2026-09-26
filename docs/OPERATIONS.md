@@ -133,7 +133,11 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
   同一族的第三处是 4 份 `for _ in range(40): sleep(0.05)` 的 workspace 轮询：**2s 不是判据预算，
   是 worker 的重试节奏**（backoff 1s + 2s ⇒ 第 3 次尝试最早落在 3s 之后），现已统一到
   `tests/settle.py:await_workspace_settled`（终态才返回，等不到就报前提未达成 + 池内空闲卡数）。
-- **容器侧的两条宿主前提，本轮各咬过一次，读法写在前面**。①这台机器的 `/tmp` **不是共享进 colima 虚拟机的挂载点**：`-v /tmp/x:/out` 之后容器内写 `/out/f` 成功、宿主 `/tmp/x` 依然是空的，而把挂载点换成工程目录下的子目录同一分钟就可见——所以「产物没落盘」这种读数先怀疑夹具，别急着记在被测程序头上（`-v /tmp/probe.py:/probe.py` 会以 "can't find `__main__` module" 的形式露出同一只空挂载）。要往容器里送脚本就用 stdin：`docker run -i … python - < script.py`。②守护进程所在的 VM 会**整台停掉**：本轮 17:14 还能 pull，17:21 就报 `dial unix ~/.colima/default/docker.sock: no such file or directory`，`colima list` 里 default 变 Stopped；`colima start default`（约 20s）恢复，镜像缓存不丢。docker 档整档突然干净跳过时先读这条，别读成「这档今天没需求」。
+- **容器侧的两条宿主前提，本轮各咬过一次，读法写在前面**。①这台机器的 `/tmp` **不是共享进 colima 虚拟机的挂载点**：`-v /tmp/x:/out` 之后容器内写 `/out/f` 成功、宿主 `/tmp/x` 依然是空的，而把挂载点换成工程目录下的子目录同一分钟就可见——所以「产物没落盘」这种读数先怀疑夹具，别急着记在被测程序头上（`-v /tmp/probe.py:/probe.py` 会以 "can't find `__main__` module" 的形式露出同一只空挂载）。要往容器里送脚本就用 stdin：`docker run -i … python - < script.py`。②守护进程所在的 VM 会**整台停掉**：本轮 17:14 还能 pull，17:21 就报 `dial unix ~/.colima/default/docker.sock: no such file or directory`，`colima list` 里 default 变 Stopped；`colima start default`（约 20s）恢复，镜像缓存不丢。docker 档整档突然干净跳过时先读这条，别读成「这档今天没需求」。 **今晚同一前提又咬了一次**：22:07 的一次复算里 postgres／docker／k8s 三档同时 PENDING、S3 档退成 5/20，
+  而浏览器档照绿（它不依赖守护进程）；20 分钟后同一棵树上的 `make validate` 跑出 542/1/0。判"环境的红"有两个一手
+  tell：`colima status` 与 `~/.colima/default/docker.sock` 的 **mtime**（套接字是 VM 起来那一刻重建的，mtime 落在
+  红的那段时间里就说明当时 VM 不在），以及"同一轮里不依赖 docker 的档照绿"这个形状——真的代码坏不会只挑
+  依赖 docker 的那几档红。
 - **`kind` 不在 PATH 上，而在仓库同级的 `.toolcache/` 里**：`tests/k8s_server.py:kind_binary()` 现在按「显式覆盖 → PATH → 固定候选位」三档找。此前整档能跑靠的是某个 shell 导出过 `EMBODIEDCLOUD_KIND_BIN`，换个 shell 就静默跳 7 例——**跳过长得像「今天没跑到」，不像「前提没了」**，所以这一格修在发现逻辑里，而不是写进文档要求人工导出（2026-09-26 实测 `/Volumes/Extra/CodeProj/.toolcache/kind` = kind version 0.33.0，正是 ADR 0009 钉的版本；补上发现档后真集群 7/7 恢复，用时 2:08）。
 - **漏洞库不是镜像：它要每天新鲜，所以"取不到库"是通道问题、"钉住库"是判断问题**。`make image-cve` 的默认库通道（trivy 0.74.0 的 `--help` 原文：`mirror.gcr.io/aquasec/trivy-db:2` → `ghcr.io/aquasecurity/trivy-db:2`）本机实测分别 `connect: connection refused`（重试 77s 后 FATAL）与拨号 i/o timeout；改用 `--db-repository public.ecr.aws/aquasecurity/trivy-db:2` 跑通。两条读法的区别要留住：热缓存后整步 2.5s、首次含库下载约 15 分钟（缓存落 `.trivy-cache/`，已 gitignore）；**别**为了让 CI 快就把库钉死或 `--skip-db-update` 常驻——那会把扫描变成一份过期结论。
 - **外网通道会分道失效：构建／取工具这类步骤先判通道，再谈代码**。本轮同一晚三种形状各自独立——
