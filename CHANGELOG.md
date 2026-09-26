@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 503 / passed 502 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 513 / passed 512 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -148,6 +148,36 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 为什么仍然不实现自动停机：可信活动信号只有真机 GPU 利用率（容器 CPU 在 GPU 训练下会长时间
   接近 0，据此停机会误杀长跑任务并照秒扣费），被 NVIDIA 设备阻塞。区别在于——**延后现在是
   被机器看着的延后**。
+
+### 镜像 digest：从"建模了但从没人用"到写入入口 + 消费点
+- 上一支把**外部基础镜像**钉住了，这一支补的是**我们自己产物**那一半。普查读数：
+  `TemplateVersion.image_digest` 自 v0.4 起就在模型与 §15 文档里，但 `app/` 里
+  **0 处写入、0 处读取**（本轮按 AST 数过）——也就是"字段就绪"一直被当成"镜像已钉住"，
+  而 docker/k8s 两条 provider 实际启动的一直是 `image` 那个可移动 tag。
+- 三处补齐，各管一段：
+  `app/services/image_ref.py:pinned_ref(image, digest)` 是唯一消费点，落在 **workspace 快照**
+  那一刻（`orchestrator.create`），所以两条 provider 路径不必各自再判一次"要不要钉"；
+  形制不对、与 `image` 里已有的摘要冲突、或拼完超过 `String(255)` 列宽 ⇒ **拒绝**，
+  绝不静默退回可变 tag（退回就是假装钉过）。
+  CLI `python -m app.cli record-image-digest --template-id … --version … --digest …` 是写入入口：
+  幂等（同值再记返回 0 且**不写第二遍**）、released 版本已钉在另一摘要时返回 3
+  （同 tag 换内容应当发布新版本，而不是就地改写这条不可变记录）、版本不存在或没有 image 返回 2。
+  `build_workspace_image.sh` 构建后打印摘要并给出上面那条命令；**拿不到摘要就退 2**，
+  宁让这一列留 NULL（如实的"没钉"），也不写一个看起来像 digest 的字符串。
+- 摘要来源是量出来的，不是听说的：本机 `docker image inspect --format '{{.Id}}'` 与
+  `.RepoDigests[0]` 同值，两例各自独立——本地构建、从未推送的 scratch 镜像，以及拉取来的
+  `postgres:16-alpine`。所以它确是这份 manifest 的内容摘要，与推没推送无关。
+  反过来，`python:3.12-slim` 那条例外也由此更硬：本机缓存那份的摘要不是镜像站今天给的
+  任何一个子清单摘要，即该 tag 已经移动过。
+- 常驻验证 +10 例（全套 503 → 513）：整条链在**同一份真库**上连跑（CLI 回填 → 新建工作区快照
+  带 digest → `docker run` argv 里就是那个 token），并断言"回填不改历史工作区的快照"
+  （快照语义，否则不可变性会被追溯改写）；`test_image_digest_column_has_a_production_reader`
+  盯着这一列别退回去，探针本身用已知有读者的 `current_version_id` 做非恒真对照。
+- 变异读数（真树副本上逐条拆，主树不动）：**PIN1** 快照处退回 `template_version.image`
+  → 链上两支红（普查那支仍绿，因 CLI 侧还在读这列——两条判据各看各的，别把绿读成"没问题"）；
+  **PIN2** `pinned_ref` 放过坏形制 → `test_pinned_ref_arms` DID NOT RAISE；
+  **PIN3** 允许就地挪针 → `test_record_image_digest_refuses_to_move_a_released_pin` 红；
+  **PIN4** 分发处吞掉退码 → `test_main_record_image_digest_dispatch` 红。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

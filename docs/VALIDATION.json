@@ -4,11 +4,11 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 503
+      "count": 513
     },
     "test_run": {
       "status": "PASS",
-      "passed": 502,
+      "passed": 512,
       "skipped": 1,
       "failed": 0,
       "failed_names": []

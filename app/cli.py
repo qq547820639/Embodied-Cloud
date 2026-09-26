@@ -1,9 +1,11 @@
-"""管理 CLI：bootstrap-admin / list-gpus / show-usage。
+"""管理 CLI：bootstrap-admin / list-gpus / show-usage / record-image-digest。
 
 用法：
   .venv/bin/python -m app.cli bootstrap-admin --email admin@example.com --password 'xxxx'
   .venv/bin/python -m app.cli list-gpus
   .venv/bin/python -m app.cli show-usage --email admin@example.com
+  .venv/bin/python -m app.cli record-image-digest --template-id cartpole --version 0.1.0 \
+      --digest sha256:<64 hex>
 """
 
 import argparse
@@ -100,6 +102,52 @@ def _ensure_tables() -> None:
     Base.metadata.create_all(engine)
 
 
+def record_image_digest(template_id: str, version: str, digest: str) -> int:
+    """把构建/registry 报出的镜像 digest 回填进 `TemplateVersion.image_digest`。
+
+    这一列自 v0.4 起就建模、却始终 0 处写入也 0 处读取（本轮普查读数）。现在它有
+    读者了（`services/image_ref.py` 在 workspace 快照时钉引用），缺的就是这个写入入口。
+
+    退码约定：0 写入或幂等；2 前提不成立（版本不存在 / 没有 image）；
+    3 该行已钉在**另一个** digest 上——released 版本不可变，同 tag 换了内容
+    意味着要发布新版本，而不是就地改写这条记录。
+    """
+    from sqlalchemy import select
+
+    from .models import TemplateVersion
+    from .services.image_ref import DIGEST_RE, ImageDigestError
+
+    if not DIGEST_RE.match(digest):
+        raise ImageDigestError(f"digest 形制不对（要 sha256: + 64 位十六进制）：{digest!r}")
+    with SessionFactory() as db:
+        tv = db.scalar(
+            select(TemplateVersion).where(
+                TemplateVersion.template_id == template_id,
+                TemplateVersion.version == version,
+            )
+        )
+        if tv is None:
+            print(f"未找到模板版本 {template_id}@{version}", file=sys.stderr)
+            return 2
+        if not tv.image:
+            print(f"{template_id}@{version} 没有 image，钉无可钉", file=sys.stderr)
+            return 2
+        if tv.image_digest and tv.image_digest != digest:
+            print(
+                f"拒改：{template_id}@{version} 已钉在 {tv.image_digest}，"
+                "released 版本不可变，请发布新版本",
+                file=sys.stderr,
+            )
+            return 3
+        if tv.image_digest == digest:
+            print(f"unchanged {template_id}@{version} image_digest={digest}")
+            return 0
+        tv.image_digest = digest
+        db.commit()
+        print(f"recorded {template_id}@{version} image_digest={digest}")
+        return 0
+
+
 def main() -> None:
     _ensure_tables()
     parser = argparse.ArgumentParser(prog="embodiedcloud-cli")
@@ -118,6 +166,11 @@ def main() -> None:
     p_session = sub.add_parser("make-session")
     p_session.add_argument("--email", required=True)
 
+    p_digest = sub.add_parser("record-image-digest")
+    p_digest.add_argument("--template-id", required=True)
+    p_digest.add_argument("--version", required=True)
+    p_digest.add_argument("--digest", required=True, help="镜像 manifest 的 sha256:… 摘要")
+
     args = parser.parse_args()
     if args.cmd == "bootstrap-admin":
         bootstrap_admin(args.email, args.password, args.username)
@@ -127,6 +180,10 @@ def main() -> None:
         show_usage(args.email)
     elif args.cmd == "make-session":
         make_session(args.email)
+    elif args.cmd == "record-image-digest":
+        raise SystemExit(
+            record_image_digest(args.template_id, args.version, args.digest)
+        )
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from ..models import (
 )
 from ..utils import utcnow
 from .billing import BillingPolicy
+from .image_ref import pinned_ref
 from .ledger import CreditLedgerService
 from .providers.base import ResourceReservation, RuntimeState, WorkspaceProvider
 from .scheduler import GpuScheduler, recover_stuck_gpu_allocations
@@ -92,8 +93,13 @@ class WorkspaceOrchestrator:
             name=name or f"{template.name} · {workspace_id[:6]}",
             template_id=template.id,
             template_version_id=template_version.id if template_version else None,
-            # 快照版本镜像：启动时 provider 使用该镜像（禁止 mutable latest）
-            image=template_version.image if template_version else template.image,
+            # 快照版本镜像：启动时 provider 使用该镜像（禁止 mutable latest）。
+            # 版本若声明了 image_digest，快照那一刻就钉成不可变引用——provider
+            # 两条路径都只读 workspace.image，不需要各自再判一次"要不要钉"。
+            image=pinned_ref(
+                (template_version.image if template_version else template.image),
+                template_version.image_digest if template_version else None,
+            ),
             user_id=user_id,
             organization_id=organization_id,
             provider=self.provider.name,

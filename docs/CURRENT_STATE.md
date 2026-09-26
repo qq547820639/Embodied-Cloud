@@ -7,7 +7,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 503 / passed 502 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
+| Test | **PASS（collected 513 / passed 512 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
 | Lint / Type | PASS（ruff 0 / mypy 45 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS 18/18**（自建一次性容器，真行锁语义） |
@@ -17,7 +17,7 @@
 | Integration K8s control plane | **PASS 7/7**（kind 真集群：真 kubelet/调度器/endpoints，无需 GPU） |
 | Edge agent 真进程通路 | **PASS**（真 uvicorn 子进程 + 真 `python -m edge_agent` 子进程 + mock 驱动：一轮到 VERIFIED、落盘摘要核对、第二轮不重复上机；服务端另有 10 例鉴权/防线 + 设备侧 12 例坏响应形状） |
 | Integration K8s（GPU 全流程） | PENDING（原因登记：需要节点带 `nvidia.com/gpu` 容量 = Device Plugin；控制面路径已由上一行覆盖） |
-| 供应链 | PASS（`uv.lock` 一致性 + SBOM + `uv audit --locked` + 镜像配方下载/克隆钉死机检 + **外部基础镜像钉 digest 且脚本侧逐字同源**） |
+| 供应链 | PASS（`uv.lock` 一致性 + SBOM + `uv audit --locked` + 镜像配方下载/克隆钉死机检 + **外部基础镜像钉 digest 且消费侧逐字同源** + **workspace 镜像 digest 有写入入口与读者**） |
 | OpenAPI / VALIDATION freshness | PASS（`make api-docs` / `make validate` 无 diff） |
 | overall | `PASS_WITH_PHYSICAL_PENDING`（物理待验：GPU 真机、Isaac 流媒体面、真机器人） |
 
@@ -36,6 +36,7 @@
 | N-9 | **发布报告必须能归因**：`test_run.failed_names` 由 JUnit 结构属性得出（`failure` 与 `error` 两类都算），`VALIDATION.md` 行内展示；只带名字不带 message 是故意的——报告必须确定性（CI freshness 比 `git diff`），而失败消息里带时间/端口 | `test_report_carries_the_names_of_failing_cases`：4 条里 2 条红必须恰好点出那两条；全绿必须给出空列表 |
 | N-10 | 新常驻判据：`make lint`/`make typecheck` 与 release 门禁的 ruff/mypy 目标集合必须同源相等（并钉 `edge_agent` 在册）；`edge_agent` 已进 packaging/lint/mypy | 开火读数：从门禁侧删掉 `edge_agent` 即红（`make=[app,edge_agent,tests]` vs `gate=[app,tests]`） |
 | N-11 | **Isaac Sim 基础镜像钉 digest，并揭掉一条写错的阻塞理由**：`runtime/Dockerfile.isaaclab-workspace` 的 `FROM` 由裸 tag 换成 `nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c7…30aa9`（多架构索引，子清单 amd64 `b1c542b2…`／arm64 `20269735…`）。此前 SUPPLY_CHAIN §8 登记为"有 NGC 凭据后改 @sha256:"——**实测该前提不成立**：manifest 与 digest 用匿名 pull 令牌即可解析（`docker-content-digest` 与 body 重算 sha256 两条独立读数吻合），凭据只在拉层字节时才要。新增三条常驻判据：①非自有命名空间的 `FROM` 必须带 `@sha256:`，未钉者必须与例外登记表**双向**对账（多登记＝死免检、漏登记＝新裸 tag，都红），例外须带固定词表的证据等级与 ≥40 字理由，且与 `docs/SUPPLY_CHAIN.md` 逐字互核；②消费侧（`gpu_acceptance.sh`／`isaac_sim_smoke.sh`／`release.sh`／`docs/GPU_HOST.md`）引用同一基础镜像时必须与 Dockerfile 钉死的那份**逐字相等**（归属键刻意剥掉 tag，否则"把 2.0.0 写成 1.9.9"这种最常见漂移根本进不了比较）；③三条判据的作用域均须非空，②另按"必须覆盖到哪几个文件"做子集断言 | `tests/test_supply_chain.py` 10 例（含 `_image_path` 纯文本函数的端口/无 tag 分支单独验）；真实内容变异电池 SC1–SC6 六支全开火、干净副本 control 不开火（读数见 CHANGELOG 与 SUPPLY_CHAIN §2/§6）。`python:3.12-slim` 按例外登记而未钉：Docker Hub 三端点本机均不可达，唯一拿到的第三方镜像站读数与本机缓存互不印证（详见 §2 同一行），钉一个未证实的 digest 会让构建直接失败 |
+| N-13 | **`TemplateVersion.image_digest` 从装饰性字段变成有写入入口、也有读者的一列**：普查读数是"自 v0.4 建模以来 0 处写入、0 处读取"（列存在不等于镜像被钉住，provider 一直启动可变 tag）。新增 `app/services/image_ref.py:pinned_ref`（workspace 快照那一刻拼成 `image@sha256:…`，形制不对／与 image 内已有摘要冲突／拼完超过列宽则**拒绝**而不是静默退回 tag）+ CLI `record-image-digest`（幂等；已钉在另一摘要的 released 版本拒改，退码 3 表示"该发布新版本而不是就地改写"）+ `build_workspace_image.sh` 构建后打印摘要、拿不到就退 2 | 整条链在同一份真库上连跑（回填→新建工作区快照→docker argv 里的 token），另有"回填不改历史工作区快照"的断言；变异对照 PIN1（快照处退回原写法）／PIN2（放过坏形制）／PIN3（允许就地挪针）／PIN4（吞掉退码）各自翻红，`image_digest` 有生产读者的普查判据带 `current_version_id` 作非恒真对照 |
 | N-12 | 把 TECH DEBT 里那条"设了也不生效"的预留开关从**文档陈述**升级为**机器不变量**：AST 逐字段数出 `app/`（除声明文件）里的读取位置，"零读取字段集合"必须恰好等于惰性登记表 `INERT_SETTINGS`（漏登记＝有人会被误导，死登记＝文档在撒谎），且登记项在 `.env.example` 紧邻上方注释块必须带"未启用"标记 | 实测普查：`Settings` 34 个字段中恰好 1 个零读取（`default_idle_timeout_minutes`）。开火读数 CFG1/CFG2 + 非恒真对照（`ide_port_start` 探针必须读到非空）+ 纯函数四档边界（无注释／断一行／写了"预留"但没写"未启用"／合规）全在 /tmp 副本上量，主树不动 |
 
 

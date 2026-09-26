@@ -237,6 +237,9 @@ def _patch_dispatch_targets(monkeypatch):
     monkeypatch.setattr(cli, "list_gpus", lambda: calls.append(("list-gpus",)))
     monkeypatch.setattr(cli, "show_usage", lambda *a: calls.append(("show-usage", a)))
     monkeypatch.setattr(cli, "make_session", lambda *a: calls.append(("make-session", a)))
+    monkeypatch.setattr(
+        cli, "record_image_digest", lambda *a: (calls.append(("record-image-digest", a)), 0)[1]
+    )
     return calls
 
 
@@ -274,3 +277,77 @@ def test_main_make_session_dispatch(monkeypatch):
     cli.main()
 
     assert calls == [("make-session", ("a@b.c",))]
+
+
+# ---------------------------------------------------------------------------
+# record-image-digest（SUPPLY_CHAIN §8 第 1 条的回填入口）
+# ---------------------------------------------------------------------------
+
+DIG_A = "sha256:" + "ab" * 32
+DIG_B = "sha256:" + "cd" * 32
+
+
+def _tv(image="registry/img:1.0.0", digest=None):
+    from app.models import TemplateVersion
+
+    return TemplateVersion(
+        id="tv-1", template_id="cartpole", version="1.0.0", image=image, image_digest=digest
+    )
+
+
+def _run_record(monkeypatch, tv, digest):
+    db = _FakeDB(scalar_result=tv)
+    monkeypatch.setattr(cli, "SessionFactory", _FakeSessionFactory(db))
+    return cli.record_image_digest("cartpole", "1.0.0", digest), db
+
+
+def test_record_image_digest_writes_once(monkeypatch):
+    tv = _tv()
+    rc, db = _run_record(monkeypatch, tv, DIG_A)
+    assert rc == 0 and tv.image_digest == DIG_A and db.committed == 1
+
+
+def test_record_image_digest_is_idempotent_without_rewriting(monkeypatch):
+    """同一个 digest 再记一次：rc=0 但**不写**（写第二次会让 updated 语义说谎）。"""
+    tv = _tv(digest=DIG_A)
+    rc, db = _run_record(monkeypatch, tv, DIG_A)
+    assert rc == 0 and db.committed == 0
+
+
+def test_record_image_digest_refuses_to_move_a_released_pin(monkeypatch):
+    """已钉 A 却收到 B：同 tag 换了内容 ⇒ 该发布新版本，不是就地改写。"""
+    tv = _tv(digest=DIG_A)
+    rc, db = _run_record(monkeypatch, tv, DIG_B)
+    assert rc == 3 and tv.image_digest == DIG_A and db.committed == 0
+
+
+def test_record_image_digest_missing_prerequisites(monkeypatch):
+    rc_missing_row, _ = _run_record(monkeypatch, None, DIG_A)
+    assert rc_missing_row == 2
+    rc_no_image, db = _run_record(monkeypatch, _tv(image=None), DIG_A)
+    assert rc_no_image == 2 and db.committed == 0
+
+
+def test_record_image_digest_rejects_bad_shape_before_touching_db(monkeypatch):
+    from app.services.image_ref import ImageDigestError
+
+    db = _FakeDB(scalar_result=_tv())
+    monkeypatch.setattr(cli, "SessionFactory", _FakeSessionFactory(db))
+    with pytest.raises(ImageDigestError, match="形制不对"):
+        cli.record_image_digest("cartpole", "1.0.0", "sha256:deadbeef")
+    assert db.committed == 0
+
+
+def test_main_record_image_digest_dispatch(monkeypatch):
+    calls = _patch_dispatch_targets(monkeypatch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cli", "record-image-digest", "--template-id", "cartpole", "--version", "1.0.0", "--digest", DIG_A],
+    )
+
+    # 分发处把函数的退码原样交给 SystemExit：0 也是 SystemExit，所以两侧都要看
+    with pytest.raises(SystemExit) as got:
+        cli.main()
+    assert got.value.code == 0
+    assert calls == [("record-image-digest", ("cartpole", "1.0.0", DIG_A))]

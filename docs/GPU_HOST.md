@@ -30,6 +30,7 @@ docker run --entrypoint bash -it --gpus all --rm --network=host \
 ```bash
 docker login nvcr.io
 ./scripts/build_workspace_image.sh
+# 构建成功后脚本会打印镜像摘要与回填命令；不回填则该版本仍按可变 tag 启动
 ```
 
 该镜像基于 Isaac Sim 6.0.1，固定 Isaac Lab `v3.0.0-beta2.patch1`，并加入 code-server。

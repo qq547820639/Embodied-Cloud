@@ -7,7 +7,7 @@
 | 项 | 现状 | 状态 |
 |---|---|---|
 | workspace 镜像 tag | `embodiedcloud/isaaclab-workspace:0.1.0`（seed.py `TEMPLATE_IMAGE`） | VERIFIED：immutable tag，**禁止 latest**（seed 模板与 TemplateVersion 均检查） |
-| 镜像 digest | `image_digest` 字段已建模（TemplateVersion），真实 registry digest 待构建流水线回填 | PARTIAL：字段就绪，回填依赖 NGC/registry 凭据（BLOCKED_EXTERNAL_DEPENDENCY） |
+| 镜像 digest | `TemplateVersion.image_digest` 现在**有写入入口也有读者**：`python -m app.cli record-image-digest --template-id … --version … --digest sha256:…`（拒收形制不对的串、拒改已钉在另一摘要上的 released 版本），消费点 `app/services/image_ref.py:pinned_ref` 在 workspace 快照那一刻把 digest 拼进 `image`（`reg/img:1.0.0@sha256:…`），docker/k8s 两条 provider 因此启动的都是钉死的引用 | 机制 VERIFIED（本轮；4 支变异对照 PIN1–PIN4，见 CHANGELOG 0.7.0）；**取值仍 BLOCKED**：本机没有可核实的 workspace 镜像 digest（镜像没建出来）。本轮实测过摘要来源：`docker image inspect --format {{.Id}}` 与 `.RepoDigests[0]` 同值（本地构建、从未推送的 scratch 镜像、以及拉取来的 `postgres:16-alpine` 两例皆然），脚本据此回填并**拿不到就退出**，不写"看起来像 digest"的串 |
 | Template 镜像来源 | TemplateVersion.image → workspace.image 快照 → provider 启动（§15 已落地） | VERIFIED：`test_template_versions.py` 证明 Template A→image A、B→image B |
 | 构建配方 | `runtime/Dockerfile.isaaclab-workspace`（`scripts/build_workspace_image.sh` 只是 docker build 的包装，下载步骤在 Dockerfile 内） | PARTIAL：真实构建需 NGC 凭据；配方内的下载/克隆已钉死（见 §2/§3） |
 
@@ -73,7 +73,11 @@
 
 ## 8. 待办（按优先级）
 
-1. **镜像 digest 回填**：`scripts/build_workspace_image.sh` 构建成功后把 registry digest 写入 `TemplateVersion.image_digest`（阻塞于 NGC 凭据 + x86 GPU 主机——**这一条是真阻塞**：要的是"把镜像建出来并推到 registry"，不是"知道基础镜像是哪个内容"）
+1. **对真镜像跑一次 digest 回填**：机制本轮已闭（`build_workspace_image.sh` 构建后打印摘要，
+   `python -m app.cli record-image-digest` 写入，`image_ref.pinned_ref` 在快照时消费，
+   常驻用例把整条链连起来跑）。剩下的只是"没人拿真镜像跑过它"——阻塞于 NGC 条款 + x86 GPU 主机
+   （要的是把 workspace 镜像**建出来**；本机是 Apple Silicon，且 G2–G4 的验收口径本来就要求
+   NVIDIA x86 主机）
 2. **`python:3.12-slim` 钉 digest**：当前按例外登记（见 §2）。补上只需一次"在能出网的环境里向**权威源** `registry-1.docker.io` 解析该 tag 的索引 digest"的机会（本机三条路径均不可达，见 §2 同一行）；拿到后把 `@sha256:` 加进 `runtime/Dockerfile.control-plane` 并从例外登记表删除——登记表是双向核对的，钉上却不删登记会直接红
 3. **控制面镜像 SBOM 化**：wheel 级 SBOM 已有，镜像层 SBOM 需真实构建后由 trivy/syft 生成
 

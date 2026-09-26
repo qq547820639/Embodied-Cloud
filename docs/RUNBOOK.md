@@ -50,7 +50,9 @@ curl -s http://127.0.0.1:8000/metrics | head
 ```bash
 ./scripts/preflight_gpu_host.sh        # G1.1
 docker login nvcr.io                   # NGC 凭据
-./scripts/build_workspace_image.sh     # 构建 workspace 镜像
+./scripts/build_workspace_image.sh     # 构建 workspace 镜像（打印摘要）
+# 回填该版本摘要，之后的工作区快照与容器启动都会带 @sha256: 引用：
+#   python -m app.cli record-image-digest --template-id <id> --version <ver> --digest sha256:<64hex>
 ./scripts/gpu_acceptance.sh            # G1.2 兼容检查
 EMBODIEDCLOUD_HOST_PUBLIC_IP=<ip> EMBODIEDCLOUD_PROVIDER=docker make dev
 ```
