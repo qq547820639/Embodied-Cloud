@@ -1,4 +1,5 @@
-"""Deployment 端点: 创建/查询 + edge 部署流程模拟 (download→verify→run→complete).
+"""Deployment 端点: 创建/查询 + edge 部署流程模拟 (download→verify→run→complete)
++ 设备侧取件 (`GET /{id}/artifact`，§25 / ADR 0007).
 
 状态机: pending → downloading → verified → running → success/failed.
 owner 隔离与越权 404 语义与 workspaces router 一致 (SECURITY.md T1).
@@ -6,13 +7,13 @@ owner 隔离与越权 404 语义与 workspaces router 一致 (SECURITY.md T1).
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from ..deps import DB, CurrentUser, deployment_service
-from ..models import DeploymentRecord, EdgeAgent, Role, Workspace
+from ..models import DeploymentRecord, DeploymentStatus, EdgeAgent, Role, Workspace
 from ..schemas import DeploymentCreate, DeploymentOut
-from ..services.artifact_store import ArtifactStoreUnavailableError
+from ..services.artifact_store import ArtifactNotFoundError, ArtifactStoreUnavailableError
 from ..services.edge import get_agent_from_header
 
 router = APIRouter(prefix="/deployments", tags=["deployments"])
@@ -45,7 +46,7 @@ def agent_from_header(request: Request, db: DB) -> EdgeAgent:
 Agent = Annotated[EdgeAgent, Depends(agent_from_header)]
 
 
-def _get_deployment_for_agent(db, agent: EdgeAgent, deployment_id: str) -> DeploymentRecord:
+def get_deployment_for_agent(db, agent: EdgeAgent, deployment_id: str) -> DeploymentRecord:
     """Edge agent 上报用的 deployment 归属校验（§10）。
 
     仅校验租户所有权（agent.owner_user_id == workspace.user_id）；admin 豁免
@@ -71,7 +72,18 @@ def create_deployment(payload: DeploymentCreate, db: DB, user: CurrentUser):
         raise HTTPException(404, "workspace not found")
     # model_version 由 workspace 模板派生 (artifact 为准); DeploymentCreate.model_version 兼容保留
     artifact = deployment_service.create_artifact(db, user, workspace, payload.artifact_path)
-    return deployment_service.deploy(db, user, workspace, artifact, payload.robot_type)
+    # §25/ADR 0007：可在部署时就把设备绑上，agent 之后凭自己的 token 发现并取件。
+    # 绑定与 /run 的绑定同一条规则：只能绑自己的 agent（admin 例外），越权 404。
+    agent = None
+    if payload.edge_agent_id:
+        agent = db.get(EdgeAgent, payload.edge_agent_id)
+        if agent is None:
+            raise HTTPException(404, "edge agent not found")
+        if user.role != Role.ADMIN.value and agent.owner_user_id != user.id:
+            raise HTTPException(404, "edge agent not found")
+    return deployment_service.deploy(
+        db, user, workspace, artifact, payload.robot_type, edge_agent=agent
+    )
 
 
 @router.get("", response_model=list[DeploymentOut])
@@ -149,5 +161,39 @@ def report_edge_checksum(
     server 比较 actual == expected（deployment.checksum）：
     MATCH → VERIFIED；MISMATCH → FAILED。客户端**不能**直接提交 status=VERIFIED。
     """
-    deployment = _get_deployment_for_agent(db, agent, deployment_id)
+    deployment = get_deployment_for_agent(db, agent, deployment_id)
     return deployment_service.report_checksum(db, deployment, payload.actual_sha256)
+
+
+@router.get("/{deployment_id}/artifact")
+def fetch_artifact_for_agent(deployment_id: str, db: DB, agent: Agent):
+    """§25 / ADR 0007：agent 取件（`X-Agent-Token`），字节流 + `X-Artifact-Sha256`。
+
+    鉴权面与 `report-checksum` 同一条：`get_deployment_for_agent` —— 租户不匹配、
+    或该部署已绑给别的设备，一律 404（SECURITY.md T1 的不泄露存在性）。
+    只接受 `downloading`：先 `begin`（设备侧承认"我开始取了"）再取件，与 §23 的
+    "没下载不得判 VERIFIED" 用同一个状态前提。
+    不下发 `Content-Disposition`：文件名由设备自己决定，响应头里不带用户可控文本。
+    """
+    deployment = get_deployment_for_agent(db, agent, deployment_id)
+    if deployment.status != DeploymentStatus.DOWNLOADING.value:
+        raise HTTPException(
+            409,
+            f"artifact is fetchable only while downloading, current status is {deployment.status}",
+        )
+    try:
+        data, artifact = deployment_service.read_artifact(db, deployment)
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(404, f"artifact object missing: {exc}") from exc
+    except ArtifactStoreUnavailableError as exc:
+        # 与 /verify 同一口径：存储故障不是"产物不存在"，也不落终态，503 可重试。
+        raise HTTPException(503, f"artifact store unavailable: {exc}") from exc
+    return Response(
+        content=data,
+        media_type=artifact.content_type or "application/octet-stream",
+        headers={
+            "X-Artifact-Sha256": artifact.checksum,
+            "X-Artifact-Size": str(len(data)),
+            "ETag": f'"{artifact.checksum}"',
+        },
+    )

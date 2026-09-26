@@ -89,7 +89,13 @@ def test_db_stores_encrypted_password_not_plaintext():
 
 def test_access_endpoint_returns_plaintext_password():
     """access endpoint 对合法 owner 返回解密后的明文密码。"""
+    from app.deps import SessionFactory, scheduler
+    from tests.gpu_pool import ensure_free_gpus
+
     with TestClient(app) as client:
+        # 这一支要真起一个 workspace：空闲卡是前提，得自己达成并写明（见 tests/gpu_pool.py）
+        with SessionFactory() as db:
+            ensure_free_gpus(db, scheduler)
         resp = client.post(
             "/api/auth/register",
             json={"email": "cred@example.com", "username": "cred", "password": "password123"},
@@ -112,7 +118,11 @@ def test_access_endpoint_returns_plaintext_password():
             import time
 
             time.sleep(0.05)
-        assert state["status"] == "running"
+        assert state["status"] == "running", (
+            f"provision 没收在 running：{state.get('error_message')}"
+            "（'No GPU available' 说明共享库的 mock 卡池被上游用例占满，"
+            "参见 tests/gpu_pool.py 与 tests/conftest.py 的守卫）"
+        )
 
         access = client.get(f"/api/workspaces/{workspace_id}/access", headers=headers)
         assert access.status_code == 200

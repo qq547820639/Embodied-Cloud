@@ -23,6 +23,31 @@ def pytest_sessionfinish(session, exitstatus):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _gpu_pool_not_starved():
+    """整池被上游用例占满时，先回收再开测（背景与实测读数见 tests/gpu_pool.py）。
+
+    只在"一张够用的卡都没有"时动手：那不可能是新一轮测试开头的合法状态——真需要
+    "没有卡"这一前提的用例是自己把池抽干的（`test_scheduler` 的两条
+    No GPU available），不是靠上一轮的残骸。有了这道闸，"谁的 workspace 多"
+    不再决定谁红；不触发时对任何用例零影响。
+    """
+    from sqlalchemy import inspect
+
+    from app.deps import SessionFactory, scheduler
+    from tests.gpu_pool import count_big_enough, reclaim_gpus
+
+    with SessionFactory() as db:
+        # 建表在 lifespan 里：第一个用例跑之前表可能还不存在
+        if inspect(db.bind).has_table("gpus") and count_big_enough(db, 8) == 0:
+            released = reclaim_gpus(db, scheduler)
+            print(
+                f"[conftest] mock GPU 池被上游用例占满：回收 {released} 张，"
+                f"现在够用 {count_big_enough(db, 8)} 张"
+            )
+    yield
+
+
 @pytest.fixture(scope="session")
 def pg_server_url():
     reason = pg_server.gate_reason()

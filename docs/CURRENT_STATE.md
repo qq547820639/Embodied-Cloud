@@ -1,26 +1,45 @@
 # CURRENT_STATE — EmbodiedCloud
 
-> 版本：**0.6.0 真后端纵深（对象存储 / K8s 控制面 / 镜像配方钉死）**（2026-09-26）。
+> 版本：**0.7.0 边缘设备真进程通路（发现 / 开门 / 取件 / 遥测回读）**（2026-09-26）。
 > 数据来源：`docs/VALIDATION.json`（`make validate` 自动生成，JUnit 稳定计数）。
 
 ## 1. 本次真实验证（实测，非复制旧文档）
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 462 / passed 461 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
-| Lint / Type | PASS（ruff 0 / mypy 40 files） |
+| Test | **PASS（collected 493 / passed 492 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
+| Lint / Type | PASS（ruff 0 / mypy 45 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS 18/18**（自建一次性容器，真行锁语义） |
-| Integration Docker | **PASS 20/20**（真容器；本轮新增 `--gpus` 参数的守护进程侧记账 3 例） |
+| Integration Docker | **PASS 20/20**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册） |
 | Integration Browser | **PASS 11/11**（Playwright 驱动系统 Chrome 真 DOM） |
 | Integration Object store | **PASS 20/20**（一次性 VersityGW 容器 + 真实 boto3；MinIO 交叉核对读数一致） |
 | Integration K8s control plane | **PASS 7/7**（kind 真集群：真 kubelet/调度器/endpoints，无需 GPU） |
+| Edge agent 真进程通路 | **PASS**（真 uvicorn 子进程 + 真 `python -m edge_agent` 子进程 + mock 驱动：一轮到 VERIFIED、落盘摘要核对、第二轮不重复上机；服务端另有 10 例鉴权/防线 + 设备侧 12 例坏响应形状） |
 | Integration K8s（GPU 全流程） | PENDING（原因登记：需要节点带 `nvidia.com/gpu` 容量 = Device Plugin；控制面路径已由上一行覆盖） |
 | 供应链 | PASS（`uv.lock` 一致性 + SBOM + `uv audit --locked` + 镜像配方下载/克隆钉死机检） |
 | OpenAPI / VALIDATION freshness | PASS（`make api-docs` / `make validate` 无 diff） |
 | overall | `PASS_WITH_PHYSICAL_PENDING`（物理待验：GPU 真机、Isaac 流媒体面、真机器人） |
 
-## 2. v0.6.0 本轮交付
+## 2. v0.7.0 本轮交付
+
+| § | 内容 | 验证 |
+|---|---|---|
+| N-1 | **边缘设备真进程通路落地（§25）**：设备侧新增 发现 / 开门 / 取件 三条 `X-Agent-Token` 端点，`POST /deployments` 支持部署期指派 `edge_agent_id`；ADR 0007 由 Proposed 转 Accepted，两个前置问题都按一手依据裁决（AWS IoT Jobs 生命周期页：`QUEUED` 由服务端 rollout、`IN_PROGRESS` 由设备发起、取任务走独立 API 而不是通知通道） | `tests/test_edge_agent_api.py` 10 例 + ADR 0007 的 M1/M2/M3 开火读数 |
+| N-2 | **取件端点的三道防线**：租户与绑定校验（越权 404）、`downloading` 状态前提（未 begin → 409）、`object_key` 的 workspace 前缀复核（一行被改写的库记录也读不到别人的件）；存储故障按 v0.6.0 口径返回 503 且记录留在 `downloading` | 逐道"拆掉即红"：M1 下攻击者真拿到 victim 字节（200 而非 404） |
+| N-3 | 修 **遥测只写不读**：`telemetry_events` 自 v0.4 起一直在写、全仓零读路径；新增 `GET /api/edge/agents/{id}/telemetry`（租户 scope、越权 404） | e2e 用它核对 `edge-run` 恰好一条、payload 摘要与登记一致 |
+| N-4 | 新增设备侧包 **`edge_agent/`**（只依赖标准库、不 import `app`）：流式取件边写边算 sha256、体积熔断、`.part` 原子改名、核对不过不留半成品；CLI 凭据走 env 而非 argv；base_url 限 http(s)；错误文本不含 token | `tests/test_edge_agent_client.py` 12 例（坏响应形状）+ e2e 的磁盘现场 |
+| N-5 | **真进程 Sim2Real e2e**：真 uvicorn 子进程 + 真 `python -m edge_agent` 子进程 + mock 驱动，断言一轮到 VERIFIED、落盘字节与登记摘要一致、无 `.part` 残留、第二轮不重复上机 | `tests/test_edge_agent_e2e.py`；G5.1 判据据此升级 |
+| N-6 | 修 **断言把进度外包给调度器**：旧 `_wait_status` 是 sleep+读 HTTP，两个 pytest 进程并排跑时红过（"20s 内没到 running"）。新 `tests/workspace_progress.py` 每轮先 `worker.tick_once()` 自己推进（claim 是 CAS+fencing，胜者唯一），超时信息带当前状态与操作队列 | `tests/test_workspace_progress.py` 2 例：掐掉后台线程后主动档到得了、被动档到不了（后者是前提档，它若读到 running 就说明对照失效） |
+| N-7 | 修 **共享测试库的 GPU 池饿死**：全套共用一个 SQLite、mock 只 seed 8 张卡且用例不还卡。单变量配对定位污染源（本轮新文件 13 个 workspace × `test_gpu_admin` 即红；其余 55 个文件逐个配上去都不红）。新文件模块级归还自己占的卡，需要空闲卡的用例显式 `ensure_free_gpus`（走 `GpuScheduler.release`，不手写 UPDATE） | 红→绿配对复跑；坑与读法写进 OPERATIONS §7 |
+| N-8 | 真起 uvicorn 的夹具从浏览器档抽成 `tests/live_server.py`，浏览器档与 agent e2e 共用同一份就绪判据与回收顺序 | 迁移后浏览器档 11/11 重跑为绿（24.0s ≈ 原 22–24s） |
+| N-9 | **发布报告必须能归因**：`test_run.failed_names` 由 JUnit 结构属性得出（`failure` 与 `error` 两类都算），`VALIDATION.md` 行内展示；只带名字不带 message 是故意的——报告必须确定性（CI freshness 比 `git diff`），而失败消息里带时间/端口 | `test_report_carries_the_names_of_failing_cases`：4 条里 2 条红必须恰好点出那两条；全绿必须给出空列表 |
+| N-10 | 新常驻判据：`make lint`/`make typecheck` 与 release 门禁的 ruff/mypy 目标集合必须同源相等（并钉 `edge_agent` 在册）；`edge_agent` 已进 packaging/lint/mypy | 开火读数：从门禁侧删掉 `edge_agent` 即红（`make=[app,edge_agent,tests]` vs `gate=[app,tests]`） |
+
+
+## 3. 上一轮交付（v0.6.0 / v0.5.0）
+
+### v0.6.0（2026-09-26）
 
 | § | 内容 | 验证 |
 |---|---|---|
@@ -35,7 +54,8 @@
 | O-9 | **CI 顺序修正**：测试镜像拉取与 kind 安装移到 `make validate` 之前，否则 VALIDATION 读数来自镜像尚未缓存的那一刻 | `.github/workflows/ci.yml` |
 | O-10 | **文档 ↔ 实测计数对账**：CHANGELOG 当前版本节与本文的计数串必须等于本次报告。值对账放在 `validate_release.py` 汇总之前；pytest 只判"恰好一处"的形状，因为 pytest 阶段读到的必然是上一次的报告（把值比较放那儿会造出不收敛的自引用，本轮真实踩过） | `tests/test_version_consistency.py` 3 例 + `docs_test_counts` 门禁（开火对照：喂错数字必须两处点名） |
 
-## 3. v0.5.0 交付（上一轮）
+
+### v0.5.0（2026-09-25）
 
 | § | 内容 | 验证 |
 |---|---|---|
@@ -62,9 +82,11 @@
 ## 4. 分项状态
 
 ### VERIFIED PASS
-461 用例全绿（唯一 skip 是 `k8s_integration` GPU 档）。
+492 用例全绿（唯一 skip 是 `k8s_integration` GPU 档）；权威值以本报告为准，
+此处只是复读——四元组计数串在 §1，由 `make validate` 的值对账钉住。
 其中真后端档：PG 真并发 18/18、真容器 20/20、真浏览器 11/11、
-**对象存储真后端 20/20**、**K8s 控制面真集群 7/7**、SDK 线格式 6、预授权 14。
+对象存储真后端 20/20、K8s 控制面真集群 7/7、SDK 线格式 6、预授权 14、
+**边缘设备真进程 e2e（真 uvicorn 子进程 + 真 agent 子进程 + mock 驱动）**。
 lint/type/migration/build/smoke/release/供应链全链路。
 
 ### PHYSICAL_VALIDATION_PENDING / NOT_RUN（不假装 PASS）
@@ -81,6 +103,11 @@ NGC 凭据（镜像 digest 回填、`nvcr.io` 基础镜像钉 digest）· 云 S3
 
 ### TECH DEBT（已知、有意延后 —— 本轮逐条量过，不是照抄旧措辞）
 
+v0.6.0 记在此处的"edge agent 独立包与其分派/取件鉴权面"**本轮结案**：组件存在
+（`edge_agent/` 包 + CLI + 三条设备侧端点），鉴权面被常驻用例覆盖（发现/开门/取件、
+越权 404、前缀复核、真进程 e2e），ADR 0007 转 Accepted。剩下的"真机驱动"不是软件任务：
+`edge_agent/drivers.py:build_driver` 是唯一替换点，等的是真实机器人（G5.2）。
+
 v0.5.0 记在此处的三条（K8s provider 控制面路径、Docker `--gpus` 分支、
 S3 `ArtifactStore` 真实后端）**本轮全部结案**：前一条由 kind 真集群档 7/7 覆盖
 （ADR 0009），后两条由真守护进程记账（docker 档 20 例，其中 3 例是 GPU argv）与
@@ -88,7 +115,7 @@ S3 `ArtifactStore` 真实后端）**本轮全部结案**：前一条由 kind 真
 剩下的只有"物理设备才答得了"的部分（GPU 设备在容器内可见、device plugin 真实分配），
 已移到上面的 PHYSICAL/BLOCKED 两节，不再冒充"待办"。
 
-当前真正的延后项只有下面两条，且都被本轮实测改过性质：
+当前真正的延后项只剩下面一条，且它被本轮实测改过性质：
 
 - **`default_idle_timeout_minutes` 目前没有任何消费者**（`grep` 全仓：仅出现在
   `app/config.py`，读数为 1 处声明、0 处读取）。所以它不是"已实现待调参"，而是一个
@@ -99,24 +126,13 @@ S3 `ArtifactStore` 真实后端）**本轮全部结案**：前一条由 kind 真
   （CPU 空闲 ≠ 任务空闲），据此自动停机等于误杀长跑任务并照秒扣费；可信信号来自
   真机 GPU 利用率（被 NVIDIA 设备阻塞，见 §4 BLOCKED）。→ 保持延后，性质记为
   "缺可信信号 + 当前无消费者"。
-- **"edge agent 独立包（§25）"不是打包任务，而是组件缺失**：仓库里根本没有 agent 客户端
-  （`runtime/` 只有 Dockerfile 与 entrypoint；`grep` 心跳/`X-Agent-Token` 在 app 与
-  迁移之外零命中；GitHub 检索 "python robot edge agent heartbeat artifact download
-  verify" 命中 0 个仓库）。而且现成的 API 面**不足以支撑一个 agent**：agent token 只能
-  heartbeat / telemetry / report-checksum，`download→verify→run→complete` 四个状态迁移
-  全部走用户 bearer token（即今天的"edge 流程"是控制面侧模拟）。
-  → 落地它需要先决定"agent 怎么发现分派给它的 deployment"与"用 agent token 取 artifact
-  流的授权与路径安全"，那是新增鉴权面（安全敏感），应作为独立迭代设计-测试-评审，
-  不在版本收口里顺手加。外部实现对比（RAUC：面向嵌入式整机 A/B 升级与
-  "create/inspect/modify installation artifacts"，粒度不符；MQTT 设备 SDK 需引入
-  broker 与新凭据体系）与选择理由记在 ADR 0007。
 
 **引用完整性已逐条裁决完（见 ADR 0005 追加节）**：`*_id` 列普查出的 19 处未声明外键，
 以"全仓删除能力普查"（唯一硬删是 `GpuAllocation`，且无人按 id 引用它）为依据分派——
 11 处补上约束（`b7e4c1a09f52`），8 处保留不声明并逐条写明理由（互指环 2、slug 形态 3、
 账本历史 2、多态主体 1）。这里不再有待办，只有已记录的设计立场。
 
-（已闭：`test-*.db` 模块级文件库改 pid 独占，见 §2 T-1。闭之前实测过一次代价——两个
+（已闭：`test-*.db` 模块级文件库改 pid 独占，见 §3 的 T-1。闭之前实测过一次代价——两个
 pytest 进程并发跑同一仓库，互相清库，读出 31 / 26 例假红。）
 
 ## 5. 结论
@@ -133,7 +149,7 @@ strategic merge patch 并不能把 `nvidia.com/gpu` 从模板里去掉。
 （守护进程的 HostConfig、集群的 Unschedulable 判词、第二台服务端的错误码）、
 **每条新保证都要有一支"退回旧写法必然开火"的变异对照**（M1b/M2/M3/M4/M6 全部实测）。
 
-仍然待办且性质明确：`default_idle_timeout_minutes` 缺可信活动信号（且当前 0 消费者）、
-edge agent 组件与其分派/取件鉴权面（ADR 0007 Proposed，两个前置设计问题已列明）；
+仍然待办且性质明确：`default_idle_timeout_minutes` 缺可信活动信号（且当前 0 消费者）。
+上一轮挂在延后清单里的 edge agent 组件与分派/取件鉴权面，本轮已落地并进门禁（ADR 0007 Accepted）；
 引用完整性的 19 处 `*_id` 已全部逐条裁决（11 处补约束、8 处写明理由）。
 硬件与凭据类项目继续显式登记 PENDING/BLOCKED，不用测试通过冒充物理验证。

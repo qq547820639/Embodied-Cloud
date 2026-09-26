@@ -13,20 +13,17 @@
 缺件时整档干净跳过，skip 文案带 BROWSER_VALIDATION_PENDING 供 release gate 登记。
 """
 
-import contextlib
 import json
 import os
 import shutil
-import socket
-import subprocess
-import sys
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+from tests.live_server import live_server as live_server_ctx
 
 GATE_SENTINEL = "BROWSER_VALIDATION_PENDING"
 
@@ -79,83 +76,17 @@ def browser(browser_channel):
             proc.close()
 
 
-def _free_port() -> int:
-    with contextlib.closing(socket.socket()) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-@dataclass
-class Server:
-    url: str
-    db_path: Path
-    log_path: Path
-
-
 @pytest.fixture(scope="session")
 def live_server(tmp_path_factory):
     """真起一个 uvicorn（mock provider + 独立 sqlite + 独立 workspace 目录）。
 
-    只测前端不需要 TestClient，但浏览器必须有真 HTTP 端口；进程一律本 fixture
-    自己回收（terminate → 超时 kill），失败时把服务日志一并抛出。
+    进程生命周期与就绪判据在 `tests/live_server.py`（与 agent e2e 共用）；这里只是
+    把 session 级夹具接到 pytest 上，并把根目录放进 pytest 的 tmp_path_factory，
+    好让 CI 的 TMPDIR 策略统一生效。
     """
     root = Path(tempfile.mkdtemp(prefix="ec-browser-test-", dir=tmp_path_factory.mktemp("server")))
-    db = root / "app.db"
-    env = dict(
-        os.environ,
-        EMBODIEDCLOUD_PROVIDER="mock",
-        EMBODIEDCLOUD_DATABASE_URL=f"sqlite:///{db}",
-        EMBODIEDCLOUD_WORKSPACE_ROOT=str(root / "workspaces"),
-        EMBODIEDCLOUD_AUTO_CREATE_TABLES="true",
-        PYTHONPATH=str(Path(__file__).resolve().parents[1]),
-    )
-    port = _free_port()
-    log_path = root / "srv.log"
-    repo_root = str(Path(__file__).resolve().parents[1])
-    proc = subprocess.Popen(  # noqa: S603
-        [
-            sys.executable, "-m", "uvicorn", "app.main:app",
-            "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning",
-        ],
-        cwd=repo_root,
-        env=env,
-        stdout=open(log_path, "w", encoding="utf-8"),  # noqa: SIM115 子进程日志重定向
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    base = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 60
-    last = ""
-    try:
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                tail = proc.stdout.read() if proc.stdout else ""
-                raise RuntimeError(f"uvicorn 提前退出 rc={proc.returncode}:\n{tail}")
-            try:
-                with contextlib.closing(socket.socket()) as probe:
-                    probe.settimeout(1)
-                    probe.connect(("127.0.0.1", port))
-            except OSError:
-                time.sleep(0.3)
-                continue
-            import httpx
-
-            resp = httpx.get(f"{base}/api/health", timeout=5)
-            if resp.status_code == 200:
-                last = "ready"
-                break
-            time.sleep(0.3)
-        if last != "ready":
-            raise RuntimeError(f"uvicorn 未在 60s 内就绪：{base}/api/health")
-        yield Server(url=base, db_path=db, log_path=log_path)
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:  # pragma: no cover
-            proc.kill()
-            proc.wait(timeout=10)
-        shutil.rmtree(root, ignore_errors=True)
+    with live_server_ctx(root) as server:
+        yield server
 
 
 def _httpx():

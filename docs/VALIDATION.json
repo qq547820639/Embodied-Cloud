@@ -1,16 +1,17 @@
 {
-  "version": "0.6.0",
-  "overall": "FAIL",
+  "version": "0.7.0",
+  "overall": "PASS_WITH_PHYSICAL_PENDING",
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 462
+      "count": 493
     },
     "test_run": {
       "status": "PASS",
-      "passed": 461,
+      "passed": 492,
       "skipped": 1,
-      "failed": 0
+      "failed": 0,
+      "failed_names": []
     },
     "integration_k8s": {
       "status": "PENDING",
@@ -61,8 +62,8 @@
       "note": "需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行"
     },
     "docs_test_counts": {
-      "status": "FAIL",
-      "note": "CHANGELOG 当前版本节: 文档写 (460, 459, 1, 0)，实测 (462, 461, 1, 0); docs/CURRENT_STATE.md: 文档写 (460, 459, 1, 0)，实测 (462, 461, 1, 0)"
+      "status": "PASS",
+      "note": "CHANGELOG/CURRENT_STATE 计数串与本报告一致"
     }
   }
 }

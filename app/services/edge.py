@@ -84,6 +84,22 @@ class EdgeService:
             return None
         return agent
 
+    def list_telemetry(
+        self, db: Session, agent: EdgeAgent, limit: int = 50
+    ) -> list[TelemetryEvent]:
+        """读某一设备的遥测（调用方必须已经过 `get_agent` 的租户校验）。
+
+        补的是"只写不读"：`report_telemetry` 从 v0.4 起就在写这张表，但全仓
+        没有任何读路径——设备回报的运行结果落在库里没人看得见。
+        """
+        stmt = (
+            select(TelemetryEvent)
+            .where(TelemetryEvent.edge_agent_id == agent.id)
+            .order_by(TelemetryEvent.created_at.desc())
+            .limit(limit)
+        )
+        return list(db.scalars(stmt))
+
 
 def get_agent_from_header(request: Request, db: Session) -> EdgeAgent:
     """从 `X-Agent-Token` header 解析 EdgeAgent; 缺失/不匹配 → 401."""

@@ -1,6 +1,6 @@
 PYTHON ?= .venv/bin/python
 UV ?= uv
-VERSION ?= 0.6.0
+VERSION ?= 0.7.0
 
 .PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane \
         lint typecheck build smoke clean check demo \
@@ -44,11 +44,11 @@ test-k8s-control-plane:
 	$(PYTHON) -m pytest -m k8s_control_plane
 
 lint:
-	$(PYTHON) -m ruff check app tests
+	$(PYTHON) -m ruff check app tests edge_agent
 	@for f in scripts/*.sh runtime/workspace-entrypoint.sh; do bash -n "$$f"; done
 
 typecheck:
-	$(PYTHON) -m mypy app
+	$(PYTHON) -m mypy app edge_agent
 
 build:
 	$(PYTHON) -m build

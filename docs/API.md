@@ -1,6 +1,6 @@
 # API 参考 — EmbodiedCloud
 
-> 版本：0.6.0。完整 OpenAPI 规范见 `docs/openapi.json`（`make api-docs` 生成，CI 校验 freshness）。
+> 版本：0.7.0。完整 OpenAPI 规范见 `docs/openapi.json`（`make api-docs` 生成，CI 校验 freshness）。
 > 除标注「公开」的端点外，全部需要 `Authorization: Bearer <session-token>`；owner/org 隔离下越权一律 404（不泄露资源存在性，SECURITY.md T1）。
 
 ## 认证（公开）
@@ -91,7 +91,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/deployments` | 创建：workspace 产出路径 → Artifact（sha256）→ 部署记录（pending） |
+| POST | `/api/deployments` | 创建：workspace 产出路径 → Artifact（sha256）→ 部署记录（pending）；可选 `edge_agent_id` 当场指派执行设备（只能指派自己的） |
 | GET | `/api/deployments?workspace_id=` | 我的部署（owner 隔离） |
 | GET | `/api/deployments/{id}` | 详情 |
 | POST | `/api/deployments/{id}/download` | pending → downloading（仅进入状态，绝不自动 VERIFIED） |
@@ -99,6 +99,7 @@
 | POST | `/api/deployments/{id}/run` | verified → running，可选绑定自己的 Edge Agent |
 | POST | `/api/deployments/{id}/complete` | running → success/failed（终态） |
 | POST | `/api/deployments/{id}/report-checksum` | **Edge Agent 上报本地 sha256**（`X-Agent-Token` 认证）——唯一 edge→server 校验路径，防绕过/防 replay |
+| GET | `/api/deployments/{id}/artifact` | **Edge Agent 取件**（`X-Agent-Token`）：字节 + `X-Artifact-Sha256`/`X-Artifact-Size`/`ETag`；未 `begin` → 409，越权 → 404，存储故障 → 503 |
 
 **verify 的 503 口径**：`VERIFIED`/`FAILED` 都是终态（终态再调 `verify` 幂等返回，
 不会重验），所以只有"产物确实不存在"或"checksum 不匹配"这两种**关于产物的判决**
@@ -115,6 +116,13 @@
 | GET | `/api/edge/agents/{id}` | 详情（越权 404） |
 | POST | `/api/edge/agents/{id}/heartbeat` | 心跳（`X-Agent-Token`） |
 | POST | `/api/edge/agents/{id}/telemetry` | 遥测（`X-Agent-Token`） |
+| GET | `/api/edge/agents/{id}/telemetry` | 遥测回读（用户侧，租户 scope，越权 404）——此前这张表只写不读 |
+| GET | `/api/edge/agents/{id}/deployments/assigned` | **设备侧工作发现**（`X-Agent-Token`）：只返回绑定给自己的部署 |
+| POST | `/api/edge/agents/{id}/deployments/{dep}/begin` | **设备侧开门**（`X-Agent-Token`）：pending → downloading，条件 UPDATE，重复调用幂等 |
+
+设备侧通路的完整一轮（`edge_agent` 包，标准库实现）与三道防线的开火读数，
+见 `docs/adr/0007-edge-agent-assignment-is-a-new-auth-surface.md`。
+分派走独立 GET 而不是塞进 heartbeat，是为了让心跳保持"我只登记存活"的单向语义。
 
 ## GPU 管理（admin）
 

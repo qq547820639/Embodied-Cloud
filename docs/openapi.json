@@ -3,7 +3,7 @@
   "info": {
     "title": "EmbodiedCloud API",
     "description": "Browser-first Isaac Lab workspace control plane",
-    "version": "0.6.0"
+    "version": "0.7.0"
   },
   "paths": {
     "/api/auth/register": {
@@ -1846,6 +1846,160 @@
             }
           }
         }
+      },
+      "get": {
+        "tags": [
+          "edge"
+        ],
+        "summary": "List Telemetry",
+        "description": "\u67d0\u8bbe\u5907\u7684\u9065\u6d4b\u56de\u8bfb\uff08\u79df\u6237 scope\uff1a\u8d8a\u6743 404\uff09\u3002\n\n`report_telemetry` \u4e00\u76f4\u5728\u5199\u8fd9\u5f20\u8868\uff0c\u6b64\u524d\u6ca1\u6709\u4efb\u4f55\u8bfb\u8def\u5f84\uff1b\u8bbe\u5907\u7684\u8fd0\u884c\u7ed3\u679c\n\uff08\u00a725 \u7684 `edge-run`\uff09\u8981\u6709\u7528\uff0c\u5fc5\u987b\u80fd\u88ab\u7528\u6237/\u8fd0\u7ef4\u770b\u89c1\u3002",
+        "operationId": "list_telemetry_api_edge_agents__agent_id__telemetry_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TelemetryOut"
+                  },
+                  "title": "Response List Telemetry Api Edge Agents  Agent Id  Telemetry Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/edge/agents/{agent_id}/deployments/assigned": {
+      "get": {
+        "tags": [
+          "edge"
+        ],
+        "summary": "Assigned Deployments",
+        "description": "\u00a725 / ADR 0007\uff1a\u8bbe\u5907\u4fa7\u7684\u5de5\u4f5c\u53d1\u73b0\u2014\u2014\u53ea\u8fd4\u56de**\u7ed1\u5b9a\u7ed9\u81ea\u5df1**\u7684\u90e8\u7f72\u3002\n\n\u53d1\u73b0\u8d70\u72ec\u7acb GET \u800c\u4e0d\u662f\u585e\u8fdb heartbeat\uff1a\u5fc3\u8df3\u662f\"\u6211\u8fd8\u6d3b\u7740\"\u7684\u5355\u5411\u767b\u8bb0\uff0c\u8ba9\u5b83\u987a\u5e26\n\u8fd4\u56de\u4efb\u52a1\u4f1a\u628a\u5206\u6d3e\u8bed\u4e49\u53d8\u6210\u5199\u8def\u5f84\uff08\u8fd9\u6b63\u662f ADR 0007 \u5217\u4e3a\u524d\u7f6e\u95ee\u9898\u7684\u9009\u9879\u4e4b\u4e00\uff09\u3002\n\u8bbe\u5907\u8eab\u4efd\u4ecd\u4ee5 token \u4e3a\u51c6\uff1a`agent_id` \u4e0e token \u4e0d\u81ea\u6307 \u2192 404\u3002",
+        "operationId": "assigned_deployments_api_edge_agents__agent_id__deployments_assigned_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeploymentOut"
+                  },
+                  "title": "Response Assigned Deployments Api Edge Agents  Agent Id  Deployments Assigned Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/edge/agents/{agent_id}/deployments/{deployment_id}/begin": {
+      "post": {
+        "tags": [
+          "edge"
+        ],
+        "summary": "Begin Assigned Deployment",
+        "description": "\u8bbe\u5907\u4fa7\u627f\u8ba4\"\u6211\u5f00\u59cb\u53d6\u8fd9\u4ef6\u4e86\"\uff1apending \u2192 downloading\uff08\u6761\u4ef6 UPDATE\uff0c\u91cd\u590d\u8c03\u7528\u5e42\u7b49\uff09\u3002\n\n\u4e3a\u4ec0\u4e48\u8981\u6709\u8fd9\u4e00\u6b65\uff1a`report_checksum` \u53ea\u63a5\u53d7 DOWNLOADING\uff08\u00a723 \u9632\u7ed5\u8fc7\uff09\uff0c\n\u6240\u4ee5\"\u53d6\u4ef6\"\u5fc5\u987b\u7531\u8bbe\u5907\u81ea\u5df1\u5f00\u95e8\uff0c\u800c\u4e0d\u662f\u63a7\u5236\u9762\u66ff\u5b83\u5f00\u95e8\u3002",
+        "operationId": "begin_assigned_deployment_api_edge_agents__agent_id__deployments__deployment_id__begin_post",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          },
+          {
+            "name": "deployment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Deployment Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/edge/agents": {
@@ -2296,6 +2450,47 @@
         }
       }
     },
+    "/api/deployments/{deployment_id}/artifact": {
+      "get": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Fetch Artifact For Agent",
+        "description": "\u00a725 / ADR 0007\uff1aagent \u53d6\u4ef6\uff08`X-Agent-Token`\uff09\uff0c\u5b57\u8282\u6d41 + `X-Artifact-Sha256`\u3002\n\n\u9274\u6743\u9762\u4e0e `report-checksum` \u540c\u4e00\u6761\uff1a`get_deployment_for_agent` \u2014\u2014 \u79df\u6237\u4e0d\u5339\u914d\u3001\n\u6216\u8be5\u90e8\u7f72\u5df2\u7ed1\u7ed9\u522b\u7684\u8bbe\u5907\uff0c\u4e00\u5f8b 404\uff08SECURITY.md T1 \u7684\u4e0d\u6cc4\u9732\u5b58\u5728\u6027\uff09\u3002\n\u53ea\u63a5\u53d7 `downloading`\uff1a\u5148 `begin`\uff08\u8bbe\u5907\u4fa7\u627f\u8ba4\"\u6211\u5f00\u59cb\u53d6\u4e86\"\uff09\u518d\u53d6\u4ef6\uff0c\u4e0e \u00a723 \u7684\n\"\u6ca1\u4e0b\u8f7d\u4e0d\u5f97\u5224 VERIFIED\" \u7528\u540c\u4e00\u4e2a\u72b6\u6001\u524d\u63d0\u3002\n\u4e0d\u4e0b\u53d1 `Content-Disposition`\uff1a\u6587\u4ef6\u540d\u7531\u8bbe\u5907\u81ea\u5df1\u51b3\u5b9a\uff0c\u54cd\u5e94\u5934\u91cc\u4e0d\u5e26\u7528\u6237\u53ef\u63a7\u6587\u672c\u3002",
+        "operationId": "fetch_artifact_for_agent_api_deployments__deployment_id__artifact_get",
+        "parameters": [
+          {
+            "name": "deployment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Deployment Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "summary": "Health",
@@ -2603,6 +2798,17 @@
             "type": "string",
             "title": "Model Version",
             "default": "0.1.0"
+          },
+          "edge_agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Agent Id"
           }
         },
         "type": "object",

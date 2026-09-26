@@ -6,14 +6,15 @@
 - unhealthy / drain 状态流转
 """
 
-import time
-
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.deps import SessionFactory, scheduler
 from app.main import app
 from app.models import Gpu, GpuStatus, Role, User
+from tests.gpu_pool import ensure_free_gpus
 from tests.test_demo_workspace import _auth, _register
+from tests.workspace_progress import wait_status
 
 
 def _promote(email: str) -> None:
@@ -26,18 +27,13 @@ def _promote(email: str) -> None:
         db.commit()
 
 
-def _wait_status(client: TestClient, token: str, wid: str, target: str, timeout: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        ws = client.get(f"/api/workspaces/{wid}", headers=_auth(token)).json()
-        if ws["status"] == target:
-            return
-        time.sleep(0.3)
-    raise AssertionError(f"workspace {wid} did not reach {target} in {timeout}s")
-
-
 def test_gpu_endpoints_admin_and_release_cycle():
     with TestClient(app) as client:
+        # 前置条件要自己达成，不能靠"排在别人前面"：全套共用一个库、mock 只有 8 张卡，
+        # 而上游用例创建的 workspace 不会替自己回收（实测读数见 tests/gpu_pool.py）。
+        # 放在 lifespan 之后：建表是 bootstrap_db() 干的。
+        with SessionFactory() as db:
+            ensure_free_gpus(db, scheduler)
         token = _register(client, "gpuadmin@example.com", "gpuadmin")
         _promote("gpuadmin@example.com")
 
@@ -57,7 +53,7 @@ def test_gpu_endpoints_admin_and_release_cycle():
         )
         assert created.status_code == 201
         wid = created.json()["id"]
-        _wait_status(client, token, wid, "running")
+        wait_status(client, token, wid, "running")
 
         ws = client.get(f"/api/workspaces/{wid}", headers=_auth(token)).json()
         assert ws["gpu_id"], "running workspace 必须绑定 GPU"
@@ -67,7 +63,7 @@ def test_gpu_endpoints_admin_and_release_cycle():
 
         # stop → GPU 释放回 AVAILABLE、绑定清空（此前只有注释没有断言）
         assert client.post(f"/api/workspaces/{wid}/stop", headers=_auth(token)).status_code == 200
-        _wait_status(client, token, wid, "stopped")
+        wait_status(client, token, wid, "stopped")
         gpu_list = {g["id"]: g for g in client.get("/api/gpus", headers=_auth(token)).json()}
         assert gpu_list[ws["gpu_id"]]["status"] == GpuStatus.AVAILABLE.value
         assert gpu_list[ws["gpu_id"]]["workspace_id"] is None

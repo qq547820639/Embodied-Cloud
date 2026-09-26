@@ -12,7 +12,7 @@ def _pyproject_version() -> str:
 
 
 def test_pyproject_is_version_source_of_truth():
-    assert _pyproject_version() == "0.6.0"
+    assert _pyproject_version() == "0.7.0"
 
 
 def _load_validator():
@@ -59,6 +59,61 @@ def test_doc_count_reconciliation_can_fire() -> None:
     offenders = validator.docs_counts_discrepancies(_pyproject_version(), checks)
     assert len(offenders) == 2, offenders
     assert all("实测" in line for line in offenders), offenders
+
+
+def test_lint_and_type_targets_are_the_same_in_makefile_and_the_release_gate() -> None:
+    """`make lint`/`make typecheck` 与 `make validate` 必须量同一批目标。
+
+    本轮新增 `edge_agent/` 包时要同时改两处，漏一处就会出现"开发者跑的门禁比
+    发布门禁宽"——而且新代码恰好是没人量的那份。判据按目标集合比对，
+    并钉住 edge_agent 在册（否则两遍空集合也能互相相等）。
+    """
+    make = Path("Makefile").read_text(encoding="utf-8")
+    src = Path("scripts/validate_release.py").read_text(encoding="utf-8")
+    for tool in ("ruff", "mypy"):
+        mk = re.search(rf"^\t\$\(PYTHON\) -m {tool} (.+)$", make, re.MULTILINE)
+        gate = re.search(rf'"-m", "{tool}"((?:, "[a-z_]+")+)', src)
+        assert mk and gate, f"{tool}: 两处之一找不到调用行"
+        make_targets = set(mk.group(1).split()) - {"check"}
+        gate_targets = set(re.findall(r'"([a-z_]+)"', gate.group(1))) - {"check"}
+        assert make_targets, f"{tool}: Makefile 目标集合为空（判据会恒真）"
+        assert "edge_agent" in make_targets, make_targets
+        assert make_targets == gate_targets, f"{tool}: make={sorted(make_targets)} gate={sorted(gate_targets)}"
+
+
+def test_report_carries_the_names_of_failing_cases(tmp_path) -> None:
+    """一次偶发失败必须可归因：计数之外还要带出**是哪条**。
+
+    本轮真实教训：`make validate` 把 pytest 的输出丢弃（`code, _ = run(...)`），
+    报告只剩 "failed: 1"，那条用例从此无法追查——重跑两次都不再红。名字取自
+    JUnit 的结构化属性，不是日志文本（日志里没有稳定的用例名可解析）。
+    """
+    validator = _load_validator()
+
+    def counts_of(body: str) -> dict:
+        report = tmp_path / "junit.xml"
+        report.write_text(body, encoding="utf-8")
+        return validator.count_tests_junit(report)
+
+    fired = counts_of(
+        '<testsuites><testsuite name="pytest" tests="4" skipped="1" failures="1" errors="1">'
+        '<testcase classname="tests.a" name="ok"/>'
+        '<testcase classname="tests.a" name="boom"><failure message="x">trace</failure></testcase>'
+        '<testcase classname="tests.b" name="crashed"><error message="e">trace</error></testcase>'
+        '<testcase classname="tests.c" name="pending"><skipped message="why"/></testcase>'
+        "</testsuite></testsuites>"
+    )
+    assert fired["failed"] == 2, fired
+    assert fired["failed_names"] == ["tests.a::boom", "tests.b::crashed"], fired
+
+    # 反向对照：全绿报告不得凭空造出名字，否则这条判据只是"字段存在"而非"有牙"。
+    clean = counts_of(
+        '<testsuites><testsuite name="pytest" tests="2" skipped="1" failures="0" errors="0">'
+        '<testcase classname="tests.a" name="ok"/>'
+        '<testcase classname="tests.c" name="pending"><skipped message="why"/></testcase>'
+        "</testsuite></testsuites>"
+    )
+    assert clean["failed"] == 0 and clean["failed_names"] == [], clean
 
 
 def test_release_script_owns_the_value_reconciliation() -> None:

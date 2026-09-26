@@ -1,6 +1,6 @@
 [project]
 name = "embodiedcloud"
-version = "0.6.0"
+version = "0.7.0"
 description = "EmbodiedCloud control plane for browser-first Isaac Lab GPU workspaces"
 requires-python = ">=3.12"
 dependencies = [
@@ -48,6 +48,8 @@ s3 = [
 
 [project.scripts]
 embodiedcloud = "app.main:run"
+# §25：边缘代理是**独立入口**，设备侧只装本包（标准库依赖）。
+embodiedcloud-edge-agent = "edge_agent.__main__:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -69,7 +71,7 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "edge_agent*"]
 
 [tool.setuptools.package-data]
 app = ["static/*"]

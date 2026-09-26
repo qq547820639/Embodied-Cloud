@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
+
+`docs/VALIDATION.json`（`make validate` 生成）：collected 493 / passed 492 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
+
+### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
+- **裁决依据是查来的，不是拍的**：读 AWS IoT Jobs 的任务生命周期页
+  （`iot-jobs-lifecycle.html`）拿到两事实——`QUEUED` 由服务端 rollout、
+  `IN_PROGRESS/SUCCEEDED/FAILED` 一律"Initiated by device"，且取任务用的是
+  `StartNextPendingJobExecution` 这个独立 API 而不是把任务塞进通知通道。
+  据此定：分派走独立 `GET .../deployments/assigned`（heartbeat 保持"只登记存活"），
+  设备自己发 `POST .../begin` 开门，控制面继续持有 `run/complete`
+  （那两步要绑 GPU 工作区、要结算账本，属主不是机器人）。
+- 服务端新增：`GET /api/edge/agents/{id}/deployments/assigned`、
+  `POST /api/edge/agents/{id}/deployments/{dep}/begin`（条件 UPDATE，重复调用幂等）、
+  `GET /api/deployments/{dep}/artifact`（`X-Agent-Token`，带 `X-Artifact-Sha256` /
+  `X-Artifact-Size` / ETag），`POST /api/deployments` 可选 `edge_agent_id` 当场指派。
+  `begin` 不是装饰：`report_checksum` 只接受 `downloading`（§23 防绕过），
+  没有设备侧开门就还得让控制面替它写状态。
+- 修 **遥测只写不读**：`report_telemetry` 从 v0.4 起一直在写 `telemetry_events`，
+  全仓没有任何读路径。新增 `GET /api/edge/agents/{id}/telemetry`（租户 scope、越权 404），
+  设备的 `edge-run` 结果才谈得上被运维看见。
+- 新增设备侧包 `edge_agent/`（只依赖标准库、不 import `app`：设备上装的是本包）：
+  `client.py` 流式取件 + 边写边算 sha256 + 体积熔断 + `.part` 原子改名，
+  `drivers.py` mock 驱动（真驱动接入点 `build_driver`），`agent.py` 一轮编排，
+  `__main__.py` CLI。安全细节：base_url 限定 http(s)（否则取件客户端就是任意文件读取器）、
+  凭据只走环境变量（argv 上的 token 同机任何用户能从 `ps` 读到）、
+  不下发 `Content-Disposition`（响应头里不带用户可控文本）、
+  `AgentClientError` 只带状态码/URL/detail，token 不入异常文本（T2/T5）。
+- 防线读数（每条都是"拆掉它，看哪支用例翻红"）：
+  **M1** 去掉 `read_artifact` 的 workspace 前缀复核 → 攻击者拿到 200 + victim 的字节；
+  **M2** 去掉取件的 `downloading` 前提 → 未 begin 也能取件（200 而非 409）；
+  **M3** 去掉部署期的 `edge_agent` 绑定 → 发现面变空，e2e 与 API 档同时红。
+  如实登记一处**没有**独立开火对照的冗余：`begin` 的条件 UPDATE 里
+  `edge_agent_id` 那一支与路由层校验语义重叠，单线程观测不到差别（要它可观测需 PG 档并发用例）。
+- 常驻验证：`tests/test_edge_agent_api.py`（10 例，含跨租户 404、同租户未绑定 404、
+  越权取件、503 可重试、begin 幂等/拒终态）、`tests/test_edge_agent_client.py`
+  （12 例，坏响应形状：摘要不符 / 声明体积超限 / 中途超限 / 非 http base_url /
+  token 不外泄）、`tests/test_edge_agent_e2e.py`（真 uvicorn 子进程 +
+  真 `python -m edge_agent` 子进程 + mock 驱动，断言落盘 sha256 与登记一致、
+  无 `.part` 残留、遥测读得到、**第二轮不重复上机**）。
+  已知限制如实写进 ADR：没有运行游标，崩在 verified 之后、驱动之前不会自动补跑。
+
+### 测试夹具：把"靠调度器运气"和"靠排队位置"两类隐性前提拿掉
+- `wait_status` 的常驻动机：`test_gpu_admin` 在全量跑里红过一次，报错是
+  "20.0s 内未到 running"。旧形状是 sleep + 读 HTTP，等于把后台 worker 线程
+  拿不拿得到 CPU 当前提。现在每轮先 `worker.tick_once()` 自己推进
+  （claim 是 CAS + fencing，胜者唯一），并配**确定性的两档对照**
+  （`tests/test_workspace_progress.py`）：把后台线程循环体掐掉之后，
+  主动 tick 的到得了 running 且真绑上 GPU，被动等的到不了——后者是前提档，
+  它若读到 running 就说明对照失效，正例读数一律不作数。
+- 修 **共享测试库的 GPU 池饿死**：全套共用一个 SQLite、mock 只 seed 8 张卡，
+  `POST /api/workspaces` 占卡而用例不还。实测把本轮新加的 `test_edge_agent_api.py`
+  （13 个 workspace）与 `test_gpu_admin.py` 配对即红，其余 55 个文件逐个配对都不红
+  ——单变量定位到污染源。修法是两头：新文件模块级归还自己占的卡；
+  需要空闲卡的用例显式达成前置条件（`tests/gpu_pool.py:ensure_free_gpus`，
+  回收走 `GpuScheduler.release` 这条唯一分配权威，不手写 UPDATE）。
+- 真起 uvicorn 的夹具从浏览器档抽成 `tests/live_server.py`，浏览器档与 agent e2e
+  共用同一份就绪判据与回收顺序（迁移后浏览器档 11/11 重跑为绿，用时 24.0s ≈ 原 22-24s）。
+
+### 发布链：让"报告只说 failed: 1"这种形状不可能再出现
+- `docs/VALIDATION.json` 的 `test_run` 现在带 `failed_names`（名字取自 JUnit 的
+  `classname::name`，含 `failure` 与 `error` 两类），`docs/VALIDATION.md` 同步行内展示。
+  起因是本轮真实撞到的排查死角：`validate` 把 pytest 输出丢弃（`code, _ = run(...)`），
+  一次偶发失败之后**连用例名都拿不到**，重跑两次都不再红，只能挂一条"未归因"。
+  只带名字不带 message 是有意的：报告必须确定性（CI freshness 门禁比较 `git diff`），
+  而失败消息里带时间/端口就每次不同。常驻对照判据：造一份"4 条里 2 条红"的 JUnit，
+  必须恰好点出那两条；全绿报告必须给出空列表（否则这条判据只是"字段存在"）。
+- 新增常驻判据：`make lint`/`make typecheck` 的 ruff/mypy 目标集合必须与
+  `scripts/validate_release.py` 里的一致，并钉住 `edge_agent` 在册。
+  开火读数：把 `edge_agent` 从门禁那侧删掉即红
+  （`ruff: make=['app','edge_agent','tests'] gate=['app','tests']`）。
+  本轮新增包时要同时改两处，漏一处的后果是"新代码恰好是没人量的那份"。
+- 文档同步：`docs/API.md` 设备侧三条 + 遥测回读 + 取件 409/404/503 口径；
+  `docs/OPERATIONS.md` 新增 §8 边缘设备（入网/常驻/凭据放 env 而非 argv/排查表）
+  与两条读数坑（"PENDING ≠ 跑过"、共享库的固定卡池）；
+  `docs/ACCEPTANCE_GATES.md` 新增 G0.28/G0.29，G5.1 的判据从"控制台页走通"
+  升级为真进程回环；`docs/openapi.json` 重新生成（+206 行）。
+
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 
 `docs/VALIDATION.json`（`make validate` 生成）：collected 462 / passed 461 /

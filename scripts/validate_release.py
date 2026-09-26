@@ -8,6 +8,7 @@ GPU/K8s/Streaming/Robot 物理状态。CURRENT_STATE 引用本文件输出；CI 
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -24,7 +25,12 @@ def run(cmd: list[str], timeout: int = 900) -> tuple[int, str]:
 
 
 def count_tests_junit(report_path: Path) -> dict:
-    """§16：用 JUnit XML 的 testsuite 属性稳定计数（不解析 pytest 文本输出）。"""
+    """§16：用 JUnit XML 的 testsuite 属性稳定计数（不解析 pytest 文本输出）。
+
+    同时把**失败用例名**捞出来：只报 "failed: 1" 的报告等于没有报告——本轮就出现过
+    一次"全量跑挂一条、日志里连用例名都没有"（validate 丢弃了 pytest 输出），
+    排查只能靠重跑撞运气。名字进 VALIDATION.json 之后，一次偶发失败也是可归因的。
+    """
     import xml.etree.ElementTree as ET
 
     tree = ET.parse(report_path)  # noqa: S314 pytest 生成的本地 JUnit（受控输出，非外部输入）
@@ -32,7 +38,12 @@ def count_tests_junit(report_path: Path) -> dict:
     # pytest 产出 <testsuites><testsuite .../></testsuites>
     suite = root if root.tag == "testsuite" else root.find("testsuite")
     if suite is None:
-        return {"collected": 0, "passed": 0, "skipped": 0, "failed": 0}
+        return {"collected": 0, "passed": 0, "skipped": 0, "failed": 0, "failed_names": []}
+    failed_names = [
+        f"{tc.get('classname') or ''}::{tc.get('name') or ''}"
+        for tc in root.iter("testcase")
+        if tc.find("failure") is not None or tc.find("error") is not None
+    ]
     return {
         "collected": int(suite.get("tests", 0)),
         "passed": int(suite.get("tests", 0))
@@ -41,7 +52,32 @@ def count_tests_junit(report_path: Path) -> dict:
         - int(suite.get("skipped", 0)),
         "skipped": int(suite.get("skipped", 0)),
         "failed": int(suite.get("failures", 0)) + int(suite.get("errors", 0)),
+        "failed_names": failed_names,
     }
+
+
+def print_failure_scene(report_path: Path, max_cases: int = 6, tail_lines: int = 14) -> None:
+    """把红掉那几条的 traceback 尾部打到 stdout（不进报告，报告要确定性）。
+
+    有了名字仍然不够：本轮 4 条红里两条是"文档占位符没填"（一眼可知），
+    两条是状态相关的（要看现场才知道是配额/池子还是断言）。
+    """
+    import xml.etree.ElementTree as ET
+
+    print(f"\n[validate] ===== 失败现场（完整报告：{os.path.relpath(report_path, ROOT)}）=====")
+    root = ET.parse(report_path).getroot()  # noqa: S314 pytest 生成的本地 JUnit
+    shown = 0
+    for tc in root.iter("testcase"):
+        node = tc.find("failure") if tc.find("failure") is not None else tc.find("error")
+        if node is None:
+            continue
+        shown += 1
+        if shown > max_cases:
+            print("[validate] …其余失败见 dist/validate-junit.xml")
+            break
+        print(f"\n--- {tc.get('classname')}::{tc.get('name')}  [{node.get('message', '')[:120]}]")
+        body = (node.text or "").strip().splitlines()
+        print("\n".join(body[-tail_lines:]))
 
 
 def integration_gate_statuses(junit_path: Path, gates: dict[str, dict]) -> dict[str, dict]:
@@ -144,38 +180,46 @@ def _integration_gates() -> dict[str, dict]:
 def main() -> int:
     checks: dict[str, dict] = {}
     gates = _integration_gates()
-    import tempfile
 
     # 1) 全量 test run（JUnit 报告 → 稳定计数）
-    with tempfile.TemporaryDirectory() as tmp:
-        junit = Path(tmp) / "junit.xml"
-        code, _ = run([PYTHON, "-m", "pytest", "--junitxml", str(junit)])
-        if junit.exists():
-            counts = count_tests_junit(junit)
-            checks["test_collected"] = {"status": "PASS", "count": counts["collected"]}
-            checks["test_run"] = {
-                "status": "PASS" if code == 0 else "FAIL",
-                "passed": counts["passed"],
-                "skipped": counts["skipped"],
-                "failed": counts["failed"],
-            }
-            checks.update({f"integration_{k}": v for k, v in integration_gate_statuses(junit, gates).items()})
-        else:
-            checks["test_collected"] = {"status": "FAIL", "count": 0}
-            checks["test_run"] = {"status": "FAIL", "passed": 0, "skipped": 0, "failed": 0}
-            checks.update({
-                f"integration_{k}": {"status": "NOT_RUN", "note": "pytest 未产出 JUnit 报告"}
-                for k in gates
-            })
+    # JUnit 落在 dist/（gitignored）而不是临时目录：临时目录随进程退出，
+    # 于是"红过哪几条"除了名字之外什么都留不下来，排查只能重跑撞运气。
+    dist = ROOT / "dist"
+    dist.mkdir(exist_ok=True)
+    junit = dist / "validate-junit.xml"
+    code, _ = run([PYTHON, "-m", "pytest", "--junitxml", str(junit)])
+    if junit.exists():
+        counts = count_tests_junit(junit)
+        checks["test_collected"] = {"status": "PASS", "count": counts["collected"]}
+        checks["test_run"] = {
+            "status": "PASS" if code == 0 else "FAIL",
+            "passed": counts["passed"],
+            "skipped": counts["skipped"],
+            "failed": counts["failed"],
+            # 报告里只放名字、不放 message：报告必须确定性（CI freshness 门禁比较
+            # git diff），而失败消息里带时间/端口就每次不同。现场另打 stdout。
+            "failed_names": counts["failed_names"],
+        }
+        checks.update({f"integration_{k}": v for k, v in integration_gate_statuses(junit, gates).items()})
+        if counts["failed"]:
+            print_failure_scene(junit)
+    else:
+        checks["test_collected"] = {"status": "FAIL", "count": 0}
+        checks["test_run"] = {
+            "status": "FAIL", "passed": 0, "skipped": 0, "failed": 0, "failed_names": []
+        }
+        checks.update({
+            f"integration_{k}": {"status": "NOT_RUN", "note": "pytest 未产出 JUnit 报告"}
+            for k in gates
+        })
 
     # 3) lint / type / migration / build
-    code, _ = run([PYTHON, "-m", "ruff", "check", "app", "tests"])
+    code, _ = run([PYTHON, "-m", "ruff", "check", "app", "tests", "edge_agent"])
     checks["lint"] = {"status": "PASS" if code == 0 else "FAIL"}
 
-    code, _ = run([PYTHON, "-m", "mypy", "app"])
+    code, _ = run([PYTHON, "-m", "mypy", "app", "edge_agent"])
     checks["typecheck"] = {"status": "PASS" if code == 0 else "FAIL"}
 
-    import os
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -305,6 +349,11 @@ def _render_md(report: dict) -> str:
     lines.append(
         f"| Test run | {tr['status']} | passed={tr['passed']} skipped={tr['skipped']} failed={tr['failed']} |"
     )
+    if names := tr.get("failed_names", []):
+        # 失败必须可归因：一份只写 "failed: 1" 的报告等于没有报告。
+        lines[-1] += f" {' · '.join(f'`{n}`' for n in names)} |"
+    elif tr["failed"]:
+        lines[-1] += " （JUnit 未给出用例名） |"
     for key in ("lint", "typecheck", "migration", "build"):
         lines.append(f"| {key} | {c[key]['status']} | |")
     # 集成档按 checks 里实际存在的键派生，避免"新增一档忘了加进渲染表"

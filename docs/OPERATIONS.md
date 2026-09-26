@@ -1,6 +1,6 @@
 # OPERATIONS — EmbodiedCloud
 
-> 版本：0.6.0（2026-09-26）。环境拓扑、监控、容量与运维约定。
+> 版本：0.7.0（2026-09-26）。环境拓扑、监控、容量与运维约定。
 
 ## 1. 部署拓扑
 
@@ -92,3 +92,48 @@
 kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出时 `kind delete cluster`。
 档位内部**只起一个 kind 集群**：本机曾出现两个集群并跑时 API server 连接被掐
 （`SSLEOFError`，一次观测，未做对照复现），删掉多余集群后同一条用例链稳定通过。
+
+两条读法上的坑（本轮踩过）：
+
+- **PENDING ≠ 跑过**。kind 二进制不在 PATH 且没设 `EMBODIEDCLOUD_KIND_BIN` 时，
+  G0.26 整档 skip，报告写 `integration_k8s_control_plane: PENDING(缺 kind 二进制)`，
+  其余档位照跑、总用例数照常报——只看 `overall` 会漏掉这一档根本没执行。
+- **共享库 + 固定大小的 mock GPU 池**：全套用例共用一个 SQLite 库，mock 只 seed 8 张卡，
+  而 `POST /api/workspaces` 会占住一张、用例结束不还。新加"批量建 workspace"的文件
+  能把后面的 GPU 用例饿死（报错是 `No GPU available with >= 8 GB VRAM`，不是断言失败）。
+  需要空闲卡的用例请显式达成前置条件：`tests/gpu_pool.py:ensure_free_gpus`。
+
+## 8. 边缘设备（edge agent）
+
+设备侧是独立包 `edge_agent/`（只依赖标准库，不 import `app`），装在机器人上：
+
+```bash
+# 1) 入网（在人值守的机器上做，用用户 access token；返回的 token 只显示一次）
+embodiedcloud-edge-agent register --server https://cloud.example \
+    --owner-token "$USER_TOKEN" --name arm-01
+# → {"agent_id": "...", "token": "..."}
+
+# 2) 常驻（凭据走环境变量：argv 上的 token 会被同机任何用户从 ps 里读到）
+export EMBODIEDCLOUD_EDGE_SERVER=https://cloud.example
+export EMBODIEDCLOUD_EDGE_AGENT_ID=<上一步>
+export EMBODIEDCLOUD_EDGE_TOKEN=<上一步>
+export EMBODIEDCLOUD_EDGE_WORKDIR=/var/lib/edge-agent
+embodiedcloud-edge-agent run                    # 或 --json --iterations 1 做冒烟
+```
+
+每轮做的事：心跳 → 发现绑定给自己的部署 → `begin` → 流式取件（边写边算 sha256，
+超体积上限即熔断并删除半成品）→ 与部署记录的期望摘要核对 → `report-checksum` →
+mock 驱动装载并跑一次 → 以 `kind=edge-run` 回报遥测。运维看结果：
+`GET /api/edge/agents/{id}/telemetry`。
+
+排查顺序：
+
+| 现象 | 先看 |
+|---|---|
+| 退出码 1、`无法与控制面通信` | token 是否被撤销/重装（服务端只存哈希，丢了只能重新 register） |
+| 一轮下来 `assigned` 为空 | 部署有没有在 `POST /deployments` 时带 `edge_agent_id`（指派是控制面动作） |
+| `ArtifactIntegrityError` | 产物被换过或链路损坏：文件不会被留下，也不会被喂给驱动；重下即可，若持续红查上游 artifact 登记 |
+| 第二轮不跑驱动 | 有意为之：只在"本轮亲手推到 verified"的那一次上机（无运行游标，见 ADR 0007 后果段） |
+
+真机驱动接入点是 `edge_agent/drivers.py:build_driver`，目前只有 `mock`。
+

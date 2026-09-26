@@ -9,15 +9,18 @@ import hashlib
 import shutil
 import uuid
 from pathlib import Path
+from typing import Any, cast
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import (
     Artifact,
     DeploymentRecord,
     DeploymentStatus,
+    EdgeAgent,
     Role,
     Template,
     TemplateVersion,
@@ -170,6 +173,16 @@ class DeploymentService:
             )
         )
         if existing is not None:
+            # 幂等复用的那条若还没人认领，本次指定的 agent 就是它的执行设备；
+            # 已绑别的设备时不改——复用不抢别人名下的任务。
+            if (
+                edge_agent is not None
+                and existing.status == DeploymentStatus.PENDING.value
+                and existing.edge_agent_id is None
+            ):
+                existing.edge_agent_id = edge_agent.id
+                db.commit()
+                db.refresh(existing)
             return existing
         deployment = DeploymentRecord(
             id=str(uuid.uuid4()),
@@ -199,6 +212,70 @@ class DeploymentService:
         deployment.status = DeploymentStatus.DOWNLOADING.value
         db.commit()
         return deployment
+
+    # ------------------------------------------------------------------
+    # Edge agent 侧通路（§25 / ADR 0007）：发现 → 开始取件 → 取件
+    # ------------------------------------------------------------------
+    def list_assigned(self, db: Session, agent: EdgeAgent) -> list[DeploymentRecord]:
+        """agent token 可见面：只有**绑定给自己**的部署，别的租户/别的设备都读不到。"""
+        return list(
+            db.scalars(
+                select(DeploymentRecord)
+                .where(DeploymentRecord.edge_agent_id == agent.id)
+                .order_by(DeploymentRecord.created_at)
+            )
+        )
+
+    def begin_agent_download(
+        self, db: Session, agent: EdgeAgent, deployment: DeploymentRecord
+    ) -> DeploymentRecord:
+        """设备侧发起 pending → downloading（对应 AWS Jobs 的 StartNextPendingJobExecution）。
+
+        为什么必须由 agent 来说这句话：`report_checksum` 只接受 DOWNLOADING
+        （§23 防绕过——没下载就上报等于凭空判 VERIFIED），而"已绑定给自己"这一条
+        已经在路由层 `_get_deployment_for_agent` 校过。
+        写成条件 UPDATE（id + 读到的 status + edge_agent_id）而不是先改对象再 commit：
+        并发重复 begin 至多一个赢家，其余的 rowcount=0，读回真值幂等返回。
+        """
+        if deployment.status == DeploymentStatus.DOWNLOADING.value:
+            return deployment
+        if deployment.status != DeploymentStatus.PENDING.value:
+            raise self._bad_transition(deployment, "downloading")
+        result = db.execute(
+            update(DeploymentRecord)
+            .where(
+                DeploymentRecord.id == deployment.id,
+                DeploymentRecord.status == DeploymentStatus.PENDING.value,
+                DeploymentRecord.edge_agent_id == agent.id,
+            )
+            .values(status=DeploymentStatus.DOWNLOADING.value)
+            # SQL 层比较，避开 ORM 的 in-Python evaluator（同 worker._try_claim）
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        db.refresh(deployment)
+        winner = int(cast("CursorResult[Any]", result).rowcount or 0) == 1
+        if not winner and deployment.status != DeploymentStatus.DOWNLOADING.value:
+            # 不是自己写的、又没落到 downloading = 有人抢先推进了一步（verify/run），
+            # 对 agent 来说这就是"这条不用取了"，按状态机语义拒绝。
+            raise self._bad_transition(deployment, "downloading")
+        return deployment
+
+    def read_artifact(
+        self, db: Session, deployment: DeploymentRecord
+    ) -> tuple[bytes, Artifact]:
+        """按记录里的 object_key 从 ArtifactStore 取字节（§9：不碰 workspace 文件系统）。
+
+        key **不来自请求参数**（请求只有 deployment id），所以没有用户可控路径。
+        仍做一次前缀复核：一条被手工改写过的 Artifact 行（object_key 指向别的
+        workspace 目录）不能借这个端点被读出来——越权一律 404，不泄露存在性。
+        """
+        artifact = db.get(Artifact, deployment.artifact_id) if deployment.artifact_id else None
+        if artifact is None or not artifact.object_key:
+            raise HTTPException(404, "artifact not found")
+        if not artifact.object_key.startswith(f"{deployment.workspace_id}/"):
+            raise HTTPException(404, "artifact not found")
+        return self.store.get(artifact.object_key), artifact
 
     def verify_checksum(self, db: Session, deployment: DeploymentRecord) -> DeploymentRecord:
         """幂等校验: ArtifactStore 中的对象 checksum 与记录一致 → verified, 否则 failed+error.

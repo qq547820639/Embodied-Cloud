@@ -305,6 +305,8 @@ class DeploymentCreate(BaseModel):
     artifact_path: str
     robot_type: str = Field(min_length=1, max_length=64)
     model_version: str = "0.1.0"
+    # §25/ADR 0007：部署时就把执行设备绑上，agent 之后凭 X-Agent-Token 自行发现并取件。
+    edge_agent_id: str | None = None
 
 
 class DeploymentOut(ORM):

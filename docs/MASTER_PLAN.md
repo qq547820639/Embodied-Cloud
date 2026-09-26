@@ -1,6 +1,6 @@
 # MASTER_PLAN — EmbodiedCloud
 
-> 版本：0.6.0（2026-09-26）。滚动更新；每完成一个 milestone 同步 `docs/CURRENT_STATE.md` 与 `docs/ACCEPTANCE_GATES.md`。
+> 版本：0.7.0（2026-09-26）。滚动更新；每完成一个 milestone 同步 `docs/CURRENT_STATE.md` 与 `docs/ACCEPTANCE_GATES.md`。
 
 ## 目标
 
@@ -29,7 +29,7 @@
 
 ## 当前状态
 
-见 `docs/CURRENT_STATE.md`。当前 v0.6.0：对象存储真后端（VersityGW）与 K8s 控制面真集群（kind）已进常驻门禁；上一轮 v0.5.0 做的是 PostgreSQL 真并发、Docker provider 真容器、真实浏览器 DOM 三档已进常驻门禁（docker daemon 已可用，不再是遗留项）。
+见 `docs/CURRENT_STATE.md`。当前 v0.7.0：边缘设备取件通路（发现/开门/取件 + 遥测回读）与真进程 Sim2Real 回环已进常驻门禁；上一轮 v0.6.0 把对象存储真后端（VersityGW）与 K8s 控制面真集群（kind）接进了门禁；上一轮 v0.5.0 做的是 PostgreSQL 真并发、Docker provider 真容器、真实浏览器 DOM 三档已进常驻门禁（docker daemon 已可用，不再是遗留项）。
 遗留 BLOCKED：NVIDIA GPU/容器运行时 / NGC 凭据 / S3 凭据 / 真实 K8s 集群 / 真机机器人。
 
 ## 商业 Gate（预留）

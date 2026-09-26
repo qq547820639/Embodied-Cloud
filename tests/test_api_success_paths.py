@@ -4,14 +4,13 @@
 - GET /api/workspaces/admin/all（admin 审计：含 tombstone；非 admin 403）
 """
 
-import time
-
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.main import app
 from app.models import Role, User
 from tests.test_demo_workspace import _auth, _register
+from tests.workspace_progress import wait_status
 
 
 def _promote(email: str) -> None:
@@ -22,16 +21,6 @@ def _promote(email: str) -> None:
         assert user is not None
         user.role = Role.ADMIN.value
         db.commit()
-
-
-def _wait_status(client: TestClient, token: str, wid: str, target: str, timeout: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        ws = client.get(f"/api/workspaces/{wid}", headers=_auth(token)).json()
-        if ws["status"] == target:
-            return
-        time.sleep(0.3)
-    raise AssertionError(f"workspace {wid} did not reach {target} in {timeout}s")
 
 
 def test_template_detail_success():
@@ -60,7 +49,7 @@ def test_workspace_start_endpoint_success_path():
         # durable START 成功路径：CREATED → 入队 → 最终 RUNNING
         resp = client.post(f"/api/workspaces/{wid}/start", headers=_auth(token))
         assert resp.status_code == 200, resp.text
-        _wait_status(client, token, wid, "running")
+        wait_status(client, token, wid, "running")
         ws = client.get(f"/api/workspaces/{wid}", headers=_auth(token)).json()
         assert ws["status"] == "running"
         assert ws["gpu_id"]

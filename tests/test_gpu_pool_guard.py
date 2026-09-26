@@ -1,0 +1,130 @@
+"""GPU 池回收（`tests/gpu_pool.py`）的判据——全套共卡夹具的内核。
+
+常驻动机：全套共用一个 SQLite、mock 只 seed 8 张卡，而 `POST /api/workspaces`
+占卡后没人还——于是"谁的 workspace 多"决定谁红。实测过两种形状：
+`test_gpu_admin` 与一个建了 13 个 workspace 的文件配对即红（其余 55 个文件逐个配
+都不红）；`test_workspace_credential` 在全量跑里以 `assert 'failed' == 'running'` 红过。
+`tests/conftest.py` 的 autouse 守卫因此"在整池为空时"回收残留占用。
+
+这里量的是回收内核（不点它就只能停在 0 张空闲），并且**只用自己的 workspace 行**
+——不拿别人的占用当夹具，免得本文件的读数受上游用例残留状态摆布。
+
+不声称"某一轮配对变绿是守卫单独给的"：真起 TestClient 时 app 的
+`run_crash_recovery()` 也会把查无 runtime 的分配放掉；同一读数有两个可能成因，
+就不能拿它当单因证据（如实写明）。
+"""
+
+import uuid
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from app.deps import SessionFactory, scheduler
+from app.main import app
+from app.models import Gpu, GpuStatus, Role, Template, User, Workspace, WorkspaceStatus
+from tests.gpu_pool import allocated_workspaces, count_big_enough, ensure_free_gpus, reclaim_gpus
+
+HOSTS = 8  # 抽干池需要的挂点数；mock seed 的卡数小于它时按实际卡数收
+
+
+@pytest.fixture
+def rig():
+    """真 app lifespan（建表 + mock 主机 sync）+ 本文件专属的 user/workspace 行。"""
+    with TestClient(app):
+        pass
+    tag = uuid.uuid4().hex[:8]
+    with SessionFactory() as db:
+        cards = list(db.scalars(select(Gpu)))
+        assert cards, "mock 主机没 seed 出卡：本文件的判据无从谈起"
+        if db.scalar(select(Template).where(Template.id == "cartpole")) is None:
+            db.add(
+                Template(
+                    id="cartpole", slug="cartpole", name="t", description="d", category="c",
+                    runtime="mock", launch_command="", enabled=True, version="0.1.0",
+                    recommended_vram_gb=8, estimated_hourly_cost_cny=1.0,
+                )
+            )
+        user = User(
+            id=f"u-guard-{tag}", email=f"guard-{tag}@example.org", username=f"guard{tag}",
+            password_hash="x", role=Role.USER.value,  # noqa: S106 测试数据
+        )
+        db.add(user)
+        db.flush()
+        hooks = []
+        for i in range(min(HOSTS, len(cards))):
+            ws = Workspace(
+                id=f"ws-guard-{tag}-{i}", name=f"guard {i}", template_id="cartpole",
+                provider="mock", user_id=user.id, status=WorkspaceStatus.CREATED.value,
+            )
+            db.add(ws)
+            hooks.append(ws.id)
+        db.commit()
+        yield {"cards": cards, "hooks": hooks}
+    # 本文件会故意抽干池：收尾必须自己放回，否则自己变成下一个受害者
+    with SessionFactory() as db:
+        if count_big_enough(db, 8) == 0:
+            reclaim_gpus(db, scheduler)
+
+
+def _starve(db, rig) -> list[str]:
+    """把 AVAILABLE 的卡逐张挂到本文件自己的 workspace 行上，返回挂上了卡的 hook。
+
+    挂得动几张算几张：全套跑起来时上游用例可能已经占着几张，本文件的判据是
+    "**空闲的**被我抽干"，不是"我抽干了 8 张"。
+    """
+    bound: list[str] = []
+    for hook in rig["hooks"]:
+        free = db.scalar(
+            select(Gpu).where(Gpu.status == GpuStatus.AVAILABLE.value).limit(1)
+        )
+        if free is None:
+            break
+        free.status = GpuStatus.ALLOCATED.value
+        free.workspace_id = hook
+        bound.append(hook)
+    db.commit()
+    return bound
+
+
+def test_starving_the_pool_really_leaves_zero_free(rig):
+    """前提档：抽干之后必须真是 0 张空闲，否则"回收让它变绿"就是蒙的。"""
+    with SessionFactory() as db:
+        bound = _starve(db, rig)
+        assert bound, "一张 AVAILABLE 卡都抽不出来：前提不成立"
+        assert count_big_enough(db, 8) == 0, "抽过之后还有空闲卡：前提没成立"
+        assert set(bound) <= {w.id for w in allocated_workspaces(db)}
+
+
+def test_reclaim_frees_the_cards_and_clears_the_binding(rig):
+    """正例：不点 `reclaim_gpus` 就永远回不到"够用"；点完还得连绑定一起清。"""
+    with SessionFactory() as db:
+        if not _starve(db, rig) and count_big_enough(db, 8):
+            pytest.skip("没有空闲卡可抽干：这一支需要至少一张起步空闲卡")
+        assert count_big_enough(db, 8) == 0
+        assert ensure_free_gpus(db, scheduler, need=1) >= 1
+        still_bound = list(
+            db.scalars(
+                select(Gpu).where(
+                    Gpu.status == GpuStatus.ALLOCATED.value, Gpu.workspace_id.is_not(None)
+                )
+            )
+        )
+        # 绑定不清，下一次分配会撞 uq_gpus_workspace——"释放"必须是完整的
+        assert not still_bound, [gpu.id for gpu in still_bound]
+
+
+def test_ensure_free_gpus_leaves_draining_cards_alone(rig):
+    """不该动的时候不动：UNHEALTHY/DRAINING 可能是别的用例故意设出来的前提。"""
+    with SessionFactory() as db:
+        free_before = count_big_enough(db, 8)
+        if free_before < 2:
+            pytest.skip(f"池里只剩 {free_before} 张空闲，DRAINING 探针没有余量")
+        victim = db.scalar(select(Gpu).where(Gpu.status == GpuStatus.AVAILABLE.value))
+        victim.status = GpuStatus.DRAINING.value
+        db.commit()
+
+        # 还有空闲卡 → 守卫不该触发回收，返回值必须就是"减去那张 DRAINING 后的现状"
+        assert ensure_free_gpus(db, scheduler, need=1) == free_before - 1
+        still = list(db.scalars(select(Gpu).where(Gpu.status == GpuStatus.DRAINING.value)))
+        assert still, "DRAINING 的卡被放回 AVAILABLE：会抹掉别的用例故意设出来的状态"

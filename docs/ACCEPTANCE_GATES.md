@@ -1,6 +1,6 @@
 # ACCEPTANCE_GATES — EmbodiedCloud
 
-> 版本：0.6.0（2026-09-26，v0.2.1 + v0.3.0 + v0.4.0 软件面 + v0.6.0 验证纵深/预授权）。验收分级严格区分：**VERIFIED PASS** / **IMPLEMENTED BUT NOT PHYSICALLY VERIFIED** / **FAILED** / **BLOCKED_EXTERNAL_DEPENDENCY**。
+> 版本：0.7.0（2026-09-26，v0.2.1–v0.4.0 软件面 + v0.6.0 验证纵深 + v0.7.0 边缘设备通路）。验收分级严格区分：**VERIFIED PASS** / **IMPLEMENTED BUT NOT PHYSICALLY VERIFIED** / **FAILED** / **BLOCKED_EXTERNAL_DEPENDENCY**。
 
 ## G0 软件验收（本机/CI 自动执行）
 
@@ -33,6 +33,8 @@
 | G0.25 对象存储真后端 | `make test-s3` | 自建一次性 S3 兼容服务端（VersityGW v1.8.0）+ 真实 boto3：读写删/Content-Type/4 MiB 字节保真；「桶不存在」不得读成「对象不存在」；403 与网络故障上抛；SDK 异常不外泄；与 Local 档同判据并排 | VERIFIED PASS（20/20，另用 MinIO 交叉核对读数一致，见 ADR 0008） |
 | G0.26 K8s 控制面真集群 | `make test-k8s-control-plane` | kind 一次性真集群（真 kubelet/调度器/endpoints）：provision 对象图与标签、§14 Pod 标记形态、`wait_ready` 三段判据的**正/负两档**（无 device plugin 时 Unschedulable ⇒ False；改规格后 ⇒ True 且独立复核 Endpoints 有地址）、凭据轮换真的滚出新 Pod 且无 Pod 残留旧口令、空口令不上报成功、stop/start 缩放与 destroy 无残留 | VERIFIED PASS（7/7，变异对照读数见 ADR 0009） |
 | G0.27 镜像配方下载钉死 | `pytest tests/test_supply_chain.py` | `runtime/Dockerfile*` 内每个下载步骤必须同块 `sha256sum -c`、每个 `git clone --branch` 必须比对 HEAD commit；并断言判据作用域非空（防恒真） | VERIFIED PASS（改钉之前对两处开火，读数见 CHANGELOG 0.6.0） |
+| G0.28 边缘设备真进程通路 | `pytest tests/test_edge_agent_api.py tests/test_edge_agent_client.py tests/test_edge_agent_e2e.py` | 设备侧三个新端点（发现 / begin / 取件）+ 遥测回读；e2e 是**真 uvicorn 子进程 + 真 agent 子进程 + mock 驱动**：一轮跑到 VERIFIED、落盘字节 sha256 与登记一致、`.part` 无残留、第二轮不重复上机；三道防线各有拆掉即红的读数（M1 前缀复核、M2 取件状态前提、M3 部署期绑定）；取件不得下发 `Content-Disposition`，错误文本不得含 token | VERIFIED PASS（变异读数见 ADR 0007） |
+| G0.29 发布报告自证 | `pytest tests/test_version_consistency.py` | `failed ≥ 1` 的报告必须带出**是哪条用例**（名字取自 JUnit，不取日志文本）；全绿报告不得凭空造名字；`make lint/typecheck` 与 release 门禁的 ruff/mypy 目标集必须同源相等（钉住 `edge_agent` 在册）；`wait_status` 的正/反两档在"后台 worker 线程被掐住"这一确定前提下反向 | VERIFIED PASS（本轮新增，起因见 CHANGELOG 0.7.0） |
 
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
@@ -64,7 +66,7 @@
 
 | Gate | 脚本 | 期望 PASS 条件 |
 |---|---|---|
-| G5.1 | edge agent + RobotDriver（Mock） | mock 驱动回环通过（控制台「部署/边缘设备」页可走通全链路） |
+| G5.1 | edge agent + RobotDriver（Mock） | 真进程回环：`tests/test_edge_agent_e2e.py` 起真控制面 + 真 `python -m edge_agent` 子进程，走完 发现→begin→取件→核对→上报→驱动→遥测（控制台「部署/边缘设备」页仍是人工入口） |
 | G5.2 | 物理真机 | 需要真实机器人；本环境不可执行 |
 
 ## 当前总状态
@@ -74,6 +76,7 @@
   K8s 上 `nvidia.com/gpu` 的真实分配（需要 device plugin；控制面路径本身已由 G0.26 覆盖）
 - 已由真后端覆盖（不再属于上一条）：Docker provider 非 GPU 路径与 `--gpus` 参数的守护进程
   侧记账（G0.19）、PostgreSQL 并发语义（G0.18）、前端真实 DOM（G0.20）、
-  对象存储 S3 协议（G0.25）、K8s `wait_ready`/凭据轮换（G0.26）
+  对象存储 S3 协议（G0.25）、K8s `wait_ready`/凭据轮换（G0.26）、
+  边缘设备取件通路与真进程 Sim2Real 回环（G0.28）
 - FAILED：无
 - BLOCKED_EXTERNAL_DEPENDENCY：G1.1–G4（Docker/NVIDIA/NGC）、G5.2（真机）
