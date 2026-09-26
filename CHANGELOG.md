@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 542 / passed 541 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 543 / passed 542 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -551,6 +551,26 @@ docker 档 21 → 22，全套 531 → 532。
 - **通道读数又翻了一次**：上一轮记的是 `ghcr.io` 拨号 i/o timeout，本轮 `docker pull ghcr.io/…`
   退 0 且 manifest 取到——同一台机器、隔几小时两种相反读数。所以 §8 那条方法论再加一句：
   写"这条通道不行"只在它被记的那一刻成立，下一次要重跑而不是引用。
+- **两条钉死方向的复核与一次真服务**（都是给这轮的改动补的证据，不是新功能）：
+  ① 那份 uv 引用的 digest **钉的是索引而不是本机 arm64 平台清单**——现取现数：`mediaType` ＝
+  `application/vnd.oci.image.index.v1+json`，4 条子清单里 `linux/amd64`＝`sha256:d46db4c7b7f2…`、
+  `linux/arm64`＝`sha256:de342e010065…` 各在（另两条是 attestation 的 `unknown/unknown`）。
+  生产那批主机是 amd64，钉错方向等于让所有构建当场失败，§2 基础镜像那行记过同一课。
+  ② **控制面镜像第一次被真的服务过一次**：`docker run -d -p 127.0.0.1:18112:8000` 起容器后
+  `GET /api/health` 第 3 次探测回 `200`＝`{"status":"ok","provider":"mock","provider_ready":true,
+  "version":"0.7.0"}`，`GET /metrics` 回 `200`／3770 B Prometheus 文本，容器随后 `docker rm -f`、残留 0。
+  在这之前，仓库里关于这份产物的取证最远只到 `python -V` 和 `import app.main`。
+- **N-23 留下的那一格也补成了判据**（派给子代理实现、主理人逐行重读后收下）：镜像真装的每一组 extra
+  必须被 `make sbom` 的导出命令声明过，方向是**单边子集**、权威侧是配方——清单比配方宽（今天多声明
+  一组 `[s3]`）合法，反过来就是刚修掉的那个缺陷的形状。两侧非空各有一道独立守卫，并且有一档
+  "两边同时为空"的控制专门证明它不是子集判据的副产品。两处细节是子代理自己抓到的、比我下的任务书更对：
+  配方侧必须走"去掉注释、折好续行"那份解析（`Dockerfile.control-plane:25` 的注释里就写着字面的
+  `--extra postgres`，不剥注释会凭空多算一组），以及 `--extra-index-url` 要用后置 lookaround 挡住、
+  不能读成一个 extra 名字。`tests/test_supply_chain.py` 19 → 20 例，全套 542 → 543。
+  ③ 漏洞基线在**改造后的那份镜像**上重跑一遍（`.Id`＝`sha256:aa6500ec…`）：162 条、
+  `os-pkgs 156 / lang-pkgs 6`、`HIGH 44`、17 包 8 CVE、带 `FixedVersion` 的 6 条全部逐格不变——
+  换 wheel 没有动那 156 条 OS 命中，基线不绑定某一次构建。`scripts/image_cve.sh` 末尾那句
+  "HIGH 未分诊前不接成门禁"是改前写的，已按分诊结论改成陈述事实而不是陈述待办。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

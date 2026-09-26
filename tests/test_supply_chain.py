@@ -868,3 +868,104 @@ def test_copy_from_refs_are_under_the_same_pin_rule(tmp_path: Path) -> None:
     assert len(uv_refs) == 1 and _is_pinned(uv_refs[0]), uv_refs
     doc = (REPO_ROOT / "docs" / "SUPPLY_CHAIN.md").read_text(encoding="utf-8")
     assert uv_refs[0] in doc, "配方钉死的 uv 引用没逐字进 SUPPLY_CHAIN.md（文档只写 tag 就等于没钉）"
+
+
+# ---------------------------------------------------------------------------
+# 镜像配方的 extra ⊆ 发布 SBOM 的 extra（SUPPLY_CHAIN §4 / 登记表 N-23 留的那一格）
+# ---------------------------------------------------------------------------
+
+MAKEFILE = REPO_ROOT / "Makefile"
+
+# 两种 shell 写法都要认：`--extra postgres`（空格分隔）与 `--extras=s3`（等号）。
+# 两道 lookaround 缺一不可：后置 `(?![\w-])` 挡住 `--extra-index-url`——少它就把一条 PyPI 索引
+# 地址当成镜像装的 extra，判据立刻假红；前置 `(?<![\w-])` 挡住 `--all-extras`／`--no-extra`
+# 这类由它派生的旗标——它们都不指向某个具体的 extra 名，读成名字就是"凭空造名"。
+EXTRA_FLAG_RE = re.compile(
+    r"(?<![\w-])--extras?(?![\w-])[ \t]*(?:=[ \t]*|[ \t]+)(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+)
+# 只取 `sbom:` 目标的配方块，不扫整份 Makefile：别的目标传 `--extra` 是合法的（例如给 dev 档
+# 另出一份清单），整文件扫会把它们并进同一份分母，清单侧就永远比配方宽、判据失去方向。
+SBOM_RECIPE_RE = re.compile(r"^sbom:[ \t]*\n(?P<recipe>(?:[ \t][^\n]*\n?)*)", re.MULTILINE)
+
+
+def _extra_names(text: str) -> set[str]:
+    """text 里每个 `--extra`/`--extras` 旗标所传的值，去重成集合。"""
+    return {m.group("name") for m in EXTRA_FLAG_RE.finditer(text)}
+
+
+def _sbom_recipe(makefile_text: str) -> str:
+    match = SBOM_RECIPE_RE.search(makefile_text)
+    return match.group("recipe") if match else ""
+
+
+def _undeclared_extra_offenders(dockerfile_text: str, makefile_text: str) -> list[str]:
+    """镜像真装的每一组 extra 都必须被发布清单声明过；返回违例说明，空表即通过。
+
+    两侧都必须非空：∅ 是任何集合的子集，任一侧塌成空集都会让子集判据静默恒真——而"N-23 修完
+    之后又少报一组"恰好就是从空集开始的（`--all-extras` 改名、目标被删，读数和"合规"同形）。
+    消息带 `[空集合]`／`[漏声明]` 前缀：两档守卫开火的含义不同，反证必须能指名是哪一档开的火。
+    """
+    image = _extra_names(_dockerfile_logic(dockerfile_text))
+    recipe = _sbom_recipe(makefile_text)
+    sbom = _extra_names(recipe)
+    offenders: list[str] = []
+    if not recipe.strip():
+        offenders.append("[空集合] Makefile 里解析不到 `sbom:` 目标的配方——清单侧没有分母")
+    if not image:
+        offenders.append("[空集合] 控制面配方解析不到任何 `--extra`——子集判据退化成空对空")
+    if not sbom:
+        offenders.append("[空集合] `make sbom` 解析不到任何 `--extra`——发布清单不再声明任何 extra")
+    for name in sorted(image - sbom):
+        offenders.append(f"[漏声明] 镜像装了 extra `{name}`，而 `make sbom` 没有声明它")
+    return offenders
+
+
+def test_image_recipe_extras_are_declared_in_the_release_sbom() -> None:
+    """N-23 留下的那一格：镜像装什么，发布清单就得声明过什么。
+
+    方向是单边子集、权威侧是 `Dockerfile.control-plane`：SBOM 写的是"这个产品可以装哪几组"，
+    镜像只是其中一份部署，所以清单比配方宽（`[s3]` 今天就是这样）合法；反过来——配方加了一组
+    清单没声明的 extra——就是刚修掉的那个缺陷的形状：交出去的清单少报了一组真进产物的依赖。
+    """
+    dockerfile = CONTROL_DOCKERFILE.read_text(encoding="utf-8")
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    image_extras = _extra_names(_dockerfile_logic(dockerfile))
+    sbom_extras = _extra_names(_sbom_recipe(makefile))
+
+    # 两个集合就是判据的分子与分母，钉成实值而不是"非空即可"：哪天这里红了，先回来确认权威侧
+    # 还是不是配方（是清单跟着镜像走，还是镜像跟着清单走），想清楚了再改字面量，别只把数 bump 掉。
+    assert image_extras == {"postgres"}, image_extras
+    assert sbom_extras == {"postgres", "s3"}, sbom_extras
+
+    # 真把它读成一个 extra，判据就会因为一条索引地址而假红——这道闸只在解析式自己手里
+    assert _extra_names("--extra-index-url https://pypi.org/simple --extras=s3") == {"s3"}
+
+    assert _undeclared_extra_offenders(dockerfile, makefile) == []
+
+    # 反例一（N-23 的形状）：配方多装一组清单没声明的 extra——只许这一档开火，点的就是 grpc
+    widened_image = dockerfile.replace(
+        "--extra postgres --no-install-project",
+        "--extra postgres --extra grpc --no-install-project",
+    )
+    assert widened_image != dockerfile, "替换没生效，这支反例其实是原文件"
+    fired = _undeclared_extra_offenders(widened_image, makefile)
+    assert len(fired) == 1 and fired[0].startswith("[漏声明]") and "grpc" in fired[0], fired
+
+    # 反例二：把 `make sbom` 的两个 extra 摘掉——开的必须是"空集合"那一档。只断言子集会漏掉
+    # 真正致命的状态：清单退化成不声明任何 extra 时，光看差集还说得过去，看分母才知道尺子已瞎。
+    stripped = makefile.replace("--extra postgres --extra s3 ", "")
+    assert stripped != makefile, "替换没生效，这支反例其实是原文件"
+    fired2 = _undeclared_extra_offenders(dockerfile, stripped)
+    assert any(o.startswith("[空集合]") for o in fired2), fired2
+    # 两侧同时为空时只剩空集合守卫：证明它是独立的一道闸，不是子集判据的副产品
+    both_empty = _undeclared_extra_offenders(
+        dockerfile.replace("--extra postgres --no-install-project", "--no-install-project"),
+        stripped,
+    )
+    assert both_empty and all(o.startswith("[空集合]") for o in both_empty), both_empty
+
+    # 合规变体：清单比配方宽（多声明一组 grpc）不开火——否则这条会被读成"两侧必须相等"，
+    # 而真判据要的只是"别少报"，收紧成双向相等会挡住合法的那一半。
+    widened_sbom = makefile.replace("--extra postgres --extra s3", "--extra postgres --extra s3 --extra grpc")
+    assert widened_sbom != makefile, "替换没生效，这支合规变体其实是原文件"
+    assert _undeclared_extra_offenders(dockerfile, widened_sbom) == []

@@ -54,5 +54,5 @@ for res in doc.get("Results") or []:
     sev.update(v.get("Severity") or "UNKNOWN" for v in vulns)
 print(f"[image-cve] {doc.get('ArtifactName')} ImageID={declared[:19]}…")
 print(f"[image-cve] 分来源 {per_class}；按等级 {dict(sev)}；合计 {sum(sev.values())} 条")
-print("[image-cve] 这一档今天只出报告：HIGH 未分诊前不接成门禁（分诊完再定阈值），漏洞库按设计不钉 digest")
+print("[image-cve] 这一档只出报告：分诊已完成，44 条 HIGH 里 43 affected＋1 fix_deferred、无一条带 FixedVersion，接阈值只会得到每次必红却无从修的红；漏洞库按设计不钉 digest")
 PY
