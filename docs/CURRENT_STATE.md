@@ -7,11 +7,11 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 521 / passed 520 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
+| Test | **PASS（collected 522 / passed 521 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
 | Lint / Type | PASS（ruff 0 / mypy 45 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS 18/18**（自建一次性容器，真行锁语义） |
-| Integration Docker | **PASS 20/20**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册） |
+| Integration Docker | **PASS 21/21**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册） |
 | Integration Browser | **PASS 11/11**（Playwright 驱动系统 Chrome 真 DOM） |
 | Integration Object store | **PASS 20/20**（一次性 VersityGW 容器 + 真实 boto3；MinIO 交叉核对读数一致） |
 | Integration K8s control plane | **PASS 7/7**（kind 真集群：真 kubelet/调度器/endpoints，无需 GPU） |
@@ -39,7 +39,7 @@
 | N-12 | 把 TECH DEBT 里那条"设了也不生效"的预留开关从**文档陈述**升级为**机器不变量**：AST 逐字段数出 `app/`（除声明文件）里的读取位置，"零读取字段集合"必须恰好等于惰性登记表 `INERT_SETTINGS`（漏登记＝有人会被误导，死登记＝文档在撒谎），且登记项在 `.env.example` 紧邻上方注释块必须带"未启用"标记 | 实测普查：`Settings` 34 个字段中恰好 1 个零读取（`default_idle_timeout_minutes`）。开火读数 CFG1/CFG2 + 非恒真对照（`ide_port_start` 探针必须读到非空）+ 纯函数四档边界（无注释／断一行／写了"预留"但没写"未启用"／合规）全在 /tmp 副本上量，主树不动 |
 | N-13 | **`TemplateVersion.image_digest` 从装饰性字段变成有写入入口、也有读者的一列**：普查读数是"自 v0.4 建模以来 0 处写入、0 处读取"（列存在不等于镜像被钉住，provider 一直启动可变 tag）。新增 `app/services/image_ref.py:pinned_ref`（workspace 快照那一刻拼成 `image@sha256:…`，形制不对／与 image 内已有摘要冲突／拼完超过列宽则**拒绝**而不是静默退回 tag）+ CLI `record-image-digest`（幂等；已钉在另一摘要的 released 版本拒改，退码 3 表示"该发布新版本而不是就地改写"）+ `build_workspace_image.sh` 构建后打印摘要、拿不到就退 2 | 整条链在同一份真库上连跑（回填→新建工作区快照→docker argv 里的 token），另有"回填不改历史工作区快照"的断言；变异对照 PIN1（快照处退回原写法）／PIN2（放过坏形制）／PIN3（允许就地挪针）／PIN4（吞掉退码）各自翻红，`image_digest` 有生产读者的普查判据带 `current_version_id` 作非恒真对照 |
 | N-14 | **GPU 分配策略从"写在 SQL 里的习惯"变成量过并被钉住的判据**：`allocate()` 的 ORDER BY 抽成 `candidate_order()`，新增 `tests/scheduler_policy_lab.py`（同一个分配器、同一份工作负载，只换排序）与 `make policy-bench`。实测（合成舰队 192 GiB、负载合计恰等于容量）：best_fit 8/8 全接、48 GiB 两张都留得住、浪费率 1.00；arrival 与 pack_host 各 6/8、worst_fit 4/8，三者一个大任务都接不下 | `tests/test_scheduler_policy.py` 4 例：现产排序**按表达式直比**（不经过认档函数）、其余三档必须都接不满、实测表逐格钉值、跑完必须复原生产排序。变异 POL1 改向→2 红、POL2 换 pack_host→红、POL3 漏复原→2 红、POL4 让排序不生效（实测台失去区分力）→2 红、POL6「认档函数说谎 + 生产改向」组合→直比那条红（POL5 只说谎不改今天的判决，如实记为未变） |
-| N-15 | 真集群档的一条**前提竞态**被一次真实红抓出并修掉：负向对照在 `wait_ready(...) is False` 之后直接 `_pods(...)[0]`，而 Pod 及其 conditions 是集群控制器写的——本轮实测 517 passed / 1 failed，红的正是取 Pod 那一行的 `IndexError`（同一次运行里其余 6 条真集群用例全绿，所以不是引导失败也不是产品缺陷） | 判据行留在最前，佐证改用 `tests/k8s_server.poll_until`/`await_pod`/`await_condition_reason`：拿不到前提时抛**"前提未达成"并带最后一次读数**，而不是把夹具竞态报成产品结论；离线控制 2 例（晚出现的 Pod 要轮询到第 3 次、永不出现要红、判词侧同理）。修后单档复跑 7/7（254s，kind 建集群本身就要 4 分钟，6s 判定窗口输掉竞争毫不奇怪） |
+| N-15 | **两条"前提竞态"各由一次真实红抓出并修掉，判据的超时一分没加**：①真集群档负向对照在 `wait_ready(...) is False` 之后直接 `_pods(...)[0]` —— Pod 及其 conditions 由集群控制器写，provider 只给 6s 窗口（主树全量复算 517 passed / 1 failed，红的就是取 Pod 那行的 `IndexError`，其余 6 条真集群用例同轮全绿 ⇒ 既非 kind 引导失败也非产品缺陷）；②换树换环境复算又红一条 docker 档：`exit 0` 的"已启动→已退出"只差几毫秒，工作区又无 ide_port/healthcheck，`wait_ready` 首次 inspect 抓到 running 便返回 True（519 passed / 1 failed，`assert True is False`，同一内容主树刚绿过；这个 True 本身是产品正确行为，另有用例钉着） | 两处同法：判据行留在最前，前提改走 `tests/k8s_server.poll_until/await_pod/await_condition_reason` 与新加的 `wait_exited`（超时抛"前提未达成 + 最后一次读数"，不返回 False 冒充结论）；工具自身各有开火对照（假 list 函数三种边界 / 不起 exit 的容器 2s 内必须红）。复跑：真集群档 7/7（254s）、docker 档 21/21（57.6s），全套 519 → 522 |
 
 
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
@@ -90,7 +90,7 @@
 全套用例全绿（唯一 skip 是 `k8s_integration` GPU 档）。四元组计数只在 §1 出现一处，
 由 `make validate` 的值对账钉住——**本节刻意不再复读绝对数字**，多抄一份就多一处会静过期、
 且门禁看不见的位置。
-其中真后端档：PG 真并发 18/18、真容器 20/20、真浏览器 11/11、
+其中真后端档：PG 真并发 18/18、真容器 21/21、真浏览器 11/11、
 对象存储真后端 20/20、K8s 控制面真集群 7/7、SDK 线格式 6、预授权 14、
 **边缘设备真进程 e2e（真 uvicorn 子进程 + 真 agent 子进程 + mock 驱动）**。
 lint/type/migration/build/smoke/release/供应链全链路。
@@ -118,7 +118,7 @@ v0.6.0 记在此处的"edge agent 独立包与其分派/取件鉴权面"**本轮
 
 v0.5.0 记在此处的三条（K8s provider 控制面路径、Docker `--gpus` 分支、
 S3 `ArtifactStore` 真实后端）**本轮全部结案**：前一条由 kind 真集群档 7/7 覆盖
-（ADR 0009），后两条由真守护进程记账（docker 档 20 例，其中 3 例是 GPU argv）与
+（ADR 0009），后两条由真守护进程记账（docker 档 21 例，其中 3 例是 GPU argv）与
 真 S3 服务端（20 例）覆盖（ADR 0008、G0.19/G0.25）。
 剩下的只有"物理设备才答得了"的部分（GPU 设备在容器内可见、device plugin 真实分配），
 已移到上面的 PHYSICAL/BLOCKED 两节，不再冒充"待办"。

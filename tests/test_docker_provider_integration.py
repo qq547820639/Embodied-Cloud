@@ -258,6 +258,23 @@ def wait_running(provider: DockerProvider, workspace: Workspace, timeout: float 
     return False
 
 
+def wait_exited(provider: DockerProvider, workspace: Workspace, timeout: float = 30.0) -> dict:
+    """等容器真的不在 running 了（`wait_running` 的负向对称体），返回最后一次实况。
+
+    与 `wait_running` 不同，这里超时是**失败**不是 False：调用方的判据是
+    "已退出的容器不该被读成就绪"，前提没立起来时报告说的必须是"前提未达成"，
+    而不是让产品结论去承担一次竞速的运气。
+    """
+    deadline = time.monotonic() + timeout
+    seen: dict = {}
+    while time.monotonic() < deadline:
+        seen = provider.inspect(workspace)
+        if not seen.get("running"):
+            return seen
+        time.sleep(0.2)
+    raise AssertionError(f"前提未达成：{timeout}s 内容器仍在 running，最后一次读数 {seen!r}")
+
+
 # ---------------------------------------------------------------------------
 # inspect / reconcile
 # ---------------------------------------------------------------------------
@@ -495,8 +512,21 @@ def test_wait_ready_fails_when_exec_healthcheck_fails(provider, containers, http
 def test_wait_ready_fails_when_container_not_running(provider, containers):
     name = containers.start("sh", "-c", "exit 0")
     workspace = ws(name)
+    # 前提必须先立：`docker run -d` 一返回容器就是"已启动"，而 `exit 0` 落地只有几毫秒。
+    # 没有这道等待时，本条判据其实在和 exit 竞速——首次 inspect 若抓到 running=True，
+    # 而这条工作区既无 ide_port 也无 healthcheck，wait_ready 就会照实返回 True。
+    # 本轮实测：同一份树两次全量跑，一次绿、一次 assert True is False（宿主 load ~10）。
+    state = wait_exited(provider, workspace)
+    assert state.get("exit_code") == 0, state  # 退出的是我们要它退的那个进程
     assert provider.wait_ready(workspace, Template(), timeout_seconds=5) is False
     assert provider.wait_ready(ws(None), Template(), timeout_seconds=1) is False
+
+
+def test_wait_exited_fails_loudly_when_the_container_keeps_running(provider, containers):
+    """前提工具自己得会开火，否则它只是一次无声的 sleep。"""
+    name = containers.start("sh", "-c", "sleep 300")
+    with pytest.raises(AssertionError, match="前提未达成"):
+        wait_exited(provider, ws(name), timeout=2.0)
 
 
 def test_wait_ready_passes_without_ide_port_and_without_healthcheck(provider, containers):

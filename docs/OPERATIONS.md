@@ -108,6 +108,13 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
   而 `POST /api/workspaces` 会占住一张、用例结束不还。新加"批量建 workspace"的文件
   能把后面的 GPU 用例饿死（报错是 `No GPU available with >= 8 GB VRAM`，不是断言失败）。
   需要空闲卡的用例请显式达成前置条件：`tests/gpu_pool.py:ensure_free_gpus`。
+- **前提要等，判据不许等**。同一轮里两条红都是这个形状（一次真集群档、一次 docker 档），
+  且都在"已经通过判据之后"的那一行：判据是"未就绪的容器/Pod 不该被读成就绪"，
+  而"容器已退出""Pod 已被控制器建出来"是**别人异步做的事**，宿主忙时就晚到。
+  等前提是允许的（`tests/k8s_server.py` 的 `await_pod`/`await_condition_reason`、
+  docker 档的 `wait_exited`），但等不到必须报**"前提未达成 + 最后一次读数"**；
+  判据自己的超时预算（`wait_ready` 的 6s、`wait_running` 的 30s）是被测主张的一部分，
+  红了也不能调大——那等于把主张改小。两类都各有开火对照。
 - **真集群档在"引导阶段"整档红，先看宿主负载再看代码**。本轮实测到一次
   `kind create cluster` 失败在 `Preparing nodes ✗`，原因行是
   `could not find a log line that matches "Reached target .*Multi-User System.*|detected cgroup v1"`

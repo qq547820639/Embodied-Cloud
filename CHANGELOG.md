@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 521 / passed 520 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 522 / passed 521 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -149,7 +149,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   接近 0，据此停机会误杀长跑任务并照秒扣费），被 NVIDIA 设备阻塞。区别在于——**延后现在是
   被机器看着的延后**。
 
-### 真集群档的一条前提竞态：一次真实红换来的修法
+### 两条前提竞态：各由一次真实红换来的修法（判据超时不动）
 - 上一支（5eca7bf）之后的全量复算红了一条：`test_wait_ready_is_false_while_the_gpu_request_cannot_be_scheduled`
   在 `IndexError: list index out of range` 上崩——**崩在断言之后的取 Pod 那一行**
   （`_pods(api, name)[0]`）。同一次运行里其余 6 条真集群用例全绿、集群正常建起来了，
@@ -162,7 +162,19 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   区别在于报告说的必须是发生过的事：崩溃是"我不知道它在说什么"，
   "前提未达成"是"这条用例没资格给产品下结论"。
 - 两个小工具本身离线可测（喂一个假的 list 函数即可），常驻 2 例：晚出现的 Pod 要真的轮询到
-  第 3 次才返回、永不出现必须以"前提未达成"红、判词侧同理。全套 519 → 521。
+  第 3 次才返回、永不出现必须以"前提未达成"红、判词侧同理。修后单档复跑 7/7（254s）。
+- **同形状的第二例是"换树换环境复算"红出来的**（在干净 worktree 里跑 HEAD：
+  519 passed / 1 failed，`assert True is False`，而主树同一内容刚跑过绿）。docker 档
+  `test_wait_ready_fails_when_container_not_running` 起一个 `sh -c "exit 0"` 就断言
+  `wait_ready is False`——可"容器已启动"与"进程已退出"只差几毫秒，而这个工作区既没有
+  ide_port 也没有 healthcheck，`wait_ready` 首次 inspect 抓到 running 就照实返回 True
+  （**这是产品的正确行为**，另一条用例正是钉它的）。所以红的不是产品，是一条把前提当运气的用例。
+  补了 `wait_exited`（`wait_running` 的负向对称体：超时抛"前提未达成"而不是返回 False），
+  并给它配一支自己会开火的对照（起一个 `sleep 300`，2s 内必须红）。
+- 两次的共同教训：**判据的超时预算是被测主张的一部分，红了的判据不能靠调大超时来治；
+  需要等的是"别的东西异步做完"那个前提**，而且等不到时要报"前提未达成 + 最后一次读数"，
+  既不能让一次竞速冒充产品结论，也不能让 IndexError 冒充"这条用例在说什么"。
+  全套 519 → 522；修后 docker 档 21/21（57.6s）。
 
 ### 调度：把 `allocate()` 的排序策略量成表，再钉成判据
 - `order_by(Gpu.memory_total.asc())` 就是分配策略本身（best-fit），但写在 SQL 里的排序

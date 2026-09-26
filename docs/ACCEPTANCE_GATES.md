@@ -24,7 +24,7 @@
 | G0.16 Frontend 安全/课程 onboarding | `pytest tests/test_demo_workspace.py tests/test_course_onboarding.py tests/test_demo_checkpoint.py` | demo 页转义/鉴权、slug 加入、member 可见、mock checkpoint | VERIFIED PASS |
 | G0.17 K8s integration | `pytest -m k8s_integration` | 无集群 → 整档 PENDING 并在 VALIDATION 登记原因（哨兵，不用 skip 冒充） | K8S_PHYSICAL_VALIDATION_PENDING（不假装 PASS） |
 | G0.18 PostgreSQL 真并发 | `make test-pg` | 自建一次性 PG 容器；`FOR UPDATE`/`SKIP LOCKED`/CAS/部分唯一索引在真行锁下成对验证 | VERIFIED PASS（18/18） |
-| G0.19 Docker provider 真容器 | `make test-docker` | 真守护进程跑 health/start/logs/wait_ready/reconcile/流式占用；会话级容器泄漏守卫；`--gpus device=N` 由**守护进程自己的 HostConfig 记账**验收（DeviceIDs/Capabilities）、生产 argv 原样交给 daemon 且不残留孤儿容器 | VERIFIED PASS（20/20） |
+| G0.19 Docker provider 真容器 | `make test-docker` | 真守护进程跑 health/start/logs/wait_ready/reconcile/流式占用；会话级容器泄漏守卫；`--gpus device=N` 由**守护进程自己的 HostConfig 记账**验收（DeviceIDs/Capabilities）、生产 argv 原样交给 daemon 且不残留孤儿容器 | VERIFIED PASS（21/21） |
 | G0.20 浏览器真 DOM | `make test-browser` | Playwright + 系统 Chrome：XSS 载荷不执行、轮询真的停、控制台零错误 | VERIFIED PASS（11/11） |
 | G0.21 K8s 线格式合规 | `pytest tests/test_k8s_model_conformance.py` | provider 生成的对象过真实 SDK 的 `sanitize_for_serialization` | VERIFIED PASS（6/6） |
 | G0.22 预授权语义 | `pytest tests/test_credit_holds.py` | 圈住/转正/退回/过期回收 + 3 条走 worker 真实执行链 | VERIFIED PASS（14/14） |
