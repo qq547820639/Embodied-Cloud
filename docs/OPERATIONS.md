@@ -148,6 +148,19 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
   而同一份配方上一轮 160s 构建成功过（读数分别见 SUPPLY_CHAIN §2 与 §8 第 3 项）。
   **不要**用加大构建超时、换基础镜像或"先出一个空产物"去洗它——那等于把外网波动记成代码变更，
   还会让下一个读报告的人以为配方动过。`make image-sbom` 在这种情况下的正确行为是退 2 并说清缺哪件前提。
+- **想在本机做跨架构构建复算之前先读这条（本轮量出来的）**：`docker build --platform linux/amd64 -f
+  runtime/Dockerfile.control-plane` 在这台机器上**不成立**，而且失败方式很误导。一手读数：日志走的是
+  legacy 格式（`Step 9/16`），中途三次打印「The requested image's platform (linux/amd64) does not match
+  the detected host platform (linux/arm64/v8) **and no specific platform was requested**」，最后报
+  `image with reference sha256:2d26323feb05… was found but does not provide the specified platform
+  (linux/amd64)`；把那个中间镜像 `docker image inspect` 出来是 **arm64**——也就是说 builder 阶段其实
+  按宿主架构跑完了，`--platform` 没被传进中间容器。本机 `docker buildx` 也不存在（`docker: unknown
+  command: docker buildx`）。**为什么没去查上游文档定版**：今晚 `docs.docker.com` 两个页面（build/buildkit
+  与 reference/cli/docker/build）都 fetch failed，取不到原文，所以这里只写本机观测到的行为，不写成版本结论。
+  可行的替代做法（本轮用的就是这个）：绕开构建器，用 `docker run --platform linux/amd64 <同一个基础镜像
+  digest>` 起一个模拟的 amd64 容器，把 `pyproject.toml`/`uv.lock`/uv 二进制送进去，跑与 Dockerfile 里
+  **同一行** `uv sync --frozen …`，再看装出来的轮子标签与能否 import——这验证的是"锁在生产架构上选得到
+  那一组字节"这件事本身，而不是本机的构建器 plumbing。
   **这一条在配方改造后仍然成立**（只是形状变了）：依赖层改由 `uv sync --frozen` 从 `uv.lock` 装之后，构建不再需要
   现解析、也不用装构建隔离的 setuptools，但它**照样要从 `files.pythonhosted.org` 把每个 wheel 的字节拉一遍**，
   所以同一条通道坏了照样红构建。区别在于现在失败的含义变了：旧配方失败可能是"解析到了锁外的版本"，

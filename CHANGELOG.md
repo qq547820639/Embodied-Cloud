@@ -560,6 +560,22 @@ docker 档 21 → 22，全套 531 → 532。
   `GET /api/health` 第 3 次探测回 `200`＝`{"status":"ok","provider":"mock","provider_ready":true,
   "version":"0.7.0"}`，`GET /metrics` 回 `200`／3770 B Prometheus 文本，容器随后 `docker rm -f`、残留 0。
   在这之前，仓库里关于这份产物的取证最远只到 `python -V` 和 `import app.main`。
+- **生产架构那一侧复算过，方法是被迫换的、结论是可复用的量具**：先试 `docker build --platform
+  linux/amd64`，**失败且失败方式有教育意义**——本机 docker 29 没有 buildx 插件（`docker buildx` 报
+  unknown command），退回 legacy builder，它不把 `--platform` 传进中间容器（日志三次打印
+  "…and no specific platform was requested"），于是 builder 阶段其实按 arm64 跑完，最后被判
+  "does not provide the specified platform (linux/amd64)"；把那个中间镜像 inspect 出来是 `arm64`。
+  换路径：`docker run --platform linux/amd64` 起同一份基础镜像的 amd64 子清单（容器内 `uname -m`＝
+  `x86_64`），送进 `pyproject.toml`/`uv.lock` 与从钉死工具镜像里取出的 uv，跑**与 Dockerfile 同一行**
+  的 `uv sync --frozen --no-dev --extra postgres --no-install-project --no-editable` → 退 0；
+  装完在 x86_64 解释器下 `sqlalchemy 2.1.0`＋`psycopg 3.3.6` 都能 import，`alembic --version`＝1.20.0，
+  site-packages 里有 1 个目录名带 `x86_64` 标签的发行。**顺带钉住"钉的是多架构索引"这句话**：那份
+  `ghcr.io/astral-sh/uv:0.12.19@sha256:04d046b1…` 在 amd64 侧解析出来的 uv 是
+  `ELF 64-bit … x86-64, statically linked`——生产那批 x86 主机拿得到工具，不是我们的希望而是量到的读数。
+  这一轮把它固化成 `make amd64-probe`（`scripts/probe_control_plane_amd64.sh`，人工/CI 档，
+  容器用完即删），并把"本机别拿 `docker build --platform` 做跨架构复算"写进 OPERATIONS。
+  未覆盖：`docker build` 的跨架构 plumbing 本身（要 BuildKit，且 `docs.docker.com` 今晚两个页面都
+  fetch failed，取不到原文，所以只记本机观测、不记版本结论），以及在真 amd64 主机上跑完整构建。
 - **N-23 留下的那一格也补成了判据**（派给子代理实现、主理人逐行重读后收下）：镜像真装的每一组 extra
   必须被 `make sbom` 的导出命令声明过，方向是**单边子集**、权威侧是配方——清单比配方宽（今天多声明
   一组 `[s3]`）合法，反过来就是刚修掉的那个缺陷的形状。两侧非空各有一道独立守卫，并且有一档

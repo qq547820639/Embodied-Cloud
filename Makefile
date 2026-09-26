@@ -3,7 +3,7 @@ UV ?= uv
 VERSION ?= 0.7.0
 
 .PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane policy-bench \
-        lint typecheck build smoke clean check demo \
+        lint typecheck build smoke clean check demo amd64-probe \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
         release api-docs validate lock verify-lock sbom image-sbom image-cve audit supply-chain
@@ -125,9 +125,15 @@ sbom:
 image-sbom:
 	./scripts/image_sbom.sh
 
-# 镜像层漏洞扫描（OS 包那一层的盲区）：今天只出报告，不当门禁——44 条 HIGH 未分诊。
+# 镜像层漏洞扫描（OS 包那一层的盲区）：只出报告。44 条 HIGH 已分诊完，裁决是不接阈值——
+# 43 条上游没发版、1 条 Debian 标 fix_deferred，接成门禁就是一条每次必红却无从修的红（SUPPLY_CHAIN §8 第 5 项）。
 image-cve:
 	./scripts/image_cve.sh
+
+# 生产架构（x86_64）侧的依赖层复算：本机是 arm64，`docker build --platform` 这条路在这台机器上
+# 走不通（无 buildx，legacy builder 不传 --platform），所以用 amd64 运行时直接跑同一行 uv sync。
+amd64-probe:
+	./scripts/probe_control_plane_amd64.sh
 
 audit:
 	@$(UV) audit --locked
