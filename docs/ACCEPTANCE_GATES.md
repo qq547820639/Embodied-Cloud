@@ -35,6 +35,8 @@
 | G0.27 镜像配方下载钉死 | `pytest tests/test_supply_chain.py` | `runtime/Dockerfile*` 内每个下载步骤必须同块 `sha256sum -c`、每个 `git clone --branch` 必须比对 HEAD commit；并断言判据作用域非空（防恒真） | VERIFIED PASS（改钉之前对两处开火，读数见 CHANGELOG 0.6.0） |
 | G0.28 边缘设备真进程通路 | `pytest tests/test_edge_agent_api.py tests/test_edge_agent_client.py tests/test_edge_agent_e2e.py` | 设备侧三个新端点（发现 / begin / 取件）+ 遥测回读；e2e 是**真 uvicorn 子进程 + 真 agent 子进程 + mock 驱动**：一轮跑到 VERIFIED、落盘字节 sha256 与登记一致、`.part` 无残留、第二轮不重复上机；三道防线各有拆掉即红的读数（M1 前缀复核、M2 取件状态前提、M3 部署期绑定）；取件不得下发 `Content-Disposition`，错误文本不得含 token | VERIFIED PASS（变异读数见 ADR 0007） |
 | G0.29 发布报告自证 | `pytest tests/test_version_consistency.py` | `failed ≥ 1` 的报告必须带出**是哪条用例**（名字取自 JUnit，不取日志文本）；全绿报告不得凭空造名字；`make lint/typecheck` 与 release 门禁的 ruff/mypy 目标集必须同源相等（钉住 `edge_agent` 在册）；`wait_status` 的正/反两档在"后台 worker 线程被掐住"这一确定前提下反向 | VERIFIED PASS（本轮新增，起因见 CHANGELOG 0.7.0） |
+| G0.30 基础镜像钉 digest 且全仓同源 | `pytest tests/test_supply_chain.py` | 非 `embodiedcloud/` 命名空间的 `FROM` 必须带 `@sha256:`；未钉者必须与例外登记表**双向**对账（多登记＝死免检、漏登记＝新裸 tag，都红），例外须带固定词表的证据等级 + ≥40 字理由并与 `docs/SUPPLY_CHAIN.md` 逐字互核；消费侧（三脚本 + `docs/GPU_HOST.md`）引用同一镜像时必须与 Dockerfile 钉死的那份**逐字相等**（归属键剥掉 tag，否则 tag 漂移看不见），并按"必须覆盖到哪几个文件"做子集断言；三条判据作用域均须非空 | VERIFIED PASS（真实内容变异电池 SC1–SC6 六支全开火、干净副本 control 不开火；`python:3.12-slim` 为已登记例外，理由与不吻合的读数见 SUPPLY_CHAIN §2） |
+| G0.31 惰性开关不说谎 | `pytest tests/test_config_docs.py` | 按 AST 数 `app/`（排除声明文件）里每个 `Settings` 字段的读取位置（属性访问与字符串形式两态都算）；**零读取字段集合必须恰好等于 `INERT_SETTINGS`**（漏登记＝运维按"设了就生效"设值，死登记＝文档宣称不生效而代码已在读）；登记项在其 `.env.example` 条目紧邻上方注释块必须带"未启用"标记（"预留"二字不算澄清） | VERIFIED PASS（34 字段中恰好 1 个零读取；CFG1 接上读取者→点名死登记、CFG2 抹掉标记→点名该字段、CFG3 用已知有读取者的 `ide_port_start` 证明探针不是恒真） |
 
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 

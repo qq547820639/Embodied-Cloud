@@ -214,7 +214,7 @@ ${ARTIFACTS}
 |---|---|---|
 | Docker daemon | 本环境可用（colima） | 容器档集成测试可跑（make test-pg / docker 档） |
 | NVIDIA GPU + NVIDIA Container Toolkit | 本机为 Apple Silicon，无 CUDA | G1–G4 无法执行（非软件缺陷）；容器参数层已由 docker 档在真守护进程上验收（回读 HostConfig.DeviceRequests），设备可见性仍待真机 |
-| NGC（nvcr.io/nvidia/isaac-sim:6.0.1） | 需 NGC 凭据 + x86 GPU 主机 | G2–G4 无法执行；构建配方内的下载/克隆已钉死并机检 |
+| NGC（nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9） | 拉取层字节需接受 NGC 条款 + x86 GPU 主机；解析 digest 不需要凭据（本机已匿名解析并钉死） | G2–G4 无法执行（非软件缺陷）；构建配方的下载/克隆与基础镜像 digest 均已钉死并机检 |
 | 云对象存储真实账号 | 本机无凭据 | S3 协议语义已由自起的真服务端（VersityGW）覆盖，并用 MinIO 交叉核对；缺的只是云厂商那份实现 |
 | Kubernetes 集群 + Device Plugin | 控制面已由 kind 自起真集群覆盖（make test-k8s-control-plane）；节点带 nvidia.com/gpu 容量仍需 Device Plugin | G0.17 / G1 K8s GPU 全流程保持 PENDING |
 | 真实机器人硬件 | 本环境无真机 | G5 Sim2Real 无法执行 |

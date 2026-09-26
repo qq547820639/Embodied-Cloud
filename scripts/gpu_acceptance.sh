@@ -8,8 +8,9 @@ cd "$(dirname "$0")/.."
 
 echo
 printf '%s\n' '== NVIDIA Isaac Sim 6.0.1 compatibility checker =='
+# 同一个钉死引用（与 runtime/Dockerfile.isaaclab-workspace 的 FROM 逐字相等）
 docker run --entrypoint bash --gpus all --rm --network=host \
-  nvcr.io/nvidia/isaac-sim:6.0.1 \
+  "${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9}" \
   ./isaac-sim.compatibility_check.sh --/app/quitAfter=10 --no-window
 
 echo

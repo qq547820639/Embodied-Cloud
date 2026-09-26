@@ -17,7 +17,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-ISAAC_SIM_IMAGE="${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:6.0.1}"
+# 与 runtime/Dockerfile.isaaclab-workspace 的 FROM 完全同一字符串（常驻判据
+# tests/test_supply_chain.py::test_pinned_base_ref_is_used_verbatim_everywhere 把关）：
+# 冒烟测的镜像必须就是构建用的那个镜像，否则 G2 的读数与镜像无关。
+ISAAC_SIM_IMAGE="${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9}"
 LOG_DIR="${LOG_DIR:-/tmp/embodiedcloud-gpu-smoke}"
 LOG="$LOG_DIR/isaac_sim_smoke_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "$LOG_DIR"

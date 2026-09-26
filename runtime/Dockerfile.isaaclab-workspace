@@ -1,6 +1,18 @@
 # Full workspace image: Isaac Sim 6.0.1 + Isaac Lab 3.0.0 Beta 2 + code-server.
 # NVIDIA base image and Isaac Sim components remain governed by NVIDIA license terms.
-FROM nvcr.io/nvidia/isaac-sim:6.0.1
+#
+# 钉 digest 而不是只留 tag：`6.0.1` 是可移动的标签，同一份配方两次构建可能拿到
+# 不同的层。digest 由 nvcr.io 本身解析（匿名 pull 令牌即可，**不需要 NGC 凭据**——
+# 凭据只在拉取层字节时需要），实测读数：
+#   HEAD /v2/nvidia/isaac-sim/manifests/6.0.1
+#     → docker-content-digest: sha256:783444c7…30aa9
+#     → content-type: …manifest.list.v2+json, content-length: 743
+#   GET 同一地址的 body 重算 sha256 与该 header 一致（两条独立读数吻合）
+#   子清单：linux/amd64 sha256:b1c542b2…、linux/arm64 sha256:20269735…
+# 钉的是 manifest list（多架构索引）而非单个平台清单，所以 amd64 GPU 主机与
+# arm64 本机都能按平台解析到各自的子清单。tag 保留只为可读性：`name:tag@digest`
+# 形式由本机 `docker build` 实测接受（进入解析并按 digest 开始拉层）。
+FROM nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9
 
 USER root
 ARG CODE_SERVER_VERSION=4.130.0

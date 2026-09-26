@@ -98,10 +98,26 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
 - **PENDING ≠ 跑过**。kind 二进制不在 PATH 且没设 `EMBODIEDCLOUD_KIND_BIN` 时，
   G0.26 整档 skip，报告写 `integration_k8s_control_plane: PENDING(缺 kind 二进制)`，
   其余档位照跑、总用例数照常报——只看 `overall` 会漏掉这一档根本没执行。
+  这条坑本轮**又踩了一次**（写这条的同一轮）：`make validate` 与它前面的 `export` 若不在同一条
+  命令行里，那一档就降为 PENDING。本轮那次的实际读法是：报告里
+  `integration_k8s_control_plane: PENDING(缺 kind 二进制)`，而 `overall` 之所以还是 FAIL，
+  是**计数对账先响**（skipped 由 1 变 8，与文档里那一串四元组不符）——两道防线都在，
+  看不见档位的人由计数那条兜住；反过来也提醒一句：文档计数串一旦写死，档位漏跑就会以
+  "计数不符"的形式暴露，别把它当成计数器的错。
 - **共享库 + 固定大小的 mock GPU 池**：全套用例共用一个 SQLite 库，mock 只 seed 8 张卡，
   而 `POST /api/workspaces` 会占住一张、用例结束不还。新加"批量建 workspace"的文件
   能把后面的 GPU 用例饿死（报错是 `No GPU available with >= 8 GB VRAM`，不是断言失败）。
   需要空闲卡的用例请显式达成前置条件：`tests/gpu_pool.py:ensure_free_gpus`。
+- **真集群档在"引导阶段"整档红，先看宿主负载再看代码**。本轮实测到一次
+  `kind create cluster` 失败在 `Preparing nodes ✗`，原因行是
+  `could not find a log line that matches "Reached target .*Multi-User System.*|detected cgroup v1"`
+  ——**7 例全部 failed on setup**，一条断言都没跑到。当时同一台机器上另有一个会话在跑它自己的
+  pytest + Chrome，`vm.loadavg` 的 1 分钟值 43.8；等负载衰减到 9 以下复跑同一棵树，7/7 恢复绿，
+  代码零改动。区分办法就写在报告里：这类红的形状是 `failed_names` 全落在同一个文件的 setup、
+  且明细是引导日志缺行，而不是某个断言不成立（`test_run.failed_names` 正是为这个区分而加的）。
+  **不要**用重试或加大超时去掩盖它：CI 上一台忙碌的 runner 会把"引导不起来"洗成通过，
+  而那恰恰是这一档存在的理由。若需要判断"是不是卡住了"，比较进程的 CPU TIME 与 ELAPSED，
+  再看 `sample <pid> 1` 的叶子帧（本轮看到的是 `psycopg … poll`，即 PG 档在跑，只是慢）。
 
 ## 8. 边缘设备（edge agent）
 

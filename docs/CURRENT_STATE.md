@@ -7,7 +7,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 493 / passed 492 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
+| Test | **PASS（collected 503 / passed 502 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
 | Lint / Type | PASS（ruff 0 / mypy 45 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS 18/18**（自建一次性容器，真行锁语义） |
@@ -17,7 +17,7 @@
 | Integration K8s control plane | **PASS 7/7**（kind 真集群：真 kubelet/调度器/endpoints，无需 GPU） |
 | Edge agent 真进程通路 | **PASS**（真 uvicorn 子进程 + 真 `python -m edge_agent` 子进程 + mock 驱动：一轮到 VERIFIED、落盘摘要核对、第二轮不重复上机；服务端另有 10 例鉴权/防线 + 设备侧 12 例坏响应形状） |
 | Integration K8s（GPU 全流程） | PENDING（原因登记：需要节点带 `nvidia.com/gpu` 容量 = Device Plugin；控制面路径已由上一行覆盖） |
-| 供应链 | PASS（`uv.lock` 一致性 + SBOM + `uv audit --locked` + 镜像配方下载/克隆钉死机检） |
+| 供应链 | PASS（`uv.lock` 一致性 + SBOM + `uv audit --locked` + 镜像配方下载/克隆钉死机检 + **外部基础镜像钉 digest 且脚本侧逐字同源**） |
 | OpenAPI / VALIDATION freshness | PASS（`make api-docs` / `make validate` 无 diff） |
 | overall | `PASS_WITH_PHYSICAL_PENDING`（物理待验：GPU 真机、Isaac 流媒体面、真机器人） |
 
@@ -35,6 +35,8 @@
 | N-8 | 真起 uvicorn 的夹具从浏览器档抽成 `tests/live_server.py`，浏览器档与 agent e2e 共用同一份就绪判据与回收顺序 | 迁移后浏览器档 11/11 重跑为绿（24.0s ≈ 原 22–24s） |
 | N-9 | **发布报告必须能归因**：`test_run.failed_names` 由 JUnit 结构属性得出（`failure` 与 `error` 两类都算），`VALIDATION.md` 行内展示；只带名字不带 message 是故意的——报告必须确定性（CI freshness 比 `git diff`），而失败消息里带时间/端口 | `test_report_carries_the_names_of_failing_cases`：4 条里 2 条红必须恰好点出那两条；全绿必须给出空列表 |
 | N-10 | 新常驻判据：`make lint`/`make typecheck` 与 release 门禁的 ruff/mypy 目标集合必须同源相等（并钉 `edge_agent` 在册）；`edge_agent` 已进 packaging/lint/mypy | 开火读数：从门禁侧删掉 `edge_agent` 即红（`make=[app,edge_agent,tests]` vs `gate=[app,tests]`） |
+| N-11 | **Isaac Sim 基础镜像钉 digest，并揭掉一条写错的阻塞理由**：`runtime/Dockerfile.isaaclab-workspace` 的 `FROM` 由裸 tag 换成 `nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c7…30aa9`（多架构索引，子清单 amd64 `b1c542b2…`／arm64 `20269735…`）。此前 SUPPLY_CHAIN §8 登记为"有 NGC 凭据后改 @sha256:"——**实测该前提不成立**：manifest 与 digest 用匿名 pull 令牌即可解析（`docker-content-digest` 与 body 重算 sha256 两条独立读数吻合），凭据只在拉层字节时才要。新增三条常驻判据：①非自有命名空间的 `FROM` 必须带 `@sha256:`，未钉者必须与例外登记表**双向**对账（多登记＝死免检、漏登记＝新裸 tag，都红），例外须带固定词表的证据等级与 ≥40 字理由，且与 `docs/SUPPLY_CHAIN.md` 逐字互核；②消费侧（`gpu_acceptance.sh`／`isaac_sim_smoke.sh`／`release.sh`／`docs/GPU_HOST.md`）引用同一基础镜像时必须与 Dockerfile 钉死的那份**逐字相等**（归属键刻意剥掉 tag，否则"把 2.0.0 写成 1.9.9"这种最常见漂移根本进不了比较）；③三条判据的作用域均须非空，②另按"必须覆盖到哪几个文件"做子集断言 | `tests/test_supply_chain.py` 10 例（含 `_image_path` 纯文本函数的端口/无 tag 分支单独验）；真实内容变异电池 SC1–SC6 六支全开火、干净副本 control 不开火（读数见 CHANGELOG 与 SUPPLY_CHAIN §2/§6）。`python:3.12-slim` 按例外登记而未钉：Docker Hub 三端点本机均不可达，唯一拿到的第三方镜像站读数与本机缓存互不印证（详见 §2 同一行），钉一个未证实的 digest 会让构建直接失败 |
+| N-12 | 把 TECH DEBT 里那条"设了也不生效"的预留开关从**文档陈述**升级为**机器不变量**：AST 逐字段数出 `app/`（除声明文件）里的读取位置，"零读取字段集合"必须恰好等于惰性登记表 `INERT_SETTINGS`（漏登记＝有人会被误导，死登记＝文档在撒谎），且登记项在 `.env.example` 紧邻上方注释块必须带"未启用"标记 | 实测普查：`Settings` 34 个字段中恰好 1 个零读取（`default_idle_timeout_minutes`）。开火读数 CFG1/CFG2 + 非恒真对照（`ide_port_start` 探针必须读到非空）+ 纯函数四档边界（无注释／断一行／写了"预留"但没写"未启用"／合规）全在 /tmp 副本上量，主树不动 |
 
 
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
@@ -82,8 +84,9 @@
 ## 4. 分项状态
 
 ### VERIFIED PASS
-492 用例全绿（唯一 skip 是 `k8s_integration` GPU 档）；权威值以本报告为准，
-此处只是复读——四元组计数串在 §1，由 `make validate` 的值对账钉住。
+全套用例全绿（唯一 skip 是 `k8s_integration` GPU 档）。四元组计数只在 §1 出现一处，
+由 `make validate` 的值对账钉住——**本节刻意不再复读绝对数字**，多抄一份就多一处会静过期、
+且门禁看不见的位置。
 其中真后端档：PG 真并发 18/18、真容器 20/20、真浏览器 11/11、
 对象存储真后端 20/20、K8s 控制面真集群 7/7、SDK 线格式 6、预授权 14、
 **边缘设备真进程 e2e（真 uvicorn 子进程 + 真 agent 子进程 + mock 驱动）**。
@@ -95,11 +98,13 @@ GPU 真机（G1–G4 脚本就绪，本机无 NVIDIA 设备）· K8s 上 `nvidia
 Streaming 媒体面（Isaac Sim WebRTC）· Robot 真机 · Warm pool SLA。
 
 ### BLOCKED_EXTERNAL_DEPENDENCY
-NGC 凭据（镜像 digest 回填、`nvcr.io` 基础镜像钉 digest）· 云 S3 真实账号凭据
-（协议语义已由本地真服务端覆盖，缺的只是"云厂商那份实现"）· 物理机器人 ·
-带 GPU 的 K8s 集群凭据。
+NGC 凭据（**构建并推送 workspace 镜像**后回填 `TemplateVersion.image_digest`）·
+云 S3 真实账号凭据（协议语义已由本地真服务端覆盖，缺的只是"云厂商那份实现"）·
+物理机器人 · 带 GPU 的 K8s 集群凭据 · 能出到 Docker Hub 权威 registry 的网络位置
+（`python:3.12-slim` 的 digest 因此仍未钉，按例外登记，见 SUPPLY_CHAIN §2）。
 > 已解除：docker daemon、postgres 镜像（v0.5.0）、S3 兼容服务端与真 K8s 集群（v0.6.0，
-> 本机自起自删）。
+> 本机自起自删）、**`nvcr.io` 基础镜像钉 digest**（v0.7.0：这条曾被登记为"阻塞于 NGC 凭据"，
+> 实测不成立——manifest 与 digest 用匿名 pull 令牌即可解析，凭据只在拉层字节时才要）。
 
 ### TECH DEBT（已知、有意延后 —— 本轮逐条量过，不是照抄旧措辞）
 
@@ -117,15 +122,21 @@ S3 `ArtifactStore` 真实后端）**本轮全部结案**：前一条由 kind 真
 
 当前真正的延后项只剩下面一条，且它被本轮实测改过性质：
 
-- **`default_idle_timeout_minutes` 目前没有任何消费者**（`grep` 全仓：仅出现在
-  `app/config.py`，读数为 1 处声明、0 处读取）。所以它不是"已实现待调参"，而是一个
-  **尚未实现的预留开关**——不要因为 `.env.example` 里有它就以为空闲超时在生效。
-  它在 `.env.example` 里是有条目的（配置文档对账门要求每个 Settings 字段都落文档），
-  但**代码里 0 处读取**——所以真正的风险是"运维以为设了这个值就会超时停机"。
-  要实现必须先回答"用什么算活动"：容器 CPU 在 GPU 训练下会长时间接近 0
+- **`default_idle_timeout_minutes` 是一个"设了也不生效"的预留开关**（本轮按 AST 逐字段数过：
+  `Settings` 共 34 个字段，恰好 1 个在 `app/`（除去声明所在的 `app/config.py`）零读取，就是它。
+  所以它不是"已实现待调参"，而是**尚未实现的预留开关**。
+  本轮把这句话从文档挪进了门禁（`tests/test_config_docs.py`）：
+  ①"无人读取的字段集合"必须**恰好等于**惰性登记表（漏登记＝有人会被"设了就生效"误导，
+  死登记＝文档在撒谎，两个方向都红）；②登记表里的每个字段，其在 `.env.example` 中紧邻上方
+  的注释块必须带"未启用"标记（"预留"两个字不算，因为误导运维的是"设了会生效"这句隐含话）；
+  ③探针本身带非恒真对照（已知有读取者的 `ide_port_start` 必须读到非空）。
+  开火读数（全在 /tmp 副本上做，主树不动）：**CFG1** 往 `app/deps.py` 加一行真读取 →
+  未读集合变空、该登记项被判"死登记"；**CFG2** 把 `.env.example` 的"未启用"改成"预留" →
+  标记判据点名该字段；control（干净副本）两把都不开火。
+  **为什么仍然不实现**：要先回答"用什么算活动"——容器 CPU 在 GPU 训练下会长时间接近 0
   （CPU 空闲 ≠ 任务空闲），据此自动停机等于误杀长跑任务并照秒扣费；可信信号来自
-  真机 GPU 利用率（被 NVIDIA 设备阻塞，见 §4 BLOCKED）。→ 保持延后，性质记为
-  "缺可信信号 + 当前无消费者"。
+  真机 GPU 利用率（被 NVIDIA 设备阻塞，见上方 BLOCKED）。→ 保持延后，
+  但延后现在是**被机器看着的延后**：谁接了消费者而不改文档，常驻档立刻红。
 
 **引用完整性已逐条裁决完（见 ADR 0005 追加节）**：`*_id` 列普查出的 19 处未声明外键，
 以"全仓删除能力普查"（唯一硬删是 `GpuAllocation`，且无人按 id 引用它）为依据分派——
@@ -149,7 +160,8 @@ strategic merge patch 并不能把 `nvidia.com/gpu` 从模板里去掉。
 （守护进程的 HostConfig、集群的 Unschedulable 判词、第二台服务端的错误码）、
 **每条新保证都要有一支"退回旧写法必然开火"的变异对照**（M1b/M2/M3/M4/M6 全部实测）。
 
-仍然待办且性质明确：`default_idle_timeout_minutes` 缺可信活动信号（且当前 0 消费者）。
+仍然待办且性质明确：`default_idle_timeout_minutes` 缺可信活动信号（`app/` 内 0 读取，本轮起
+这句话由常驻判据把守——接上消费者却不改文档会立刻红，见 §4 TECH DEBT 与 N-12）。
 上一轮挂在延后清单里的 edge agent 组件与分派/取件鉴权面，本轮已落地并进门禁（ADR 0007 Accepted）；
 引用完整性的 19 处 `*_id` 已全部逐条裁决（11 处补约束、8 处写明理由）。
 硬件与凭据类项目继续显式登记 PENDING/BLOCKED，不用测试通过冒充物理验证。

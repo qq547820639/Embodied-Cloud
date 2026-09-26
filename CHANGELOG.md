@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 493 / passed 492 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 503 / passed 502 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -78,6 +78,76 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   与两条读数坑（"PENDING ≠ 跑过"、共享库的固定卡池）；
   `docs/ACCEPTANCE_GATES.md` 新增 G0.28/G0.29，G5.1 的判据从"控制台页走通"
   升级为真进程回环；`docs/openapi.json` 重新生成（+206 行）。
+
+### 供应链：外部基础镜像钉 digest（顺带揭掉一条写错的阻塞理由）
+- **这条待办的前提是错的**。`docs/SUPPLY_CHAIN.md` §8 原文写"Isaac Sim 基础镜像钉 digest：
+  有 NGC 凭据后改 `@sha256:`"——实测**不需要凭据**：向 `nvcr.io/proxy_auth` 换一枚匿名 pull
+  令牌（`scope=repository:nvidia/isaac-sim:pull`）就能读 manifest。两条独立读数吻合：
+  `HEAD /v2/nvidia/isaac-sim/manifests/6.0.1` 的 `docker-content-digest` =
+  `sha256:783444c7…30aa9`，而 `GET` 回来的 743 B manifest list 重算 sha256 得同一个值。
+  凭据只在**拉层字节**时才要——所以"钉 digest"这件事从来不在阻塞清单里，被阻塞的是构建与推送。
+- 三个选型判断（都是量出来或读出来的，不是按习惯挑的）：
+  **钉多架构索引而不是单个平台清单**（子清单 amd64 `b1c542b2…`／arm64 `20269735…`）——
+  钉平台清单等于把配方锁死在构建机的架构上；**保留 tag 与 digest 并写**
+  （`name:tag@digest`）而不是只留 digest——可读性不付代价，因为本机 `docker build` 实测
+  接受该形式并进入解析、按 digest 开始拉层（权威侧只有这一条一手证据：
+  docs.docker.com 的 Dockerfile 参考页本机抓取失败，故不引其措辞）；
+  **`python:3.12-slim` 不钉**（见下条）。
+- `python:3.12-slim` 按**例外登记**而非钉死，理由是可获得的读数都不权威：Docker Hub 的
+  `auth.docker.io` 与 `hub.docker.com` 本机实测均 `curl 28` 超时；唯一能读到的
+  `public.ecr.aws/docker/library/python`（Docker 官方镜像的第三方镜像站）给
+  `sha256:f77ac9e4…`（body 重算 sha256 一致，OCI index，16 个子清单），但它 amd64/arm64
+  子清单的 config digest（`9e87977b…`／`8630ab77…`）**都不等于**本机缓存那份
+  `python:3.12-slim` 的 config（`2f17fc04…`）。两来源互不印证 ⇒ 今天的权威 digest 未证实；
+  钉一个未证实的 digest 只会让构建直接失败。顺带这条不吻合本身就是"tag 会移动"的实证。
+- 新增三条常驻判据（`tests/test_supply_chain.py` 从 4 例扩到 10 例）：
+  ①非 `embodiedcloud/` 命名空间的 `FROM` 必须带 `@sha256:`；未钉者必须与例外登记表
+  **双向**对账——多登记（其实已经钉上）与漏登记（新引入裸 tag）都判红，例外条目必须带
+  固定词表里的证据等级 + ≥40 字理由，并与 `docs/SUPPLY_CHAIN.md` 逐字互核（钉上的 digest
+  也要在文档里逐字出现，文档只写 tag 就等于把移动的东西宣称成钉死的）；
+  ②**消费侧**（`gpu_acceptance.sh`／`isaac_sim_smoke.sh`／`release.sh`／`docs/GPU_HOST.md`）引用
+  同一基础镜像时必须与 Dockerfile 钉死的那份**逐字相等**；
+  ③三条判据的解析作用域均须非空，②另按"必须覆盖到哪些文件"断言（子集检查，
+  不按命中数——数量会随新增消费侧自己涨，而有人改名/删引用时子集会立刻缺）。
+- 真实内容上的变异电池（把 `runtime/`+`scripts/`+`docs/GPU_HOST.md` 复制到 /tmp 逐条拆，主树不动）。
+  这组编号用 **SC**（supply chain）而不是接着往下排 `M5/M6…`——`M5`/`M6` 在本仓已被
+  `tests/test_gpu_pool_guard.py` 的 reclaim 对照和 §5 里 v0.6.0 那批读数各自用过一遍，
+  同号不同事会让读数无法回溯：
+  **SC1** 摘掉权威侧 digest → 未钉集合多出 `nvcr.io/nvidia/isaac-sim:6.0.1`、与例外表差集
+  非空即红（此时②**不**开火：权威侧已无可抄的钉，两把判据互补而非冗余，这一条如实记下）；
+  **SC2** 只把 `gpu_acceptance.sh` 的 tag 写成 `6.0.0`（digest 照抄）→ ②恰好 1 条 offender；
+  **SC3** 只把 `release.sh` 的 digest 末 4 位改掉 → ②恰好 1 条 offender；
+  **SC4** 给 `python` 钉上 digest 但忘删例外 → 报"死登记"；
+  **SC5** 新加一个没登记的 `FROM node:20.19.0` → 报"漏登记"；
+  **SC6** 只在 `docs/GPU_HOST.md` 里退回裸 tag（脚本全对）→ ②开火 2 条（手册那一行是一次真实
+  拉取，把运维侧写回可变 tag 就等于绕过配方）；干净副本 control 两把都不开火。
+  ②的归属键**刻意剥掉 tag**：第一版把 `repo:tag` 当键，常驻开火对照
+  （`test_sameness_criterion_fires_when_a_script_drifts` 的 tag 漂移那档）当场就不开火——
+  键不相等，最常见的那类漂移反而完全看不见；改成剥 tag 的归属键后又单独给这个纯文本函数
+  钉了一例（`test_image_path_key_strips_tag_but_not_registry_port`），因为 registry 带端口时
+  那个冒号不是 tag 分隔符，只在最后一个 `/` 之后才找冒号。
+
+### 配置面：把"设了也不生效"从一句提醒升级为机器不变量
+- `default_idle_timeout_minutes` 在 `.env.example` 里有键、在 `Settings` 里有字段，唯一没有的是
+  读取者。这类"预留开关"的真实危险不是功能缺失，而是**运维以为设了值就会超时停机**。
+  本轮把这句话从 TECH DEBT 的段落挪进门禁（`tests/test_config_docs.py`）：
+  按 AST 逐字段数 `app/`（排除声明所在的 `app/config.py`）里的读取位置——属性访问
+  （`settings.x` 与 `self.settings.x` 同一种节点，不看接收者）与字符串形式
+  （`getattr(settings, "x")`、`dict["x"]`）两种形态都算；
+  **"零读取字段集合"必须恰好等于惰性登记表**，两个方向都会红：漏登记＝有人会按谎言设值，
+  死登记＝文档宣称"不生效"而代码其实已经在读；登记项还必须在其 `.env.example` 条目的
+  **紧邻上方**注释块里带"未启用"标记（写"预留"不算——误导来自"设了会生效"那句隐含话，
+  只有明确否认它才叫澄清）。
+- 普查读数：`Settings` 共 34 个字段，**恰好 1 个**零读取，就是它（不是"大概几个"）。
+- 牙口读数（全在 /tmp 副本上做，主树不动）：**CFG1** 往 `app/deps.py` 追加一行
+  `return settings.default_idle_timeout_minutes` → 零读取集合变空、该登记项被点名"死登记"；
+  **CFG2** 把 `.env.example` 的"未启用"改成"预留" → 标记判据点名该字段；
+  **CFG3（非恒真对照）** 探针在已知有读取者的 `ide_port_start` 上必须读到非空，
+  在假字段名上必须读到空——否则"零读取"这句话只是探针坏了。
+  纯函数侧另配四档边界：无注释／注释与键之间断一行／写了"预留"没写"未启用"／合规。
+- 为什么仍然不实现自动停机：可信活动信号只有真机 GPU 利用率（容器 CPU 在 GPU 训练下会长时间
+  接近 0，据此停机会误杀长跑任务并照秒扣费），被 NVIDIA 设备阻塞。区别在于——**延后现在是
+  被机器看着的延后**。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

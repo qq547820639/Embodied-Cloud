@@ -1,6 +1,6 @@
 # SUPPLY CHAIN — EmbodiedCloud 供应链可复现性
 
-> 更新：2026-09-26（v0.6.0）。只记录仓库内已落地/已验证的事实；未验证项明确标注。
+> 更新：2026-09-26（v0.7.0）。只记录仓库内已落地/已验证的事实；未验证项明确标注。
 
 ## 1. 镜像
 
@@ -15,10 +15,11 @@
 
 | 项 | 现状 | 状态 |
 |---|---|---|
-| Isaac Sim 版本 | `FROM nvcr.io/nvidia/isaac-sim:6.0.1` | VERIFIED（配方层锁定小版本；digest 待 NGC 凭据） |
-| Isaac Lab 版本 | `ARG ISAACLAB_REF=v3.0.0-beta2.patch1` + `ARG ISAACLAB_COMMIT=ffff603eafc6b74264a5261cc0183d6a65390d78`，clone 后 `test "$(git rev-parse HEAD)" = "$ISAACLAB_COMMIT"` | VERIFIED（本轮）：commit 由两个独立来源核对——GitHub refs API 与 `git ls-remote` 给出同一 sha（该 tag 是 lightweight tag，直接指向 commit）。tag 可被 force push 移动，故只认 commit |
+| Isaac Sim 版本 | `FROM nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9` | VERIFIED（本轮由 tag 升级为钉 digest）：digest 由**权威源 nvcr.io 本身**匿名解析得到（`/proxy_auth` 换取 pull 令牌 → `HEAD /v2/nvidia/isaac-sim/manifests/6.0.1` 的 `docker-content-digest`），并 `GET` 同一 manifest list 重算 body 的 sha256 与该读数一致（743 B，`…manifest.list.v2+json`）；子清单 linux/amd64 `sha256:b1c542b2…`、linux/arm64 `sha256:20269735…`。**钉的是多架构索引而非单个平台清单**，amd64 GPU 主机与 arm64 本机各自按平台解析。`name:tag@digest` 形式由本机 `docker build` 实测接受（进入解析并按 digest 开始拉层），tag 保留只为可读性。**"阻塞于 NGC 凭据"是错的**：解析 digest 不需要凭据，凭据只在拉层字节时才要 |
+| 控制面基础镜像 | `FROM python:3.12-slim`（**未钉 digest，已登记的例外**） | 证据等级 `authoritative-reading-not-obtained`：Docker Hub 的 `auth.docker.io` 与 `hub.docker.com` 本机实测均不可达（curl 28 超时），拿不到该 tag 当前指向的索引 digest。`public.ecr.aws/docker/library/python` 的官方镜像镜像站给到 `sha256:f77ac9e4…`（body 重算 sha256 一致，OCI index，16 个子清单），但它是第三方镜像而非权威源；且其 amd64/arm64 子清单的 config digest（`9e87977b…` / `8630ab77…`）**都不等于**本机缓存那份 `python:3.12-slim` 的 config（`2f17fc04…`）——两个来源互不印证。这既证明该 tag 确实会移动（本机缓存已是旧内容），也说明"今天的权威 digest"仍未证实；钉一个未证实的 digest 会让构建直接失败，故按例外登记而非钉死 |
+| Isaac Lab 版本 | `ARG ISAACLAB_REF=v3.0.0-beta2.patch1` + `ARG ISAACLAB_COMMIT=ffff603eafc6b74264a5261cc0183d6a65390d78`，clone 后 `test "$(git rev-parse HEAD)" = "$ISAACLAB_COMMIT"` | VERIFIED（v0.6.0）：commit 由两个独立来源核对——GitHub refs API 与 `git ls-remote` 给出同一 sha（该 tag 是 lightweight tag，直接指向 commit）。tag 可被 force push 移动，故只认 commit |
 | 启动命令 | 模板 entrypoint 版本锁定（TemplateVersion） | VERIFIED |
-| 配方机检 | `tests/test_supply_chain.py`：任何 `curl/wget -o` 必须同块 `sha256sum -c`；任何 `git clone --branch` 必须比对 HEAD commit；并断言作用域非空（解析不到下载步骤即红，防判据恒真） | VERIFIED（本轮新增；改钉之前该判据对两处开火，读数见 CHANGELOG 0.6.0） |
+| 配方机检 | `tests/test_supply_chain.py`：任何 `curl/wget -o` 必须同块 `sha256sum -c`；任何 `git clone --branch` 必须比对 HEAD commit；**任何非自有命名空间的 `FROM` 必须带 `@sha256:`，未钉者必须出现在双向对账的例外登记表里（多登记与漏登记都红），且登记表与本文逐字互核**；**消费侧引用同一基础镜像时必须与 Dockerfile 钉死的那份逐字相等**（`gpu_acceptance.sh`／`isaac_sim_smoke.sh`／`release.sh`／`docs/GPU_HOST.md` 四处，归属键刻意剥掉 tag）；并断言三条判据的作用域均非空 | VERIFIED（v0.6.0 建下载/克隆两条；本轮新增 digest 三条，改钉之前对两处开火，读数见 CHANGELOG 0.6.0 与本轮记录） |
 
 ## 3. code-server / 运行时组件
 
@@ -53,6 +54,12 @@
 
 - `latest` 可变 tag：禁止（seed 与模板版本均检查，测试断言 `"latest" not in image`）
 - 未经验证的镜像覆盖：seed 不允许覆盖已发布 TemplateVersion
+- **外部基础镜像裸 tag：禁止**。非 `embodiedcloud/` 命名空间的 `FROM` 必须带 `@sha256:`；
+  确实拿不到权威 digest 时只能走**例外登记表**（`tests/test_supply_chain.py::UNPINNED_EXCEPTIONS`），
+  且登记表与本文双向对账——多登记（其实已经钉上）与漏登记（新引入的裸 tag）都判红，
+  例外条目必须带固定词表里的证据等级（`authoritative-reading-not-obtained` /
+  `third-party-reading-only` / `accepted-risk`）与 ≥40 字的理由。登记即定级：
+  例外不接受无等级的"先放着"
 - **测试档位镜像同样不许用可变 tag**：`versity/versitygw:v1.8.0`、`kindest/node:v1.37.0`、
   `postgres:16-alpine` 均带具体版本；`test_test_tier_image_tag_is_pinned` 常驻把关
 
@@ -66,9 +73,11 @@
 
 ## 8. 待办（按优先级）
 
-1. **镜像 digest 回填**：`scripts/build_workspace_image.sh` 构建成功后把 registry digest 写入 `TemplateVersion.image_digest`（阻塞于 NGC 凭据）
-2. **Isaac Sim 基础镜像钉 digest**：`nvcr.io/nvidia/isaac-sim:6.0.1` 仍是 tag；有 NGC 凭据后改 `@sha256:`
+1. **镜像 digest 回填**：`scripts/build_workspace_image.sh` 构建成功后把 registry digest 写入 `TemplateVersion.image_digest`（阻塞于 NGC 凭据 + x86 GPU 主机——**这一条是真阻塞**：要的是"把镜像建出来并推到 registry"，不是"知道基础镜像是哪个内容"）
+2. **`python:3.12-slim` 钉 digest**：当前按例外登记（见 §2）。补上只需一次"在能出网的环境里向**权威源** `registry-1.docker.io` 解析该 tag 的索引 digest"的机会（本机三条路径均不可达，见 §2 同一行）；拿到后把 `@sha256:` 加进 `runtime/Dockerfile.control-plane` 并从例外登记表删除——登记表是双向核对的，钉上却不删登记会直接红
 3. **控制面镜像 SBOM 化**：wheel 级 SBOM 已有，镜像层 SBOM 需真实构建后由 trivy/syft 生成
 
-（原第 2 项 code-server SHA256 与原第 3 项 IsaacLab exact revision 已于 v0.6.0 落地，见 §2/§3。
+（原"Isaac Sim 基础镜像钉 digest"一项已于本轮闭合：它曾被登记为"阻塞于 NGC 凭据"，实测**不成立**——
+nvcr.io 的 manifest 与 digest 用匿名 pull 令牌即可解析，凭据只在拉层字节时才需要。
+原第 2 项 code-server SHA256 与原第 3 项 IsaacLab exact revision 已于 v0.6.0 落地，见 §2/§3。
 原第 1 项 Python lockfile 与原第 4 项 SBOM 已于 v0.5.0 落地，见 §4/§5。）

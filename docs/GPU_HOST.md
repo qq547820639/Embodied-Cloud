@@ -5,13 +5,15 @@
 - Ubuntu 24.04
 - NVIDIA GPU，至少 16GB VRAM；需要 Streaming 时必须支持 NVENC
 - Docker + NVIDIA Container Toolkit
-- NGC 可拉取 `nvcr.io/nvidia/isaac-sim:6.0.1`
+- NGC 可拉取 `nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9`
+  （与 `runtime/Dockerfile.isaaclab-workspace` 的 `FROM` 同一字符串，常驻判据 G0.30 逐字核对；
+  解析 digest 本身不需要凭据，**接受 NGC 条款后**才需要 `docker login nvcr.io` 拉层字节）
 
 ## 0. 先做 NVIDIA 官方兼容性检查
 
 ```bash
 docker run --entrypoint bash -it --gpus all --rm --network=host \
-  nvcr.io/nvidia/isaac-sim:6.0.1 \
+  nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9 \
   ./isaac-sim.compatibility_check.sh --/app/quitAfter=10 --no-window
 ```
 
