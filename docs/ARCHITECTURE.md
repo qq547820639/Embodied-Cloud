@@ -1,6 +1,6 @@
 # ARCHITECTURE — EmbodiedCloud
 
-> 版本：0.5.0（2026-09-26）。本文是现行实现架构；历史讨论见 `docs/IMPLEMENTATION_PLAN.md`、`docs/K8S_PRODUCTION.md`、`docs/adr/*`。
+> 版本：0.6.0（2026-09-26）。本文是现行实现架构；历史讨论见 `docs/IMPLEMENTATION_PLAN.md`、`docs/K8S_PRODUCTION.md`、`docs/adr/*`。
 
 ## 1. 总体分层
 

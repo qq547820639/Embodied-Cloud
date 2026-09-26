@@ -89,6 +89,33 @@ step "4.2 make sbom + make audit"
 make sbom
 make audit
 
+# ---------- 2.44 分级验证矩阵的唯一事实源：docs/VALIDATION.json ----------
+step "4.3 docs/VALIDATION.json 新鲜度（缺失或版本不符 → make validate）"
+# VALIDATION_STATUS.md 里的集成档表**由这份产物生成**，不在脚本里手抄：手抄的行
+# 在档位增减后会悄悄失真（"17 例"式漂移本轮修掉过一次）。
+if [[ ! -f docs/VALIDATION.json ]] || ! grep -q "\"version\": \"${VERSION}\"" docs/VALIDATION.json; then
+  say "docs/VALIDATION.json 缺失或版本不是 ${VERSION} → 执行 make validate"
+  make validate
+fi
+VALIDATION_ROWS="$("$PYTHON" - <<'PY'
+import json
+
+checks = json.load(open("docs/VALIDATION.json", encoding="utf-8"))["checks"]
+rows = []
+for key in sorted(checks):
+    if not key.startswith("integration_"):
+        continue
+    cell = checks[key]
+    note = str(cell.get("note", cell.get("count", ""))).replace("|", "/")
+    rows.append(f"| {key} | {cell['status']} | {note} |")
+assert rows, "docs/VALIDATION.json 里没有任何 integration_* 档位行（判据会恒空）"
+run = checks["test_run"]
+print(f"| test_run | {run['status']} | passed {run['passed']} / skipped {run['skipped']} / failed {run['failed']} |")
+print("\n".join(rows))
+PY
+)"
+say "已从 docs/VALIDATION.json 取到 $(printf '%s' "$VALIDATION_ROWS" | grep -c '^|') 行档位读数"
+
 # ---------- 2.5 release archive 清洁验证（§16） ----------
 step "2.5 校验 release archive 清洁度"
 # source archive 不得包含：__pycache__ / *.pyc / pytest/mypy/ruff cache /
@@ -169,8 +196,14 @@ cat > dist/VALIDATION_STATUS.md <<EOF
 | 锁文件一致性 | make verify-lock | PASS（uv.lock 与 pyproject 一致） |
 | SBOM | make sbom | dist/sbom.cdx.json（CycloneDX 1.5） |
 | 依赖漏洞审计 | make audit | PASS（uv audit --locked，0 命中） |
-| PostgreSQL 真并发 | make test-pg | 见 docs/VALIDATION.json 的 integration_postgres |
+| PostgreSQL 真并发 | make test-pg | 见下方"集成档读数"（由 docs/VALIDATION.json 生成） |
 | build | make build | PASS（退出码 0） |
+
+### 集成档读数（逐行取自 docs/VALIDATION.json，不在本脚本里手抄）
+
+| 档位 | 状态 | 读数 |
+|---|---|---|
+${VALIDATION_ROWS}
 
 ## 构建产物（dist/）
 
@@ -181,9 +214,10 @@ ${ARTIFACTS}
 | 依赖 | 状态 | 影响 |
 |---|---|---|
 | Docker daemon | 本环境可用（colima） | 容器档集成测试可跑（make test-pg / docker 档） |
-| NVIDIA GPU + NVIDIA Container Toolkit | 本机为 Apple Silicon，无 CUDA | G1–G4 无法执行（非软件缺陷） |
-| NGC（nvcr.io/nvidia/isaac-sim:6.0.1） | 需 NGC 凭据 + x86 GPU 主机 | G2–G4 无法执行 |
-| Kubernetes 集群 + Device Plugin | 本环境无集群（provider 资源请求 4 CPU/16Gi 亦超出本地 VM） | G0.17 / G1 K8s 保持 PENDING |
+| NVIDIA GPU + NVIDIA Container Toolkit | 本机为 Apple Silicon，无 CUDA | G1–G4 无法执行（非软件缺陷）；容器**参数层**已由 docker 档在真守护进程上验收（HostConfig.DeviceRequests 记账），设备可见性仍待真机 |
+| NGC（nvcr.io/nvidia/isaac-sim:6.0.1） | 需 NGC 凭据 + x86 GPU 主机 | G2–G4 无法执行；构建配方内的下载/克隆已钉死并机检 |
+| 云对象存储真实账号 | 本机无凭据 | S3 **协议语义**已由自起的真服务端（VersityGW）覆盖，并用 MinIO 交叉核对；缺的只是云厂商那份实现 |
+| Kubernetes 集群 + Device Plugin | 控制面已由 kind 自起真集群覆盖（`make test-k8s-control-plane`）；节点带 `nvidia.com/gpu` 容量仍需 Device Plugin | G0.17 / G1 K8s GPU 全流程保持 PENDING |
 | 真实机器人硬件 | 本环境无真机 | G5 Sim2Real 无法执行 |
 
 ## 待办（开发者人工执行）

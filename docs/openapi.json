@@ -3,7 +3,7 @@
   "info": {
     "title": "EmbodiedCloud API",
     "description": "Browser-first Isaac Lab workspace control plane",
-    "version": "0.5.0"
+    "version": "0.6.0"
   },
   "paths": {
     "/api/auth/register": {
@@ -2206,7 +2206,7 @@
           "deployments"
         ],
         "summary": "Verify Deployment",
-        "description": "\u5e42\u7b49\u6821\u9a8c: artifact \u5f53\u524d checksum \u4e0e\u8bb0\u5f55\u4e00\u81f4 \u2192 verified, \u5426\u5219 failed+error.",
+        "description": "\u5e42\u7b49\u6821\u9a8c: artifact \u5f53\u524d checksum \u4e0e\u8bb0\u5f55\u4e00\u81f4 \u2192 verified\uff0c\u5426\u5219 failed+error.\n\n\u5b58\u50a8\u4e0d\u53ef\u7528\uff08\u9274\u6743\u5931\u8d25/\u6876\u4e0d\u5b58\u5728/\u7f51\u7edc\u6545\u969c\uff09\u2192 503 \u4e14\u8bb0\u5f55**\u7559\u5728 downloading**\uff1a\n\u91cd\u9a8c\u662f\u5b89\u5168\u7684\uff0c\u800c once-FAILED \u662f\u7ec8\u6001\uff0c\u4e0d\u80fd\u7531\u4e00\u6b21\u57fa\u7840\u8bbe\u65bd\u6296\u52a8\u5224\u5b9a\u3002",
         "operationId": "verify_deployment_api_deployments__deployment_id__verify_post",
         "parameters": [
           {

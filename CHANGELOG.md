@@ -1,5 +1,86 @@
 # Changelog
 
+## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
+
+`docs/VALIDATION.json`（`make validate` 生成）：collected 458 / **passed 457** /
+skipped 1（仅 `k8s_integration`，需 NVIDIA Device Plugin）/ failed 0；
+lint/typecheck/migration/build 全 PASS；六个集成档中五档 **PASS**：
+postgres 18/18、docker 20/20、browser 11/11、**object_store 20/20**、
+**k8s_control_plane 7/7**。overall = `PASS_WITH_PHYSICAL_PENDING`。
+
+### 对象存储：S3 后端第一次真正执行（ADR 0008）
+- 此前的"S3 覆盖"是零执行的：boto3 不在任何依赖组里（懒加载直接 ImportError），
+  6 条用例全部 `monkeypatch` 掉 `_client()` 并注入自造的 `ClientError`。
+  现在 `tests/s3_server.py` 自起一次性 VersityGW 容器（真实 HTTP + SigV4 + XML 错误体），
+  `make test-s3` 20 例常驻。载体选型是查出来的：MinIO 仓库已归档（末次 release
+  2025-10-15）、LocalStack 已归档且许可 NOASSERTION、moto 属对 AWS 语义的二次实现
+  （拿它验证错误码判读=循环自证），故选 Apache-2.0 且当日仍在提交的 VersityGW；
+  MinIO 只用做一次性的**交叉核对**（同一次读数两台逐点一致 ⇒ 是 S3 通用行为）。
+- 修 **HEAD 无响应体导致的误判**：HeadObject 对"key 不存在"与"桶不存在"只给同一种
+  `Error.Code == "404"`，旧 `exists()` 于是把桶被删/配错读成"产物不存在"——正是它
+  docstring 声称要避免的。现在 404 分支再探一次 HeadBucket。旧的 fake 用例看不见这个，
+  是因为 fake 给 HEAD 编造了 `NoSuchBucket` 响应体（协议上不存在这种响应）。
+- 修 **异常类型跨后端不一致**：Local 抛 `ArtifactStoreError`、S3 抛裸 `ClientError`；
+  且 `verify_checksum` 用 `except Exception` 把任何存储故障一律写成
+  "artifact object missing" 并把部署推进 **FAILED 终态（终态不再重验）**。
+  现在家族分 `ArtifactNotFoundError` / `ArtifactStoreUnavailableError`：
+  只有"确实不存在"或"checksum 不符"才判 FAILED，故障返回 **503** 且记录停在
+  `downloading` 可重试（API.md 已写口径）。
+- 接通生产装配：新增 `EMBODIEDCLOUD_ARTIFACT_BACKEND=local|s3` 与四项 S3 参数，
+  由组合根选后端；`s3` 而凭据不全 → 装配期即 `BLOCKED_EXTERNAL_DEPENDENCY`，
+  不静默回退 local。新增 `[s3]` 可选依赖组（boto3），dev extra 同步带上。
+- 变异对照（本机实测）：M1 删桶探测 → 真实档红 3 条而**旧 fake 档红 0 条**；
+  M1b 同一变异跑改写后的离线档 → 红 2 条（离线档也带牙）；M2 清空"不存在"码集 →
+  真实档 5 + 离线 2；M3 verify 退回 `except Exception → _fail` → 红 2 条，
+  且失败信息原样复现了谎报（`artifact object missing: S3 head_bucket failed`）。
+
+### Docker `--gpus`：把 argv 交给守护进程自己验收（G0.19 扩到 20 例）
+- provider 的 `docker run` 命令行抽成 `run_argv()`，真实档拿**生产同款 argv**
+  `docker create` 后回读守护进程记账的 `HostConfig.DeviceRequests`：
+  `--gpus device=N` → `{"DeviceIDs":["N"],"Capabilities":[["gpu"]]}`（N=0 与 3 两档），
+  标签/Binds/env/hostNetwork 同样回读。测试不再重抄命令行。
+- 把生产 argv 原样交给 `docker run`：本机（无 NVIDIA 运行时）失败于守护进程的
+  GPU 发现（`failed to discover GPU vendor from CDI`）而非命令行用法错误，
+  且失败后不留同名容器（`--rm` 会清掉启动失败的容器）⇒ provision 重试不会被名字冲突卡住。
+  容器内**真的看得见 GPU** 仍属物理档（`scripts/gpu_acceptance.sh`），不假装验证。
+- M4 变异（把 `--gpus device={gpu_index}` 写死成 `device=0`）→ 新增的守护进程记账档
+  与既有离线档各自开火。
+
+### K8s 控制面：kind 真集群档（ADR 0009，7 例常驻）
+- `wait_ready` / `rotate_credentials` / `supports_credential_rotation` 此前从未执行：
+  唯一相关档位的前置把"要控制面"和"要 GPU"绑在一起。现在用 kind 起真集群
+  （真 kubelet/调度器/endpoints 控制器），只允许**一处** fixture 差异（container
+  `resources`），其余对象图与 GPU limit 声明全部由 `provision()` 产出并逐项回读。
+- 真集群读数：生产资源声明被集群自己拒绝（`Insufficient cpu, 1 Insufficient memory,
+  1 Insufficient nvidia.com/gpu`，节点 allocatable 实测 4 CPU / 5.8 GiB）；
+  M6 变异（`wait_ready` 直接 return True）红 3 条——含"提前放行后独立复核读到
+  `available_replicas=None`"，说明正向用例不信 provider 的判读。
+- 三条工具层事实（都实测）：strategic merge patch 对 `resources.limits` 是**按键合并**
+  （GPU limit 会在 patch 后存活）；`replace` 会因控制器先写 status 撞 409（改为读→改→写
+  有界重试）；判断"spec 是否被动过"要看 `generation` 而非 `resourceVersion`
+  （实测 740 → 744 而 spec 未变）。
+- 新增 `EMBODIEDCLOUD_K8S_KUBECONFIG`：kubernetes Python SDK 在**模块 import 时**就把
+  `KUBECONFIG` 固化成常量（读到源码 `KUBE_CONFIG_DEFAULT_LOCATION`，并本机复现：
+  进程起来后再 export 该变量 → `Invalid kube-config file`）。
+
+### 供应链：镜像配方钉死 + 机检（SUPPLY_CHAIN §2/§3/§6）
+- code-server 4.130.0 两架构 tarball 加 `sha256sum -c`（**上游这一版不发布校验文件**：
+  下载其 `SHA256SUMS.txt` 实测 `Not Found`，release notes 也无校验表 ⇒ 摘要来自本机对
+  官方制品的实算，字节数与 GitHub API 报告值 201284549 / 197540112 逐一吻合，
+  只防后续构建拿到被替换/截断的制品，不是第三方背书）；`sha256sum -c` 机制本身
+  做了正确/错误两档对照。
+- IsaacLab `v3.0.0-beta2.patch1` 钉到 commit `ffff603e…`（GitHub refs API 与
+  `git ls-remote` 两个来源同一 sha），clone 后比对 HEAD。
+- 新常驻门禁 `tests/test_supply_chain.py`：`runtime/Dockerfile*` 里每个下载步骤必须同块
+  `sha256sum -c`、每个 `git clone --branch` 必须比对 HEAD commit，并断言判据作用域非空。
+  改钉之前它对两处开火（读数的具体文件名见 ADR/登记）。
+- CI：测试镜像拉取（新增 versitygw、kindest/node）与 kind 安装（按上游 `.sha256sum` 校验）
+  移到 `make validate` **之前**——原顺序是"先 validate 后拉镜像"，档位读数永远来自
+  镜像还没缓存的那一刻。
+- 顺带更正两条文档事实错误：code-server 下载不在 `scripts/build_workspace_image.sh`
+  而在 `runtime/Dockerfile.isaaclab-workspace`；§14 的 Pod 标记实测是
+  `embodiedcloud.workspace="true"`（workspace id 在 Deployment 标签上）。
+
 ## 0.5.0 — 2026-09-26（验证纵深 + 计费预授权）
 
 ### 四档"本环境做不到"的判据变成常驻门禁

@@ -1,6 +1,6 @@
 PYTHON ?= .venv/bin/python
 UV ?= uv
-VERSION ?= 0.5.0
+VERSION ?= 0.6.0
 
 .PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane \
         lint typecheck build smoke clean check demo \

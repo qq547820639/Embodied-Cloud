@@ -1,6 +1,6 @@
 # ACCEPTANCE_GATES — EmbodiedCloud
 
-> 版本：0.5.0（2026-09-26，v0.2.1 + v0.3.0 + v0.4.0 软件面 + v0.5.0 验证纵深/预授权）。验收分级严格区分：**VERIFIED PASS** / **IMPLEMENTED BUT NOT PHYSICALLY VERIFIED** / **FAILED** / **BLOCKED_EXTERNAL_DEPENDENCY**。
+> 版本：0.6.0（2026-09-26，v0.2.1 + v0.3.0 + v0.4.0 软件面 + v0.6.0 验证纵深/预授权）。验收分级严格区分：**VERIFIED PASS** / **IMPLEMENTED BUT NOT PHYSICALLY VERIFIED** / **FAILED** / **BLOCKED_EXTERNAL_DEPENDENCY**。
 
 ## G0 软件验收（本机/CI 自动执行）
 

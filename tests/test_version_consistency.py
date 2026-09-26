@@ -12,7 +12,7 @@ def _pyproject_version() -> str:
 
 
 def test_pyproject_is_version_source_of_truth():
-    assert _pyproject_version() == "0.5.0"
+    assert _pyproject_version() == "0.6.0"
 
 
 def test_app_init_version_matches_pyproject():

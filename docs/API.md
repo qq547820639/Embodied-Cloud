@@ -1,6 +1,6 @@
 # API 参考 — EmbodiedCloud
 
-> 版本：0.5.0。完整 OpenAPI 规范见 `docs/openapi.json`（`make api-docs` 生成，CI 校验 freshness）。
+> 版本：0.6.0。完整 OpenAPI 规范见 `docs/openapi.json`（`make api-docs` 生成，CI 校验 freshness）。
 > 除标注「公开」的端点外，全部需要 `Authorization: Bearer <session-token>`；owner/org 隔离下越权一律 404（不泄露资源存在性，SECURITY.md T1）。
 
 ## 认证（公开）

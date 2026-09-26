@@ -1,14 +1,14 @@
 {
-  "version": "0.5.0",
+  "version": "0.6.0",
   "overall": "PASS_WITH_PHYSICAL_PENDING",
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 411
+      "count": 458
     },
     "test_run": {
       "status": "PASS",
-      "passed": 410,
+      "passed": 457,
       "skipped": 1,
       "failed": 0
     },
@@ -22,11 +22,19 @@
     },
     "integration_docker": {
       "status": "PASS",
-      "note": "17/17 用例在真实后端上执行"
+      "note": "20/20 用例在真实后端上执行"
     },
     "integration_browser": {
       "status": "PASS",
       "note": "11/11 用例在真实后端上执行"
+    },
+    "integration_object_store": {
+      "status": "PASS",
+      "note": "20/20 用例在真实后端上执行"
+    },
+    "integration_k8s_control_plane": {
+      "status": "PASS",
+      "note": "7/7 用例在真实后端上执行"
     },
     "lint": {
       "status": "PASS"
