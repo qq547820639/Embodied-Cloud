@@ -372,6 +372,13 @@ def test_sameness_criterion_fires_when_a_script_drifts(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 IMAGE_SBOM_SCRIPT = SCRIPTS / "image_sbom.sh"
+TRIVY_TOOL_REF_SCRIPT = SCRIPTS / "trivy_tool_ref.sh"
+# 配方层判据的覆盖面：两份消费方 + 那份唯一的工具引用定义（source 进来的）。
+TOOL_SCRIPTS = (
+    IMAGE_SBOM_SCRIPT,
+    SCRIPTS / "image_cve.sh",
+    TRIVY_TOOL_REF_SCRIPT,
+)
 
 # 判据看的是**这一步实际拉起来的东西**，不是措辞：
 # - 折掉 `\` 续行（脚本里的 `docker run` 就是三行折一句），去掉整行注释
@@ -381,7 +388,7 @@ IMAGE_SBOM_SCRIPT = SCRIPTS / "image_sbom.sh"
 #   或者直接在这行写 `aquasec/trivy:latest`，都能绕过赋值形状检查而真的把没钉的字节拉下来。
 DOCKER_PULL_RE = re.compile(r"\bdocker\s+(?:run|pull)\b")
 IMAGE_REF_RE = re.compile(
-    r"""(?<![\w/.-])                                   # 前面不能是词字符/斜杠/点（排除路径与挂载）
+    r"""(?<![\w/.$-])                                   # 前面不能是词字符/斜杠/点/$（排除路径、挂载与变量展开）
     (?:
         [A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z][A-Za-z0-9.-]*/[A-Za-z0-9._\-/:@]+  # host/repo[:tag][@digest]
       | [a-z0-9][a-z0-9._-]{1,62}/[a-z0-9][a-z0-9._-]*(?::[A-Za-z0-9._-]+)?  # 两段名（Docker Hub）
@@ -427,6 +434,10 @@ def _looks_like_image(ref: str) -> bool:
     ref = ref.strip()
     if not ref or "/" not in ref or ref[0] in "./":
         return False
+    # 还带 `$` 的是文件系统路径或变量展开（`$PWD/.trivy-cache` 这类缓存目录），
+    # 末段以点开头的也是 dot 目录/文件——两者都不是能被"钉 digest"的东西。
+    if "$" in ref or ref.rsplit("/", 1)[-1].startswith("."):
+        return False
     head = ref.split("/", 1)[0]
     if head in PATH_FIRST_SEGMENTS:
         return False
@@ -448,23 +459,68 @@ def _assigned_defaults(text: str) -> dict[str, str]:
     return out
 
 
-def _tool_image_refs(text: str) -> set[str]:
-    """这一步真正会拉下来的外部镜像引用（自有命名空间不算）。"""
-    defaults = _assigned_defaults(text)
+def _tool_image_refs_in(texts: list[str]) -> set[str]:
+    """跨文件合并后的"会被真拉起来的外部引用"集合（工具镜像与漏洞库都算）。
+
+    为什么要跨文件：`TRIVY_IMAGE` 与 `TRIVY_DB_REPOSITORY` 现在只写在一处
+    （`scripts/trivy_tool_ref.sh`，两个步骤 source 它）。只扫单个文件的话，
+    "同一个事实两份默认值各存一份"这类缺陷反而会被判据鼓励。
+    """
+    defaults: dict[str, str] = {}
+    for text in texts:
+        defaults.update(_assigned_defaults(text))
     refs: set[str] = set()
-    for line in _logical_lines(text):
-        if not DOCKER_PULL_RE.search(line):
-            continue
-        for token in IMAGE_REF_RE.findall(line):
-            if _looks_like_image(token):
-                refs.add(token.strip())
-        for var in VAR_REF_RE.findall(line):
-            if var in defaults:
-                refs.add(defaults[var])
+    for text in texts:
+        for line in _logical_lines(text):
+            if not DOCKER_PULL_RE.search(line):
+                continue
+            for token in IMAGE_REF_RE.findall(line):
+                if _looks_like_image(token):
+                    refs.add(token.strip())
+            for var in VAR_REF_RE.findall(line):
+                if var in defaults:
+                    refs.add(defaults[var])
     return {r for r in refs if r and not r.startswith(OWN_NAMESPACE)}
 
 
-def _tool_image_offenders(refs: set[str], doc: str) -> list[str]:
+def _tool_image_refs(text: str) -> set[str]:
+    """单文件版（注入夹具用它；生产判据走 `_tool_image_refs_in`）。"""
+    return _tool_image_refs_in([text])
+
+
+# 漏洞库通道**故意不钉 digest**：钉住就等于每天拿一份过期的库去说"没有漏洞"。
+# 免检不能靠沉默——要登记、定级、给理由，并与扫描到的集合双向对账（漏登记／死登记都红），
+# 用的是基础镜像例外表同一套词表与形状。
+TOOL_UNPINNED_EXCEPTIONS: dict[str, dict[str, str]] = {
+    "public.ecr.aws/aquasecurity/trivy-db:2": {
+        "grade": "accepted-risk",
+        "reason": (
+            "漏洞库按设计要每天更新：钉 digest 会让扫描长期停在一份过期库上，"
+            "把「库里还没有这条 CVE」读成「镜像没有漏洞」。承担风险的方式是留痕而不是冻结："
+            "工具镜像本身仍钉 digest，trivy 关于库下载的日志随报告一起落盘。"
+        ),
+    }
+}
+
+
+def _tool_exception_offenders(refs: set[str], registered: dict[str, dict[str, str]], doc: str) -> list[str]:
+    """例外表自己的主张：等级在词表内、理由够长、引用逐字进文档，且不许留死项。"""
+    offenders: list[str] = []
+    for ref, entry in registered.items():
+        if ref not in refs:
+            offenders.append(f"死登记（这一步已经不拉 {ref} 了，却还占着免检名额）")
+        if entry.get("grade") not in EVIDENCE_GRADES:
+            offenders.append(f"{ref} 的证据等级 {entry.get('grade')!r} 不在词表内")
+        if len(entry.get("reason", "")) < 40:
+            offenders.append(f"{ref} 的例外理由过短，不足以支撑免检")
+        if ref not in doc:
+            offenders.append(f"{ref} 免检却没登记在 docs/SUPPLY_CHAIN.md")
+    return offenders
+
+
+def _tool_image_offenders(
+    refs: set[str], doc: str, registered: dict[str, dict[str, str]] | None = None
+) -> list[str]:
     """工具镜像的两条主张：钉 digest，且钉的那份逐字进文档。
 
     为什么这一条比基础镜像更要紧：本机三通道里到得了的注册表是**第三方公开镜像**
@@ -473,10 +529,13 @@ def _tool_image_offenders(refs: set[str], doc: str) -> list[str]:
     """
     offenders: list[str] = []
     for ref in sorted(refs):
+        if ref in (TOOL_UNPINNED_EXCEPTIONS if registered is None else registered):
+            continue
         if not _is_pinned(ref):
-            offenders.append(f"镜像层 SBOM 步骤要拉起的 {ref} 没钉 digest")
+            offenders.append(f"这一步要拉起的 {ref} 没钉 digest，也没登记免检例外")
         elif ref not in doc:
-            offenders.append(f"{ref} 已被 scripts/image_sbom.sh 拉起，但 docs/SUPPLY_CHAIN.md 未逐字记录")
+            offenders.append(f"{ref} 已被脚本拉起，但 docs/SUPPLY_CHAIN.md 未逐字记录")
+    offenders += _tool_exception_offenders(refs, TOOL_UNPINNED_EXCEPTIONS if registered is None else registered, doc)
     return offenders
 
 
@@ -493,11 +552,18 @@ def _load_image_sbom_validator():
 
 def test_image_sbom_step_exists_and_is_pinned() -> None:
     doc = (REPO_ROOT / "docs" / "SUPPLY_CHAIN.md").read_text(encoding="utf-8")
-    assert IMAGE_SBOM_SCRIPT.exists(), "scripts/image_sbom.sh 不存在——镜像层 SBOM 步骤消失了"
-    refs = _tool_image_refs(IMAGE_SBOM_SCRIPT.read_text(encoding="utf-8"))
-    assert refs, "image_sbom.sh 的 docker run/pull 行上解析不到任何外部镜像引用——下面的判据会恒真"
+    missing = [str(q) for q in TOOL_SCRIPTS if not q.exists()]
+    assert not missing, f"缺了工具引用覆盖的文件：{missing}"
+    refs = _tool_image_refs_in([path.read_text(encoding="utf-8") for path in TOOL_SCRIPTS])
+    assert refs, "这三份脚本的 docker run/pull 行上解析不到任何外部引用——判据会恒真"
+    # 作用域非空之外再钉两点"谁在被扫"：SBOM 侧的工具镜像与 CVE 侧的漏洞库通道。
+    # 少任何一个都说明 source/赋值形状被改坏了，判据会悄悄退化成只看一边。
+    assert any(r.startswith("public.ecr.aws/aquasecurity/trivy:") and _is_pinned(r) for r in refs), (
+        f"钉 digest 的 trivy 工具引用没被扫到，扫描面漏了：{sorted(refs)}"
+    )
+    assert any(r.endswith("trivy-db:2") for r in refs), f"漏洞库通道没被扫到，免检表就无人对账：{sorted(refs)}"
     offenders = _tool_image_offenders(refs, doc)
-    assert not offenders, "镜像层 SBOM 步骤的配方层不合规：" + " | ".join(offenders)
+    assert not offenders, "镜像清单／漏洞扫描步骤的配方层不合规：" + " | ".join(offenders)
 
 
 def test_tool_image_criterion_fires_in_both_directions() -> None:
@@ -509,8 +575,8 @@ def test_tool_image_criterion_fires_in_both_directions() -> None:
     pinned = "example.registry/team/tool:1.0.0@sha256:" + "ab" * 32
     doc = f"…只有 {pinned} 出现在这里…"
 
-    def offenders_of(body: str) -> list[str]:
-        return _tool_image_offenders(_tool_image_refs(body), doc)
+    def offenders_of(body: str, registered: dict[str, dict[str, str]] | None = None) -> list[str]:
+        return _tool_image_offenders(_tool_image_refs(body), doc, registered or {})
 
     # (a) 改名后的赋值变量 + 没钉的默认值：赋值形状不是判据，被拉起来的引用才是
     renamed = (
@@ -530,9 +596,25 @@ def test_tool_image_criterion_fires_in_both_directions() -> None:
     assert offenders_of(f'docker run --rm {pinned} image x\n') == []
     # 注释里的注册表名不参与（判措辞会误伤实测记录）
     assert _tool_image_refs(f'# 另一条通道是 aquasec/trivy:latest\ndocker run --rm {pinned} image x\n') == {pinned}
-    # 挂载点与宿主路径不能被当成镜像（这是判据的假红侧）
+    # 挂载点、宿主路径与变量展开都不能被当成镜像（这是判据的假红侧）
+    assert _tool_image_refs('docker run --rm -v "$PWD/.trivy-cache:/root/.cache/" '
+                            f'{pinned} image x\n') == {pinned}
+
     assert _tool_image_refs("docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "
                             f'{pinned} image x > "$OUT.tmp"\n') == {pinned}
+    # 免检例外表自己的四档：没登记＝红、登记了等级不在词表＝红、理由过短＝红、
+    # 表里留着这一步已经不拉的引用（死登记）＝红；全部合规时不开火。
+    unpinned_db = "example.registry/team/db:2"
+    assert len(offenders_of(f'docker pull {unpinned_db}\n', {})) == 1
+    doc2 = f"…{unpinned_db}…"
+    good = {unpinned_db: {"grade": "accepted-risk", "reason": "x" * 40}}
+    assert _tool_image_offenders({unpinned_db}, doc2, good) == []
+    bad_grade = {unpinned_db: {"grade": "trust-me", "reason": "x" * 40}}
+    assert any("不在词表内" in o for o in _tool_image_offenders({unpinned_db}, doc2, bad_grade))
+    short = {unpinned_db: {"grade": "accepted-risk", "reason": "先放着"}}
+    assert any("过短" in o for o in _tool_image_offenders({unpinned_db}, doc2, short))
+    dead = {unpinned_db: {"grade": "accepted-risk", "reason": "x" * 40}}
+    assert any("死登记" in o for o in _tool_image_offenders(set(), doc2, dead))
     # 自有命名空间的引用确实被扫到、再被规则排除（不是"根本没匹配"）
     scanned = _tool_image_refs('docker run --rm embodiedcloud/control-plane:0.7.0 image x\n')
     assert scanned == set(), scanned

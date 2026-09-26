@@ -214,7 +214,7 @@ def main() -> int:
         })
 
     # 3) lint / type / migration / build
-    code, _ = run([PYTHON, "-m", "ruff", "check", "app", "tests", "edge_agent"])
+    code, _ = run([PYTHON, "-m", "ruff", "check", "app", "tests", "edge_agent", "scripts"])
     checks["lint"] = {"status": "PASS" if code == 0 else "FAIL"}
 
     code, _ = run([PYTHON, "-m", "mypy", "app", "edge_agent"])

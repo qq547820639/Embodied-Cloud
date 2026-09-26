@@ -437,6 +437,8 @@ docker 档 21 → 22，全套 531 → 532。
   `tests/k8s_server.py:kind_binary()` 补第三档发现位：本机 kind 在仓库同级的 `.toolcache/`
   （实测 `kind version 0.33.0`＝ADR 0009 钉的那版），上一轮能跑靠的是某个 shell 导出过
   `EMBODIEDCLOUD_KIND_BIN`，换个 shell 就静默跳 7 例；补上发现档后真集群 7/7 恢复，用时 2:08。
+- **顺手补掉它照出来的盲区**：`make image-cve`（同一份钉死的 trivy 加 `--scanners vuln`）对控制面镜像真跑出 `os-pkgs 156 / lang-pkgs 6`（HIGH 44／MEDIUM 58／LOW 58／UNKNOWN 2），而 `make audit`（uv）对这 156 条一无所知。库通道是量的不是猜的：trivy 自己 `--help` 给的默认两条（`mirror.gcr.io/aquasec/trivy-db:2`、`ghcr.io/aquasecurity/trivy-db:2`）本机分别 `connect: connection refused` 与拨号 i/o timeout，只有 ECR Public 同命名空间那条通（匿名 manifest GET 200）。漏洞库**按设计不钉 digest**（钉住＝把扫描冻在过期库上，把「库里还没有」读成「没有漏洞」），因此走登记式免检 + 双向对账，而不是偷偷放行。**这一步今天只出报告**：44 条 HIGH 一条都没分诊，先接阈值的结果会是每次都红→整步被跳过；报告与 `docker image inspect .Id` 逐字绑定（实测同值 `sha256:cd371b31…`）。
+- 工具引用收成一个文件：`scripts/trivy_tool_ref.sh`（`TRIVY_IMAGE` + `TRIVY_DB_REPOSITORY` 各一份默认值），`image_sbom.sh` 与 `image_cve.sh` 都 source 它——判据的覆盖面随之从单文件改成三份并扫，并加两档"谁在被扫"的断言，防止扫描面哪天缩水成只看一边。
 - **真产物最后落地，过程值得记**：`make image-sbom` 对 `embodiedcloud/control-plane:0.7.0` 交出
   `dist/sbom.image.cdx.json`，读数 `components=137 / deb=87 / pypi=49`，并绑到
   `docker image inspect` 的 `.Id`＝`sha256:cd371b31…`（三处同值：Id＝trivy 自报 ImageID＝purl 摘要）。
@@ -458,6 +460,43 @@ docker 档 21 → 22，全套 531 → 532。
   （分别 47／35 次工具调用），主理人只做实现、判据与定档。进判据的部分（三个注册表、socket 挂载
   接法、`--format cyclonedx` 关扫描）全部由主理人重开原文或真跑核实；普查那条 k8s 主张在进门禁前
   被复核推翻。
+
+### 镜像层漏洞扫描：162 条命中读成一张分诊表，顺手量出一个锁文件管不到的面
+
+- **`make image-cve` 真跑通了**，读数：`embodiedcloud/control-plane:0.7.0`
+  （`ImageID=sha256:cd371b31…`）→ `os-pkgs 156 / lang-pkgs 6`，按等级
+  `HIGH 44 / MEDIUM 58 / LOW 58 / UNKNOWN 2`，合计 **162 条**，冷跑 2.5s（库缓存 1.4 GB 已就位）。
+  这些是 `make audit`（uv 只导 wheel 清单）**结构上看不见**的那一层。
+- **库通道是量出来的，不是抄默认值**：trivy 默认那两条（`mirror.gcr.io/aquasec/trivy-db:2`
+  `connect: connection refused`、`ghcr.io/aquasecurity/trivy-db:2` 拨号 i/o timeout）本机都不通，
+  只有 ECR Public 同命名空间那条通（匿名 manifest 200）。工具引用收进唯一一份
+  `scripts/trivy_tool_ref.sh`，两个步骤都 source 它；配方层判据因此从"单文件扫赋值"改成
+  **跨文件扫会被拉起来的逻辑行**，并把漏洞库通道放进登记式免检（`TOOL_UNPINNED_EXCEPTIONS`，
+  grade `accepted-risk`，理由 ≥40 字）——不钉 digest 是设计：钉了就等于把扫描冻在过期库上。
+  免检表与文档双向对账：登记了但文档没写、或登记了却已经不违规，两侧都会红。
+- **分诊做下来推翻了"缺的是阈值"这个前提**。逐条读 44 条 HIGH：塌成 **17 个二进制包／8 个 CVE**，
+  9 个包（util-linux 源包的三种 epoch 写法）共享同一组 4 个 CVE，一条就占 36/44；
+  `FixedVersion` 这个键在 156 条 OS 命中里**一条都没有**（162 条里只有 6 条带它，全在 `lang-pkgs`），
+  `Status` 分布 `affected 154 / fix_deferred 2 / fixed 6`，HIGH 那一档是 `affected 43 + fix_deferred 1`。
+  **裁决：这一步保持只出报告，不接阈值**——今天接"HIGH==0"就是一条我们无能为力（43 条上游没发版、
+  1 条 Debian 自己标 `fix_deferred`）的红，正是"每次都红→整步被跳过"的死法。真正可行动的尺子是
+  `Status == fixed`：6 条全落在基础镜像自带的 `pip 25.0.1` 上（`PkgPath` 只有一条
+  `usr/local/lib/python3.12/site-packages/pip-25.0.1.dist-info/METADATA`），而 `pip` 不在 `uv.lock` 里
+  （`grep -c '^name = "pip"$' uv.lock` → `0`），所以 wheel 层清单与 `make audit` 对它全盲。
+  UNKNOWN 那 2 条 `SeveritySource` 均为 `null`、其中一条编号还是 Debian 占位 `TEMP-1147318-639065`，
+  按"看不见"处理，不折算成"没有漏洞"。
+- **给镜像打清单这件事，代价是当晚就撞出一个真缺陷**（登记表 N-22）：第一次把镜像里的
+  `pkg:pypi` 与 `uv.lock` 逐名比对，`sqlalchemy` 镜像 `2.1.1` vs 锁 `2.1.0`、`pip` 整个不在锁里。
+  根因是配方 `runtime/Dockerfile.control-plane:14` 用 `pip install ".[postgres]"` 在构建时**现解析**——
+  `make verify-lock` 全绿也管不到镜像里装的是什么。修法与选型另起一段（下一节），不改判据先不闭。
+- **自己这次重构留下的回归，是常驻用例抓住的**：把工具引用从 `image_sbom.sh` 挪进
+  `trivy_tool_ref.sh` 之后，docker 档那条接线用例还在按"赋值就住在消费脚本里"的旧前提解析单文件，
+  直接读到空集而红（`image_sbom.sh 里解析不到工具镜像赋值，这支判据会无事可做`）。修法不是把引用
+  抄回两处，而是让解析面跟着"source 关系"走——`_tool_image_refs_in([消费方, 被 source 的那份])`，
+  并把原判据的"非空"升级成"**恰好一份**"，这样以后多出一份也不会被 `sorted()[0]` 悄悄挑掉。
+- **lint 覆盖面补一格**：`make lint` 原来只扫 `app tests edge_agent`，而常驻用例 import 的
+  `scripts/check_image_sbom.py` 不在里面——本轮它确实有一行 123>120 而门禁全绿。把 `scripts` 纳入
+  lint 范围（`ruff check app tests edge_agent scripts` → `All checks passed!`），以后量具自身也在闸内。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

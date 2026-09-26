@@ -5,13 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# 工具镜像按 digest 钉死，理由比钉基础镜像更硬：这台机器上到得了的那个注册表是
-# **第三方镜像站/公开镜像**，字节不是从项目自己的构建流水线来的；只有内容摘要能把
-# "拿到的东西"和"想要的东西"对上。三通道本机实测（2026-09-26）：
-#   docker.io（daemon 走配置里的镜像站 docker.1panel.live）→ TLS handshake timeout
-#   ghcr.io                                               → dial tcp 20.205.243.164:443 i/o timeout
-#   public.ecr.aws/aquasecurity/trivy                     → 通（下面这份 digest 就是从它取的）
-TRIVY_IMAGE="${TRIVY_IMAGE:-public.ecr.aws/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969}"
+# 工具镜像的钉法只有一份（与 make image-cve 共用），三通道实测读数与理由记在那里。
+. "$(dirname "$0")/trivy_tool_ref.sh"
 IMAGE="${CONTROL_IMAGE:-embodiedcloud/control-plane:0.7.0}"
 OUT="${IMAGE_SBOM_OUT:-dist/sbom.image.cdx.json}"
 PYTHON="${PYTHON:-.venv/bin/python}"

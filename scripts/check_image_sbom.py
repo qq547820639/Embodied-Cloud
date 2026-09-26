@@ -246,7 +246,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("sbom", nargs="?", type=Path)
     parser.add_argument("image_ref", nargs="?", default="")
-    parser.add_argument("--image-id", default="", help="docker image inspect 的 .Id，用来钉住清单描述的就是这个镜像的字节")
+    parser.add_argument("--image-id", default="", help="docker image inspect 的 .Id，钉住清单描述的就是这个镜像的字节")
     parser.add_argument("--self-test", action="store_true", help="注入反例，验每条判据都能单独开火")
     args = parser.parse_args(argv)
 

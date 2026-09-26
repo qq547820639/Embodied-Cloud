@@ -7,6 +7,8 @@ __pycache__/
 .env
 .venv/
 dist/
+.trivy-cache/
+
 build/
 *.egg-info/
 smoke-embodiedcloud.db

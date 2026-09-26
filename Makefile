@@ -6,7 +6,7 @@ VERSION ?= 0.7.0
         lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
-        release api-docs validate lock verify-lock sbom image-sbom audit supply-chain
+        release api-docs validate lock verify-lock sbom image-sbom image-cve audit supply-chain
 
 install:
 	python3.12 -m venv .venv
@@ -49,7 +49,7 @@ policy-bench:
 	$(PYTHON) -m tests.scheduler_policy_lab
 
 lint:
-	$(PYTHON) -m ruff check app tests edge_agent
+	$(PYTHON) -m ruff check app tests edge_agent scripts
 	@for f in scripts/*.sh runtime/workspace-entrypoint.sh; do bash -n "$$f"; done
 
 typecheck:
@@ -124,6 +124,10 @@ sbom:
 # （那条要能在无 docker 的机器上跑）。产出前先确认这两点，缺任何一点都退 2 而不是静默出空文件。
 image-sbom:
 	./scripts/image_sbom.sh
+
+# 镜像层漏洞扫描（OS 包那一层的盲区）：今天只出报告，不当门禁——44 条 HIGH 未分诊。
+image-cve:
+	./scripts/image_cve.sh
 
 audit:
 	@$(UV) audit --locked

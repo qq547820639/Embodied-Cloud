@@ -888,15 +888,19 @@ def test_pinned_sbom_tool_actually_produces_a_checkable_image_sbom(tmp_path: Pat
     from tests.test_supply_chain import (
         IMAGE_SBOM_SCRIPT,
         REPO_ROOT,
+        TRIVY_TOOL_REF_SCRIPT,
         _base_refs,
         _is_pinned,
         _load_image_sbom_validator,
-        _tool_image_refs,
+        _tool_image_refs_in,
     )
 
-    refs = _tool_image_refs(IMAGE_SBOM_SCRIPT.read_text(encoding="utf-8"))
-    assert refs, f"{IMAGE_SBOM_SCRIPT.name} 里解析不到工具镜像赋值，这支判据会无事可做"
-    tool = sorted(refs)[0]
+    # 工具引用被收进单一来源（image_sbom.sh 只 source 它），所以解析面必须是"消费方 + 被
+    # source 的那份"两文件合起来：只看 image_sbom.sh 会读到空集，判据就退化成无事可做。
+    texts = [IMAGE_SBOM_SCRIPT.read_text(encoding="utf-8"), TRIVY_TOOL_REF_SCRIPT.read_text(encoding="utf-8")]
+    refs = _tool_image_refs_in(texts)
+    assert len(refs) == 1, f"这一步应当只拉起一份外部工具镜像，实际解析到 {sorted(refs)}"
+    tool = next(iter(refs))
 
     subjects = [r for _, r in _base_refs([REPO_ROOT / "runtime" / "Dockerfile.control-plane"]) if _is_pinned(r)]
     assert subjects, "控制面配方没有钉 digest 的 FROM，被审对象无从选取"
