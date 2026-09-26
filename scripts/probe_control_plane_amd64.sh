@@ -37,16 +37,55 @@ echo "== 4) 跑与 Dockerfile 里同一行命令"
 docker exec -w /app \
   -e UV_LINK_MODE=copy -e UV_PYTHON_DOWNLOADS=0 \
   "$NAME" uv sync --frozen --no-dev --extra postgres --no-install-project --no-editable 2>&1 | tail -8
-echo "sync_rc=${PIPESTATUS[0]}"
+SYNC_RC=${PIPESTATUS[0]}
+echo "sync_rc=$SYNC_RC"
 
-echo "== 5) 验收：装的是 x86_64 轮子吗，两个 C 扩展能 import 吗"
+echo "== 5) 验收：装的是 x86_64 的原生扩展吗，两个 C 扩展能 import 吗"
+PROBE_OUT=$(
 docker exec -w /app -e PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin" "$NAME" sh -c '
   python -c "import platform, sqlalchemy, psycopg; print(\"machine=\", platform.machine(), \"sqlalchemy=\", sqlalchemy.__version__, \"psycopg=\", psycopg.__version__)"
   ls /app/.venv/lib/python3.12/site-packages | grep -c . | sed "s/^/site-packages 条目= /"
-  ls /app/.venv/lib/python3.12/site-packages | grep -oE "x86_64|aarch64|arm64" | sort | uniq -c
+  python -c "
+import glob, struct, sys
+NATIVE = glob.glob(\"/app/.venv/lib/python3.12/site-packages/**/*.so\", recursive=True)
+codes = {62: \"x86-64\", 183: \"AArch64\"}
+dist = {}
+for p in NATIVE:
+    with open(p, \"rb\") as f:
+        head = f.read(20)
+    if head[:4] != bytes([0x7F]) + b\"ELF\":
+        continue
+    em = struct.unpack_from(\"<H\", head, 18)[0]
+    k = codes.get(em, \"e_machine=\" + str(em))
+    dist[k] = dist.get(k, 0) + 1
+print(\".so 文件数=\", len(NATIVE), \"  按 ELF e_machine 分布=\", dist)
+# 三条判决，全部由本轮真读数支撑：分母为 0 不算干净（那说明扫描没碰到东西）；
+# 混进 AArch64 说明模拟没生效或轮子选错了；只有 x86-64 一种且非空才算通过。
+if not NATIVE:
+    print(\"VERDICT=FAIL 一个原生扩展都没扫到，这条判据此刻与恒真同形\"); sys.exit(1)
+if set(dist) != {\"x86-64\"}:
+    print(\"VERDICT=FAIL 原生扩展里出现了非 x86-64 的架构\"); sys.exit(1)
+print(\"VERDICT=PASS 全部\", len(NATIVE), \"个原生扩展都是 x86-64\")
+"
+  archcheck_rc=$?
   alembic --version
-' 2>&1 | tail -12
+  echo "archcheck_rc=$archcheck_rc"
+' 2>&1)
+printf '%s\n' "$PROBE_OUT" | tail -14
+ARCH_VERDICT=$(printf '%s\n' "$PROBE_OUT" | sed -n 's/^VERDICT=\([A-Z]*\).*/\1/p' | tail -1)
+echo "arch_verdict=${ARCH_VERDICT:-缺席}（第 6 步的退出码就取这一行）"
 
 echo "== 6) 收尾"
 docker rm -f "$NAME" >/dev/null && echo "容器已清（$NAME）"
 rm -f "$SCRATCH/uv"
+
+# 判据要能被机器消费，所以两条读数各自进退出码（此前脚本只打印，退码恒 0，
+# 于是"打印了 FAIL"与"这一步没跑"在 make/CI 那一层完全同形）。
+FAIL=""
+[ "${SYNC_RC:-1}" = "0" ] || FAIL="$FAIL sync_rc=${SYNC_RC:-未取到}"
+[ "$ARCH_VERDICT" = "PASS" ] || FAIL="$FAIL arch_verdict=${ARCH_VERDICT:-缺席}"
+if [ -n "$FAIL" ]; then
+  echo "== VERDICT=FAIL（amd64 侧复算没通过）:$FAIL"
+  exit 1
+fi
+echo "== VERDICT=PASS（同一行 uv sync 在 x86_64 运行时里成立，且 22 个原生扩展全是 x86-64）"

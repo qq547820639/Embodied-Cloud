@@ -181,6 +181,22 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
   而那恰恰是这一档存在的理由。若需要判断"是不是卡住了"，比较进程的 CPU TIME 与 ELAPSED，
   再看 `sample <pid> 1` 的叶子帧（本轮看到的是 `psycopg … poll`，即 PG 档在跑，只是慢）。
 
+- **每轮收尾的"干净树复算"（此前只活在会话记忆里，本轮第一次写下来）**：共享的 `.venv` 是
+  **可编辑安装**，`import app` 会指回主树，所以在主树里跑绿并不等于"这份发布物自己绿"。
+  复算要**同时换树和换环境**：`git worktree add <别处> HEAD` → 在那个目录里
+  `uv sync --frozen --extra dev --extra postgres --extra s3`（由 `uv.lock` 造一份新 venv，别复用主树的）
+  → `EMBODIEDCLOUD_KIND_BIN=<kind 路径> make validate` → `git diff --exit-code docs/VALIDATION.json docs/VALIDATION.md`
+  （绿了但报告被改动＝提交里的读数不是这棵树算出来的）→ 收尾 `git worktree remove`。
+  本轮实测：`app_from=` 落在 worktree 内、`prefix=` 是 worktree 自己的 `.venv`、`make validate` 退 0、
+  `544 passed / 1 skipped / 0 failed`、新鲜度那条 `git diff --exit-code` 无输出。
+- **`make amd64-probe` 现在带退出码**：第 6 步汇总 `sync_rc` 与 `arch_verdict`，任一不成立 `exit 1` 并点名是哪一半
+  （此前无论打印什么都退 0，"打印了 FAIL"与"这一步没跑"在 `make`/CI 那一层同形）。架构判据也从
+  "扫 site-packages 目录名"换成"逐个 `.so` 读 ELF 头的 `e_machine`"（62＝x86-64、183＝AArch64，
+  并且**一个 `.so` 都没扫到直接判 FAIL**，分母为 0 不算干净）。本轮读数：`.so 文件数= 22`、
+  分布 `{'x86-64': 22}`、`machine= x86_64`、`sqlalchemy= 2.1.0 psycopg= 3.3.6`、`alembic 1.20.0`、
+  `make_rc=0`（连跑两遍复现）。旧那条按目录名扫的读数打出来是 `1`——不是"只有 1 个原生扩展"，
+  而是装完之后 `.dist-info` 目录名被归一化掉了平台标签，那条扫法数不清场上有 22 个原生二进制。
+
 ## 8. 边缘设备（edge agent）
 
 设备侧是独立包 `edge_agent/`（只依赖标准库，不 import `app`），装在机器人上：
