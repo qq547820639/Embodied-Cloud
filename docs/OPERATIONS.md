@@ -133,6 +133,17 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
   同一族的第三处是 4 份 `for _ in range(40): sleep(0.05)` 的 workspace 轮询：**2s 不是判据预算，
   是 worker 的重试节奏**（backoff 1s + 2s ⇒ 第 3 次尝试最早落在 3s 之后），现已统一到
   `tests/settle.py:await_workspace_settled`（终态才返回，等不到就报前提未达成 + 池内空闲卡数）。
+- **容器侧的两条宿主前提，本轮各咬过一次，读法写在前面**。①这台机器的 `/tmp` **不是共享进 colima 虚拟机的挂载点**：`-v /tmp/x:/out` 之后容器内写 `/out/f` 成功、宿主 `/tmp/x` 依然是空的，而把挂载点换成工程目录下的子目录同一分钟就可见——所以「产物没落盘」这种读数先怀疑夹具，别急着记在被测程序头上（`-v /tmp/probe.py:/probe.py` 会以 "can't find `__main__` module" 的形式露出同一只空挂载）。要往容器里送脚本就用 stdin：`docker run -i … python - < script.py`。②守护进程所在的 VM 会**整台停掉**：本轮 17:14 还能 pull，17:21 就报 `dial unix ~/.colima/default/docker.sock: no such file or directory`，`colima list` 里 default 变 Stopped；`colima start default`（约 20s）恢复，镜像缓存不丢。docker 档整档突然干净跳过时先读这条，别读成「这档今天没需求」。
+- **`kind` 不在 PATH 上，而在仓库同级的 `.toolcache/` 里**：`tests/k8s_server.py:kind_binary()` 现在按「显式覆盖 → PATH → 固定候选位」三档找。此前整档能跑靠的是某个 shell 导出过 `EMBODIEDCLOUD_KIND_BIN`，换个 shell 就静默跳 7 例——**跳过长得像「今天没跑到」，不像「前提没了」**，所以这一格修在发现逻辑里，而不是写进文档要求人工导出（2026-09-26 实测 `/Volumes/Extra/CodeProj/.toolcache/kind` = kind version 0.33.0，正是 ADR 0009 钉的版本；补上发现档后真集群 7/7 恢复，用时 2:08）。
+- **外网通道会分道失效：构建／取工具这类步骤先判通道，再谈代码**。本轮同一晚三种形状各自独立——
+  守护进程经它配置里的镜像站取 docker.io 时 TLS 握手超时（上一轮它是这台机器**唯一通**的那条），
+  `ghcr.io` 拨号 i/o timeout，容器内对 `files.pythonhosted.org` 的 TLS 握手超时。
+  把"控制面镜像建不出来"定成通道问题而不是配方问题，靠的是同一时刻的并排对照：
+  容器内取 `pypi.org/simple/setuptools/` 是 200／535 KB／1.3s，宿主 `curl` 同一条 CDN URL 拿得到 302，
+  而同一份配方上一轮 160s 构建成功过（读数分别见 SUPPLY_CHAIN §2 与 §8 第 3 项）。
+  **不要**用加大构建超时、换基础镜像或"先出一个空产物"去洗它——那等于把外网波动记成代码变更，
+  还会让下一个读报告的人以为配方动过。`make image-sbom` 在这种情况下的正确行为是退 2 并说清缺哪件前提。
+
 - **真集群档在"引导阶段"整档红，先看宿主负载再看代码**。本轮实测到一次
   `kind create cluster` 失败在 `Preparing nodes ✗`，原因行是
   `could not find a log line that matches "Reached target .*Multi-User System.*|detected cgroup v1"`

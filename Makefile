@@ -6,7 +6,7 @@ VERSION ?= 0.7.0
         lint typecheck build smoke clean check demo \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
-        release api-docs validate lock verify-lock sbom audit supply-chain
+        release api-docs validate lock verify-lock sbom image-sbom audit supply-chain
 
 install:
 	python3.12 -m venv .venv
@@ -119,6 +119,11 @@ sbom:
 	@mkdir -p dist
 	@$(UV) export --frozen --format cyclonedx1.5 > dist/sbom.cdx.json
 	@$(PYTHON) -c "import json;d=json.load(open('dist/sbom.cdx.json'));print('[sbom] dist/sbom.cdx.json', d['bomFormat'], d['specVersion'], len(d['components']), 'components')"
+
+# 镜像层 SBOM：需要真实守护进程 + 已构建的控制面镜像，因此**不在** supply-chain 链里
+# （那条要能在无 docker 的机器上跑）。产出前先确认这两点，缺任何一点都退 2 而不是静默出空文件。
+image-sbom:
+	./scripts/image_sbom.sh
 
 audit:
 	@$(UV) audit --locked

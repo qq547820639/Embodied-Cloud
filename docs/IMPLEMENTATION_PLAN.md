@@ -37,7 +37,7 @@
 - GPU host preflight/build/run 脚本
 - WebRTC 端口/安全约束固化
 
-**外部依赖 Gate：** 必须在真实 NVIDIA GPU 主机依次完成 G1/G2/G3，详见 `GPU_HOST.md`。当前执行环境没有 Docker daemon / NVIDIA GPU，所以不能伪造这一步的“通过”。
+**外部依赖 Gate：** 必须在真实 NVIDIA GPU 主机依次完成 G1/G2/G3，详见 `GPU_HOST.md`。当前执行环境有 Docker 守护进程（本轮 `docker version` → Server 29.5.2），**没有的是 NVIDIA GPU**，所以不能伪造这一步的”通过”。
 
 ## Iteration 3 — 商业 Beta 基础设施【下一步 1–7 天】
 

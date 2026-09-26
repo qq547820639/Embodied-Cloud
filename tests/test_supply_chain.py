@@ -13,6 +13,7 @@ push），`--branch` 不保证两次构建拿到同一份代码。
 docs/CURRENT_STATE.md 的 supply-chain 行）。
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -363,3 +364,97 @@ def test_sameness_criterion_fires_when_a_script_drifts(tmp_path: Path) -> None:
 
     unrelated = script("docker run --rm other.registry/team/sidecar:1.0.0\n")
     assert _sameness_offenders(_dockerfiles(tmp_path), unrelated) == []
+
+
+# ---------------------------------------------------------------------------
+# 镜像层 SBOM 步骤（SUPPLY_CHAIN §5 / §8 第 3 条）
+# ---------------------------------------------------------------------------
+
+IMAGE_SBOM_SCRIPT = SCRIPTS / "image_sbom.sh"
+
+# 只认"默认值即生效引用"这一条赋值形状（`FOO_IMAGE="${FOO_IMAGE:-<ref>}"`），不扫全文：
+# 脚本正文的注释里会提到别的注册表名（三通道实测记录），把它们也当成"消费中的引用"
+# 会把判据变成对措辞的红——那是判错对象。
+TOOL_IMAGE_ASSIGN_RE = re.compile(r'^\w+_IMAGE="\$\{\w+:-(?P<ref>[^"}]+)\}"$', re.MULTILINE)
+
+
+def _tool_image_refs(text: str) -> set[str]:
+    """这一步真正拉起来用的外部工具镜像引用（自有命名空间不算）。"""
+    refs = {m.group("ref") for m in TOOL_IMAGE_ASSIGN_RE.finditer(text)}
+    return {r for r in refs if not r.startswith(OWN_NAMESPACE)}
+
+
+def _tool_image_offenders(refs: set[str], doc: str) -> list[str]:
+    """工具镜像的两条主张：钉 digest，且钉的那份逐字进文档。
+
+    为什么这一条比基础镜像更要紧：本机三通道里到得了的注册表是**第三方公开镜像**
+    （实测读数记在脚本头注释与 §5），字节不经过我们自己的构建流水线；摘要就是把
+    "拿到的东西"和"想要的东西"对上的唯一手段。文档只写 tag 等于把移动的东西当成钉死的。
+    """
+    offenders: list[str] = []
+    for ref in sorted(refs):
+        if not _is_pinned(ref):
+            offenders.append(f"镜像层 SBOM 步骤的工具镜像 {ref} 没钉 digest")
+        elif ref not in doc:
+            offenders.append(f"{ref} 已钉进 scripts/image_sbom.sh，但 docs/SUPPLY_CHAIN.md 未逐字记录")
+    return offenders
+
+
+def _load_image_sbom_validator():
+    """按仓库既有做法（tests/test_version_consistency.py）从路径加载量具，不复制实现。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_image_sbom", IMAGE_SBOM_SCRIPT.parent / "check_image_sbom.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_image_sbom_step_exists_and_is_pinned() -> None:
+    doc = (REPO_ROOT / "docs" / "SUPPLY_CHAIN.md").read_text(encoding="utf-8")
+    assert IMAGE_SBOM_SCRIPT.exists(), "scripts/image_sbom.sh 不存在——镜像层 SBOM 步骤消失了"
+    refs = _tool_image_refs(IMAGE_SBOM_SCRIPT.read_text(encoding="utf-8"))
+    assert refs, "image_sbom.sh 里解析不到任何工具镜像赋值——下面的判据会恒真"
+    offenders = _tool_image_offenders(refs, doc)
+    assert not offenders, "镜像层 SBOM 步骤的配方层不合规：" + " | ".join(offenders)
+
+
+def test_tool_image_criterion_fires_in_both_directions() -> None:
+    """注入三档：裸 tag、钉了但没进文档、钉了且进了文档——第三档必须不开火。"""
+    doc = "…只有 example.registry/team/tool:1.0.0@sha256:" + "ab" * 32 + " 出现在这里…"
+    bare = _tool_image_offenders({"example.registry/team/tool:1.0.0"}, doc)
+    assert len(bare) == 1 and "没钉 digest" in bare[0], bare
+    undocumented = _tool_image_offenders({"example.registry/team/tool:2.0.0@sha256:" + "cd" * 32}, doc)
+    assert len(undocumented) == 1 and "未逐字记录" in undocumented[0], undocumented
+    assert _tool_image_offenders({"example.registry/team/tool:1.0.0@sha256:" + "ab" * 32}, doc) == []
+    # 自有命名空间的赋值不参与这条判据（工具镜像不可能是我们自己的）
+    assert _tool_image_refs('IMAGE="${IMAGE:-embodiedcloud/control-plane:0.7.0}"\n') == set()
+
+
+def test_image_sbom_validator_fires_per_clause() -> None:
+    """产出侧判据的每一条都要单独开火，合规夹具整体不开火——与量具自己的 --self-test 同源。"""
+    v = _load_image_sbom_validator()
+    ref = "embodiedcloud/control-plane:0.7.0"
+    good = v._compliant()
+    assert v.sbom_offenders(good, ref) == []
+
+    no_pypi = json.loads(json.dumps(good))
+    no_pypi["components"] = [c for c in no_pypi["components"] if not str(c.get("purl")).startswith("pkg:pypi/")]
+    one = v.sbom_offenders(no_pypi, ref)
+    assert len(one) == 1 and "pkg:pypi" in one[0], one
+
+    no_deb = json.loads(json.dumps(good))
+    no_deb["components"] = [c for c in no_deb["components"] if not str(c.get("purl")).startswith("pkg:deb/")]
+    one = v.sbom_offenders(no_deb, ref)
+    assert len(one) == 1 and "pkg:deb" in one[0], one
+
+    floating = json.loads(json.dumps(good))
+    floating["metadata"]["component"]["purl"] = "pkg:oci/control-plane?arch=arm64"
+    one = v.sbom_offenders(floating, ref)
+    assert len(one) == 1 and "sha256" in one[0], one
+
+    # 落盘失败这一类：判据必须报「文件不存在」，而不是抛异常或读成合规
+    missing = v.check_file(REPO_ROOT / "definitely-not-here.cdx.json", ref)
+    assert len(missing) == 1 and "不存在" in missing[0], missing
+

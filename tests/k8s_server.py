@@ -26,10 +26,13 @@ import subprocess
 import tempfile
 import time
 import uuid
+from pathlib import Path
 
 DEFAULT_NODE_IMAGE = "kindest/node:v1.37.0"
 GATE_SENTINEL = "K8S_CONTROL_PLANE_PENDING"
 _READY_TIMEOUT_SECONDS = 300
+# PATH 与显式覆盖都落空后的一批固定候选位（本机实测见 kind_binary() 的说明）。
+TOOLCACHE_CANDIDATES = (Path(__file__).resolve().parents[2] / ".toolcache" / "kind",)
 
 _live: set[str] = set()
 
@@ -39,7 +42,24 @@ def node_image() -> str:
 
 
 def kind_binary() -> str | None:
-    return os.environ.get("EMBODIEDCLOUD_KIND_BIN") or shutil.which("kind")
+    """找 kind：显式覆盖 → PATH → 仓库同级的工具缓存。
+
+    为什么要有第三档（2026-09-26 实测）：这台机器上 kind 装在
+    `/Volumes/Extra/CodeProj/.toolcache/kind`（`kind version 0.33.0`，正是 ADR 0009 钉的那个版本），
+    而它不在默认 PATH 上。上一轮能跑到 7/7 靠的是**当时那个 shell 导出过**
+    `EMBODIEDCLOUD_KIND_BIN`——把"必须先导出某个变量"当复现入口是脆的：换一个 shell
+    整档就静默跳过，而跳过的读数长得和通过不一样、却很容易被当成"这档今天没跑到"忽略掉。
+    """
+    override = os.environ.get("EMBODIEDCLOUD_KIND_BIN")
+    if override:
+        return override
+    on_path = shutil.which("kind")
+    if on_path:
+        return on_path
+    for candidate in TOOLCACHE_CANDIDATES:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
 def _docker(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:

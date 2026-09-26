@@ -15,6 +15,7 @@ pull_artifact/_streaming_workspace_running/_assert_streaming_slot_available。
 缺件时整档干净跳过，skip 文案带 DOCKER_VALIDATION_PENDING 供 release gate 登记。
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -663,6 +664,108 @@ def test_provider_argv_is_accepted_by_the_daemon_and_gpu_failure_is_not_a_usage_
     assert _docker("inspect", "-f", "{{.State.Status}}", name).returncode != 0
 
 
+def _pull_verdict_action(daemon_reading: str, verdict: str, detail: str) -> tuple[str, str]:
+    """把"守护进程取不到 + 第二条通道的读数"映射成 (动作, 给读者看的一句话)。
+
+    纯函数是为了能被常驻用例逐档打靶（这一支判据今晚真被镜像站的一次 `not found` 打过，
+    但下一轮多半是绿的——不把它抽出来，分流逻辑就只能等下一次故障才第一次运行）。
+    动作只有三种：`skip`（通道故障，主张未获证）、`red_pin`（两条传输都说没有＝钉错了）、
+    `red_undecided`（两条通道一条说没有、另一条自己也不通＝无法定案，留着别洗）。
+    """
+    if verdict == "present":
+        return (
+            "skip",
+            f"{GATE_SENTINEL}: 守护进程这条传输答 not found，第二条传输确认该摘要存在（{detail}）"
+            f"⇒ 判为通道故障而非配方错误，主张本轮未获证。daemon 读数：{daemon_reading}",
+        )
+    if verdict == "absent":
+        return "red_pin", f"两条独立传输都说这份摘要不存在 ⇒ 钉进配方的引用是错的：{daemon_reading}；{detail}"
+    return "red_undecided", f"守护进程取不到、独立通道也无法定案（{detail}）：{daemon_reading}"
+
+
+def test_independent_digest_read_discriminates_present_from_absent() -> None:
+    """定案用的那条第二通道必须自己会分正反：真摘要＝present、翻一位＝absent。
+
+    它若对坏摘要也回 present，上面那档 `skip` 就成了免检通道——任何钉错的 digest 都能靠
+    "镜像站说不认识＋这条通道说存在"变成永久跳过。三档各有出口，`unknown` 走前提缺失。
+    """
+    from tests.test_supply_chain import REPO_ROOT, _base_refs, _is_pinned
+
+    pinned = [r for _, r in _base_refs([REPO_ROOT / "runtime" / "Dockerfile.control-plane"]) if _is_pinned(r)]
+    assert pinned, "没有钉 digest 的 FROM，无法取真摘要做对照"
+    ref = pinned[0]
+    digest = ref.rsplit("@sha256:", 1)[1]
+
+    good_verdict, good_detail = _independent_digest_read(ref, "sha256:" + digest)
+    if good_verdict == "unknown":
+        pytest.skip(f"{GATE_SENTINEL}: 第二通道本身不可达，无法给这支对照定档：{good_detail}")
+    assert good_verdict == "present", f"配方里钉着的真摘要在第二通道不是 present：{good_verdict} / {good_detail}"
+
+    flipped = ("0" if digest[0] != "0" else "1") + digest[1:]
+    bad_verdict, bad_detail = _independent_digest_read(ref, "sha256:" + flipped)
+    assert bad_verdict == "absent", f"翻掉一位的摘要竟然不是 absent（{bad_verdict} / {bad_detail}）⇒ 分流逻辑不可信"
+
+    # 映射不出的仓库必须落到 unknown，不能靠猜把别家的名字拼到官方库前缀上
+    other = "registry.example.com/team/app:1.0.0@sha256:" + digest
+    assert _independent_digest_read(other, "sha256:" + digest)[0] == "unknown"
+
+
+def test_pull_verdict_action_has_three_distinct_exits() -> None:
+    """三种读数组合各自映射到不同动作，且都不是一句空话（消息里必须带两条读数）。"""
+    skip_msg = _pull_verdict_action("daemon: not found", "present", "HTTP 200 / 10373 B")
+    red_pin = _pull_verdict_action("daemon: not found", "absent", "独立通道 404 Not Found")
+    undecided = _pull_verdict_action("daemon: not found", "unknown", "独立通道不可用 URLError")
+    assert skip_msg[0] == "skip" and GATE_SENTINEL in skip_msg[1], skip_msg
+    assert red_pin[0] == "red_pin" and "钉进配方的引用是错的" in red_pin[1], red_pin
+    assert undecided[0] == "red_undecided" and "无法定案" in undecided[1], undecided
+    assert len({skip_msg[0], red_pin[0], undecided[0]}) == 3
+
+
+def _independent_digest_read(ref: str, digest: str) -> tuple[str, str]:
+    """绕开守护进程那条传输，问另一个注册表："这份内容到底在不在"。
+
+    返回 `present` / `absent` / `unknown` 三档之一 + 一句读数。判据不是"HTTP 200 就算在"：
+    内容地址存储里"同一份东西"的定义是**逐字节重算的 sha256 与钉住的摘要相等**，
+    所以这里取回 manifest body 自己算一遍（2026-09-26 实测：`python` 官方库那份
+    10373 B、重算相符；把首位十六进制翻掉后同一通道回 404 —— 两个方向都验过才敢用它定案）。
+    """
+    import hashlib
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    repo = ref.split("@", 1)[0].split(":", 1)[0]
+    if "/" in repo:
+        return "unknown", f"没有为 {repo} 建立第二通道映射（只覆盖 Docker Hub 官方库）"
+    base = "https://public.ecr.aws"
+    scope = f"repository:docker/library/{repo}:pull"
+    accept = "application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json"
+
+    def _get(url: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+        # S310: URL 由本函数外的常量拼出（public.ecr.aws + 仓库名 + 摘要），无用户输入
+        req = urllib.request.Request(url, headers=headers or {})  # noqa: S310
+        with urllib.request.urlopen(req, timeout=25) as resp:  # noqa: S310
+            return resp.status, resp.read()
+
+    try:
+        token = _json.loads(_get(f"{base}/token/?service=public.ecr.aws&scope={scope}")[1])["token"]
+        status, body = _get(
+            f"{base}/v2/docker/library/{repo}/manifests/{digest}",
+            {"Authorization": f"Bearer {token}", "Accept": accept},
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return "absent", "独立通道 404 Not Found"
+        return "unknown", f"独立通道 HTTP {exc.code}"
+    except Exception as exc:  # 网络/超时/JSON 解析：这一档就是"无法定案"，不假装成任何一个结论
+        return "unknown", f"独立通道不可用 {type(exc).__name__}: {str(exc)[:120]}"
+    if status != 200:
+        return "unknown", f"独立通道 HTTP {status}"
+    same = hashlib.sha256(body).hexdigest() == digest.split(":", 1)[1]
+    detail = f"独立通道 HTTP {status} / {len(body)} B / 重算 sha256 {'与钉住的值相等' if same else '不相等'}"
+    return ("present" if same else "absent"), detail
+
+
 def test_pinned_base_of_the_control_plane_recipe_is_fetchable():
     """配方里钉死的基础镜像必须能被"构建用的那条传输"取到：把一次性实测变常驻判据。
 
@@ -690,9 +793,20 @@ def test_pinned_base_of_the_control_plane_recipe_is_fetchable():
         low = (pulled.stderr or "").lower()
         if any(k in low for k in ("timeout", "dial tcp", "no such host", "connection refused", "unreachable")):
             pytest.skip(f"{GATE_SENTINEL}: 基础镜像引用无法核验（registry 不可达）：{pulled.stderr[-200:]}")
-        raise AssertionError(
-            f"钉进配方的基础镜像取不到（这条引用一旦被构建使用就会红）：{ref}\n{pulled.stderr[-400:]}"
-        )
+        # 守护进程的 docker.io 传输今天走的是它配置里的第三方镜像站（错误串里能看见
+        # `docker.1panel.live`），而镜像站对**有效**的摘要也会回 `not found`（2026-09-26 实测：
+        # 同一份 `python:3.12-slim@sha256:f77ac9e4…` 上一轮经同一条传输 pull 成功、本轮回 not found）。
+        # 所以这里不能"取不到就红"，也不能"取不到就跳"——用第二条独立传输定案，
+        # 三个方向各有出口：两边都说没有＝钉错了，必须红；镜像站说没有而独立通道逐字节确认有
+        # ＝通道故障，报"前提未达成 + 两条读数"；独立通道自己也不通＝无法定案，如实留红。
+        digest = ref.rsplit("@sha256:", 1)[1]
+        verdict, detail = _independent_digest_read(ref, "sha256:" + digest)
+        daemon_reading = (pulled.stderr or "").strip().splitlines()[-1][:180]
+        action, message = _pull_verdict_action(daemon_reading, verdict, detail)
+        if action == "skip":
+            pytest.skip(message)
+        raise AssertionError(message)
+
 
     info = _docker("image", "inspect", "--format", "{{.Architecture}}|{{.Os}}|{{.Id}}", ref, timeout=60)
     assert info.returncode == 0, f"pull 成功但 inspect 读不到：{info.stderr[-200:]}"
@@ -718,6 +832,12 @@ def test_pinned_base_of_the_control_plane_recipe_is_fetchable():
             )
         assert (neg.stderr or "").strip(), "负向对照 pull 失败却没有任何错误文本，读数不可归因"
         control = f"开火（pull 失败：{neg.stderr.strip().splitlines()[-1][:120]}）"
+        # 第二通道也不能是橡皮图章：同一个翻转摘要在它那里必须同样"不存在"，
+        # 否则上面那条"镜像站说没有＋独立通道说有 ⇒ 判为通道故障"的分流就永远没有反面。
+        i_verdict, i_detail = _independent_digest_read(ref, "sha256:" + flipped)
+        if i_verdict != "absent":
+            raise AssertionError(f"翻转后的摘要在独立通道不是 absent（读作 {i_verdict}）：{i_detail}")
+        control += f"；独立对照（翻转摘要）{i_verdict}（{i_detail}）"
     else:
         control = "未跑（置 EMBODIEDCLOUD_RECIPE_BASE_CONTROL=1 开火；2026-09-26 已实测开火）"
 
@@ -728,3 +848,82 @@ def test_pinned_base_of_the_control_plane_recipe_is_fetchable():
         f"\n[recipe-base] {ref} pull=OK arch={arch}/{os_name} id={image_id[:19]}…；"
         f"负向对照（翻转首位成 {bogus.rsplit('@sha256:', 1)[1][:12]}…）{control}；tag 侧当前读数 {drift}"
     )
+
+
+def test_pinned_sbom_tool_actually_produces_a_checkable_image_sbom(tmp_path: Path) -> None:
+    """镜像层 SBOM 这一步的**接线**常驻：钉死的工具镜像真能出清单，清单真过形状判据。
+
+    与 `scripts/image_sbom.sh` 的分工是刻意的：脚本产的是控制面镜像那一份，需要先真构建
+    （实测 pip 层受外网波动影响，同一棵树两次 `ReadTimeoutError` 后第三次才成，不常驻）；
+    这一产的是三件每轮都能核的事——
+    1. 钉进脚本的工具 digest 仍然取得到（这条 digest 来自第三方公开镜像站，取字节只走守护进程）；
+    2. 挂 docker.sock 后 trivy 读得到**本地**镜像（官方文档写明这是容器内扫镜像的接线方式）；
+    3. 它的输出满足 §5 那套形状判据，且判据跑的是 `scripts/check_image_sbom.py` 同一份实现。
+
+    被审对象取配方里那份已钉 digest 的基础镜像：本机一定拿得到，且实测同时含
+    Debian OS 包（87 个 pkg:deb）与 wheel（1 个 pkg:pypi），两条子判据都不是空转。
+    """
+    # 判据与解析都只有一份实现：工具引用、被审引用、形状判据全部从供应链档与量具里取
+    from tests.test_supply_chain import (
+        IMAGE_SBOM_SCRIPT,
+        REPO_ROOT,
+        _base_refs,
+        _is_pinned,
+        _load_image_sbom_validator,
+        _tool_image_refs,
+    )
+
+    refs = _tool_image_refs(IMAGE_SBOM_SCRIPT.read_text(encoding="utf-8"))
+    assert refs, f"{IMAGE_SBOM_SCRIPT.name} 里解析不到工具镜像赋值，这支判据会无事可做"
+    tool = sorted(refs)[0]
+
+    subjects = [r for _, r in _base_refs([REPO_ROOT / "runtime" / "Dockerfile.control-plane"]) if _is_pinned(r)]
+    assert subjects, "控制面配方没有钉 digest 的 FROM，被审对象无从选取"
+    subject = subjects[0]
+
+    def _transport_skippable(stderr: str) -> bool:
+        low = (stderr or "").lower()
+        return any(k in low for k in ("timeout", "dial tcp", "no such host", "connection refused", "unreachable"))
+
+    have = _docker("image", "inspect", tool, timeout=60)
+    if have.returncode != 0:
+        pulled = _docker("pull", tool, timeout=600)
+        if pulled.returncode != 0:
+            if _transport_skippable(pulled.stderr):
+                pytest.skip(f"{GATE_SENTINEL}: SBOM 工具镜像取不到（registry 通道不可达）：{pulled.stderr[-200:]}")
+            raise AssertionError(f"钉进脚本的工具镜像取不到：{tool}\n{pulled.stderr[-400:]}")
+
+    run = _docker(
+        "run",
+        "--rm",
+        "-v",
+        "/var/run/docker.sock:/var/run/docker.sock",
+        tool,
+        "image",
+        "--format",
+        "cyclonedx",
+        subject,
+        timeout=600,
+    )
+    if run.returncode != 0:
+        if _transport_skippable(run.stderr):
+            pytest.skip(f"{GATE_SENTINEL}: trivy 运行期通道不可达：{run.stderr[-200:]}")
+        raise AssertionError(f"trivy 出清单失败：{run.stderr[-400:]}")
+
+    # 落盘只为本数一遍；判据读的是这份 stdout（脚本侧同样走 stdout，理由见 image_sbom.sh 注释）
+    out = tmp_path / "image.cdx.json"
+    out.write_text(run.stdout, encoding="utf-8")
+    validator = _load_image_sbom_validator()
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    offenders = validator.sbom_offenders(doc, subject)
+    assert not offenders, "工具产出的镜像层 SBOM 过不了形状判据：" + " | ".join(offenders)
+
+    purls = [str(c.get("purl", "")) for c in doc.get("components", []) if isinstance(c, dict)]
+    print(
+        f"\n[image-sbom] {tool.split('@')[0]}… 对 {subject.split(':')[0]} 产出 components={len(purls)} "
+        f"deb={sum(1 for p in purls if p.startswith('pkg:deb/'))} "
+        f"pypi={sum(1 for p in purls if p.startswith('pkg:pypi/'))} "
+        f"spec={doc.get('specVersion')}；自报对象="
+        f"{doc.get('metadata', {}).get('component', {}).get('type')}"
+    )
+

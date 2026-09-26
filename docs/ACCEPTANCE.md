@@ -16,7 +16,11 @@
 
 ## 无法在当前执行环境完成的外部验收
 
-原因不是代码权限，而是当前运行环境没有 Docker daemon、NVIDIA GPU、NGC 登录态。
+原因不是代码权限，而是当前运行环境没有 **NVIDIA GPU 与 NGC 登录态**。
+
+这里曾把"Docker daemon"一起列进缺失项，与 `scripts/release.sh` 的依赖表（"Docker daemon |
+本环境可用（colima）"）自相矛盾，本轮按读数更正：`docker version` 读出 Server 29.5.2，
+且控制面镜像构建与镜像拉取都在本机守护进程上真实跑过。**设备与账号侧的缺口才是真的**。
 
 必须迁移到目标 GPU 主机执行（Gate 编号以 `docs/ACCEPTANCE_GATES.md` 为准）：
 

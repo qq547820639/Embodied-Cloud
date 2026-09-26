@@ -62,6 +62,11 @@ make release   # scripts/release.sh：校验 → build → 供应链 → 验证�
 
 - 镜像 tag = 版本号（如 `embodiedcloud/control-plane:0.2.0`）。
 - 禁止推送/引用 `latest`。
+- 镜像层清单：`make image-sbom`（= `scripts/image_sbom.sh`）对**已构建**的控制面镜像出
+  CycloneDX → `dist/sbom.image.cdx.json`，落盘后过形状判据。它与 `make control-image` 同档，
+  **不在**上面第 1–8 步里：release 链不保证现场有镜像，而把一次真构建（受外网波动影响）
+  引进发布步骤，只会让人在下一次发布时整步跳过它。判据条款与选型读数见
+  `docs/SUPPLY_CHAIN.md` §5、验收行见 `docs/ACCEPTANCE_GATES.md` G0.35。
 
 ## 7. 发布后
 

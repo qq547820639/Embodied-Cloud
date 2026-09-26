@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 532 / passed 531 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 538 / passed 537 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -374,6 +374,74 @@ supply-chain 档 10 → 12（两支注入夹具：表级双向 + 条目级三把
   一个"每漂移必红"的项，把配方钉反）。
 
 docker 档 21 → 22，全套 531 → 532。
+
+### 镜像层清单：`make image-sbom` 与它的三把判据（G0.35，SUPPLY_CHAIN §8 第 3 项闭合）
+
+- **选型是被通道读数改掉的，不是被偏好改掉的**。功能上更对口的候选（syft，唯一职责就是出清单、
+  SBOM 模式不需要再下载任何东西）今天拿不到字节：`docker pull` 走守护进程配置里的镜像站
+  `docker.1panel.live` 时 TLS 握手超时（上一轮它是这台机器唯一通的那条）、`ghcr.io` 拨号超时、
+  GitHub release 下载在宿主 `curl` 与容器内 `urllib` 两处都不通。另一候选（trivy）在自己的
+  `docs/getting-started/installation.md:12-16` 里**列了三个官方注册表**，其中
+  `public.ecr.aws/aquasecurity/trivy`（同一文件第 16 行）当场可拉，且第 22 行明文支持
+  "挂容器引擎 socket 扫镜像"这种接法。六维逐项出处：License 两份都从
+  `raw.githubusercontent.com/.../LICENSE` 读到 Apache-2.0 正文；活跃度取
+  `api.github.com/repos/{anchore/syft|aquasecurity/trivy}` 与 `releases/latest`
+  （syft v1.52.0 发布 2026-09-17／9,613★，trivy v0.74.0 发布 2026-08-14／38,083★，两者仓库
+  pushed 都是 2026-09-25）；签名形态是 31 vs 47 个 release 资产（cosign 签名 checksums vs
+  逐件 sigstore）。第三个候选 `docker build --sbom/--attest` 本机直接不可用
+  （`docker buildx version` → `docker: unknown command: docker buildx`）。
+  **一处自我更正**：先前把"trivy 运行时要下载漏洞库"记成它的安全风险——真跑之后 trivy 自己打印
+  「`--format cyclonedx` disables security scanning」（与它 `sbom.md:203` 一致），那条主张撤回。
+- **钉的 direction 单独核过**：用 ECR Public 的匿名令牌 + `Accept: …image.index.v1+json` 取回
+  manifest body（3772 B，`application/vnd.oci.image.index.v1+json`），逐字节重算 sha256 得
+  `62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`，与 `docker pull` 打印的
+  `Digest` 同值；子清单 amd64 `ee940acb…`／arm64 `55ad20f8…` 各在——钉的是**多架构索引**而不是
+  本机 arm64 那一份。上一轮刚写下"钉错方向会让所有人的构建当场失败"，这一轮不靠守护进程的打印说话。
+- **落成的东西**：`scripts/image_sbom.sh`（工具镜像按 digest 钉死、被审镜像不在场退 2 而不是交
+  空产物、结果走 stdout 再 `.tmp`→`mv`）＋ `Makefile` 新 `image-sbom` 档（与 `control-image` 同档，
+  **不进** release 链，理由写在 RELEASE_PROCESS §6）＋ `scripts/check_image_sbom.py`（产物层判据：
+  被审对象 `type=container` 且 purl 带 `@sha256:`、≥1 `pkg:deb/`、≥1 `pkg:pypi/`、
+  `bomFormat=CycloneDX`、`components` 非空、不得混漏洞结论，外加"文件不存在必须红"）。
+  `--self-test` 10 档（合规档不开火 + 每条反例单独开火）全 OK，`mypy` 零错。
+- **真读数**：trivy 0.74.0 对配方里那份钉死的基础镜像 `image --format cyclonedx` 用时 12.5s，
+  `components=89 / deb=87 / pypi=1 / spec=1.7`，其自报 purl 摘要 `f77ac9e4…` 与 §2 钉进
+  `Dockerfile.control-plane` 的 digest 同值——两把独立的尺子（构建配方／清单工具自报）对上同一个事实。
+- **一条我自己写错又改回的归因（记账，免得下一个人照抄）**：第一次运行用
+  `-v /tmp/trivyout:/out --output /out/x.json`，trivy 退 0 而宿主目录是空的，我据此写下
+  "trivy 会 rc=0 却不落盘"。这个成因是**错的**：这台机器（colima）的 `/tmp` 根本不是共享进虚拟机的
+  挂载点。同一分钟内两半对照——容器内 `echo hi > /out/via-tmp.txt` 在容器里看得见、宿主
+  `/tmp/mnttest` 为空；把挂载点换成工程目录下的 `dist/mnttest` 再写同一个文件，宿主立刻可见。
+  触发重测的是同一只空挂载的另一个症状（`-v /tmp/probe.py:/probe.py` 报
+  "can't find `__main__` module"）。**改的是夹具，不是结论的形状**：判据照旧按"产物说不说得出事实"写
+  （rc=0 配一份空产物是真实失败模式），只是不再把它安在 trivy 头上。
+- **常驻把关分三层，判据只有一份实现**：配方层（工具引用必须钉 digest 且逐字进文档，裸 tag／
+  钉了没进文档两个方向各注入一次）、产物层（同上条款的注入夹具，跑的是量具本体）、
+  接线层（真 pull 钉死的工具、真挂 docker.sock、真过同一份判据，整支 18.8s 且是与一次构建并发跑）。
+- **两条常驻机制的补强**：`test_pinned_base_of_the_control_plane_recipe_is_fetchable` 今晚被镜像站的
+  一次 `not found` 打过（对**有效**摘要回 not found，同一条通道上一轮还能 pull 成功），于是
+  "取不到就红"换成两条传输定案的三档分流：present→skip 并把两条读数都打出来、absent→红＝钉错、
+  unknown→红＝无法定案不洗；分流逻辑抽成纯函数 `_pull_verdict_action` 并各配一支常驻对照，
+  第二通道自己也有正反对照（真摘要 present／翻一位 absent——否则它就是免检通道）。
+  `tests/k8s_server.py:kind_binary()` 补第三档发现位：本机 kind 在仓库同级的 `.toolcache/`
+  （实测 `kind version 0.33.0`＝ADR 0009 钉的那版），上一轮能跑靠的是某个 shell 导出过
+  `EMBODIEDCLOUD_KIND_BIN`，换个 shell 就静默跳 7 例；补上发现档后真集群 7/7 恢复，用时 2:08。
+- **未做到的一面**：控制面镜像那一份产物本轮没落盘——同一配方连跑 5 次全部失败在
+  `Step 7/10 : RUN pip install`（153s／102s／224s／156s／50s），用并排探针把成因定位到
+  容器侧→`files.pythonhosted.org` 的 TLS 超时（同一时刻容器内取 `pypi.org/simple/` 是
+  200／1.3s、宿主 `curl` 同一条 CDN URL 拿得到 302、上一轮同一配方 160s 成功），属外网波动而非
+  仓库缺陷；OS 层的 CVE 比对新立 SUPPLY_CHAIN §8 第 5 项，不顺手并进本轮。
+- **连带更正三处旧措辞**（起因：把"哪些登记把单条通道当成了整件事"派给子代理普查，交回 16 条
+  候选，逐条重开原行后落定）：`docs/ACCEPTANCE.md:19` 与 `docs/IMPLEMENTATION_PLAN.md:40` 都写着
+  "当前执行环境没有 Docker daemon"，被 `scripts/release.sh:215`（"本环境可用（colima）"）与本轮
+  `docker version` → Server 29.5.2 双重反驳，按读数改成"缺的是 NVIDIA GPU 与 NGC 登录态"；
+  SUPPLY_CHAIN §3 那条"code-server 上游不发校验文件"补了第二条独立通道（GitHub release API 逐枚
+  枚举 v4.130.0 的 9 个资产，确无校验／签名文件）。**复核后不改的一条**：子代理报
+  `tests/test_k8s_integration.py:46` 裸调 `load_kube_config()` 会忽略 `KUBECONFIG`——SDK 默认位置
+  本来就吃该环境变量，本仓 `tests/test_k8s_control_plane.py:82` 上一轮已记过，按不成立处理。
+- **子代理分工（本轮新做法）**：「SBOM 工具调研」与「过期单通道措辞普查」两件派给独立子代理
+  （分别 47／35 次工具调用），主理人只做实现、判据与定档。进判据的部分（三个注册表、socket 挂载
+  接法、`--format cyclonedx` 关扫描）全部由主理人重开原文或真跑核实；普查那条 k8s 主张在进门禁前
+  被复核推翻。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

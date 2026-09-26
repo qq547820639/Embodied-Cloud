@@ -16,7 +16,7 @@
 | 项 | 现状 | 状态 |
 |---|---|---|
 | Isaac Sim 版本 | `FROM nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9` | VERIFIED（本轮由 tag 升级为钉 digest）：digest 由**权威源 nvcr.io 本身**匿名解析得到（`/proxy_auth` 换取 pull 令牌 → `HEAD /v2/nvidia/isaac-sim/manifests/6.0.1` 的 `docker-content-digest`），并 `GET` 同一 manifest list 重算 body 的 sha256 与该读数一致（743 B，`…manifest.list.v2+json`）；子清单 linux/amd64 `sha256:b1c542b2…`、linux/arm64 `sha256:20269735…`。**钉的是多架构索引而非单个平台清单**，amd64 GPU 主机与 arm64 本机各自按平台解析。`name:tag@digest` 形式由本机 `docker build` 实测接受（进入解析并按 digest 开始拉层），tag 保留只为可读性。**"阻塞于 NGC 凭据"是错的**：解析 digest 不需要凭据，凭据只在拉层字节时才要 |
-| 控制面基础镜像 | `FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f` | VERIFIED（本轮由"已登记的例外"升级为钉 digest）：**权威读数取自 docker.io 本身**——`docker pull --platform linux/amd64 python:3.12-slim` 打印的 `Digest` 即此值，随后 `docker pull docker.io/library/python@sha256:f77ac9e4…` 按 digest 再解析一次并成功（本机 arm64 走同一索引解析出可运行镜像）。上一轮只在第三方镜像 `public.ecr.aws/docker/library/python` 上读到同一个索引 digest，当时记为"两源互不印证"（第三方索引 digest 与权威一致本就是镜像站的预期行为，但当时缺权威侧那一手）；本轮补上的正是这一手，两个独立传输路径同值。取证路径本身要记一条限制：本机 `curl` 到 `auth.docker.io`/`registry-1.docker.io`/`hub.docker.com` 仍全部超时，能出网的是 **docker 守护进程**那条传输（`docker manifest inspect` 走 CLI 直连，同样超时、读不到），所以读数只能来自 pull 这条路径，不是"三条路径都试过"。钉的是多架构索引而非单个平台清单 ⇒ amd64 GPU 主机与 arm64 本机各自按平台解析。**构建侧实跑**：`make control-image` 的 `Step 1/10 : FROM python:3.12-slim@sha256:f77ac9e4…` 用的就是这条引用，`Successfully built 53af23a7ecd0`，产物容器内 `python -V` = `Python 3.12.14`（本次构建产物随后 `docker rmi` 删除；此前没有任何常驻门禁构建过控制面镜像，见 §8 第 3 项） |
+| 控制面基础镜像 | `FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f` | VERIFIED（本轮由"已登记的例外"升级为钉 digest）：**权威读数取自 docker.io 本身**——`docker pull --platform linux/amd64 python:3.12-slim` 打印的 `Digest` 即此值，随后 `docker pull docker.io/library/python@sha256:f77ac9e4…` 按 digest 再解析一次并成功（本机 arm64 走同一索引解析出可运行镜像）。上一轮只在第三方镜像 `public.ecr.aws/docker/library/python` 上读到同一个索引 digest，当时记为"两源互不印证"（第三方索引 digest 与权威一致本就是镜像站的预期行为，但当时缺权威侧那一手）；本轮补上的正是这一手，两个独立传输路径同值。取证路径本身要记一条限制：本机 `curl` 到 `auth.docker.io`/`registry-1.docker.io`/`hub.docker.com` 仍全部超时，能出网的是 **docker 守护进程**那条传输（`docker manifest inspect` 走 CLI 直连，同样超时、读不到），所以读数只能来自 pull 这条路径，不是"三条路径都试过"。钉的是多架构索引而非单个平台清单 ⇒ amd64 GPU 主机与 arm64 本机各自按平台解析。**失败时怎么定案**（本轮新增常驻机制）：守护进程这条传输今晚出现过对**有效**摘要回 `not found`（它走配置里的镜像站 `docker.1panel.live`，同一条通道上一轮还能 pull 成功），所以 `test_pinned_base_of_the_control_plane_recipe_is_fetchable` 不再「取不到就红」，而是先用第二条传输定案：取 `public.ecr.aws/docker/library/python` 的 manifest 并逐字节重算摘要——两边都说没有＝钉错了（红）；镜像站说没有而第二条通道逐字节确认有＝通道故障（报两条读数并跳过，主张本轮未获证）；第二条通道自己也不通＝无法定案，照样留红不洗。翻一位的假摘要在第二条通道必须同样是 absent（`test_independent_digest_read_discriminates_present_from_absent` 实测：真摘要 present／翻转 absent），否则这条定案通道就成了免检通道。**构建侧实跑**：`make control-image` 的 `Step 1/10 : FROM python:3.12-slim@sha256:f77ac9e4…` 用的就是这条引用，`Successfully built 53af23a7ecd0`，产物容器内 `python -V` = `Python 3.12.14`（本次构建产物随后 `docker rmi` 删除；此前没有任何常驻门禁构建过控制面镜像，见 §8 第 3 项） |
 | Isaac Lab 版本 | `ARG ISAACLAB_REF=v3.0.0-beta2.patch1` + `ARG ISAACLAB_COMMIT=ffff603eafc6b74264a5261cc0183d6a65390d78`，clone 后 `test "$(git rev-parse HEAD)" = "$ISAACLAB_COMMIT"` | VERIFIED（v0.6.0）：commit 由两个独立来源核对——GitHub refs API 与 `git ls-remote` 给出同一 sha（该 tag 是 lightweight tag，直接指向 commit）。tag 可被 force push 移动，故只认 commit |
 | 启动命令 | 模板 entrypoint 版本锁定（TemplateVersion） | VERIFIED |
 | 配方机检 | `tests/test_supply_chain.py`：任何 `curl/wget -o` 必须同块 `sha256sum -c`；任何 `git clone --branch` 必须比对 HEAD commit；**任何非自有命名空间的 `FROM` 必须带 `@sha256:`，未钉者必须出现在双向对账的例外登记表里（多登记与漏登记都红），且登记表与本文逐字互核**；**消费侧引用同一基础镜像时必须与 Dockerfile 钉死的那份逐字相等**（`gpu_acceptance.sh`／`isaac_sim_smoke.sh`／`release.sh`／`docs/GPU_HOST.md` 四处，归属键刻意剥掉 tag）；并断言三条判据的作用域均非空 | VERIFIED（v0.6.0 建下载/克隆两条；本轮新增 digest 三条，改钉之前对两处开火，读数见 CHANGELOG 0.6.0 与本轮记录） |
@@ -26,7 +26,9 @@
 | 项 | 现状 | 状态 |
 |---|---|---|
 | code-server 版本 | 4.130.0 | VERIFIED |
-| code-server 下载校验 | Dockerfile 内 `echo "${cs_sha}  /tmp/code-server.tgz" \| sha256sum -c -`，两架构分别钉摘要（amd64 `3de23052…b7ab`、arm64 `795366c4…b725`） | VERIFIED（本轮）**带一条来源限制**：上游 v4.130.0 的 release 只发 tar.gz/rpm/deb 资产，下载其 `SHA256SUMS.txt` 实测返回 `Not Found`，release notes 亦无校验表 ⇒ 表中摘要来自本机对官方制品的实算（字节数与 GitHub API 报告的资产大小 201284549 / 197540112 逐一吻合）。它防的是后续构建拿到被替换/截断的制品，不构成第三方背书 |
+| code-server 下载校验 | Dockerfile 内 `echo "${cs_sha}  /tmp/code-server.tgz" \| sha256sum -c -`，两架构分别钉摘要（amd64 `3de23052…b7ab`、arm64 `795366c4…b725`） | VERIFIED（本轮）**带一条来源限制**：上游 v4.130.0 的 release 只发 tar.gz/rpm/deb 资产，下载其 `SHA256SUMS.txt` 实测返回 `Not Found`，release notes 亦无校验表 ⇒ 表中摘要来自本机对官方制品的实算（字节数与 GitHub API 报告的资产大小 201284549 / 197540112 逐一吻合）。它防的是后续构建拿到被替换/截断的制品，不构成第三方背书。该结论本轮又核了一次、走的是另一条通道：GitHub release API 逐枚枚举
+`v4.130.0` 的 9 个资产（rpm/deb/tar.gz × 两架构 + `package.tar.gz`），里面没有任何校验或签名文件——
+与当时"下载 `SHA256SUMS.txt` 返回 Not Found"是两条独立通道得出的同一结论，不是措辞沿用 |
 | `sha256sum -c` 机制本身 | 两档对照实测：正确摘要 rc=0 且输出 `OK`，错误摘要 rc=1 且 `FAILED` | VERIFIED |
 | WORKSPACE_PASSWORD | Fernet 加密落库（§20）；runtime env 为必要明文副本；K8s 侧轮换已由真集群证明"新 Pod 持新口令、无任何 Pod 残留旧口令" | VERIFIED：`test_workspace_credential.py` + `tests/test_k8s_control_plane.py`（ADR 0009） |
 
@@ -47,6 +49,7 @@
 | release 流程 | scripts/release.sh：semver → lint/type/test → build → checksums → 分级验证矩阵 | VERIFIED（脚本存在且 CI 通过） |
 | OpenAPI 新鲜度 | CI 重新生成 + git diff 门禁 | VERIFIED |
 | SBOM | `make sbom` = `uv export --format cyclonedx1.5` → `dist/sbom.cdx.json`，随 `dist/checksums.txt` 入产物清单 | VERIFIED（v0.5.0） |
+| 镜像层 SBOM（控制面镜像） | `make image-sbom` = `scripts/image_sbom.sh`：对已构建的控制面镜像跑 trivy 出 CycloneDX → `dist/sbom.image.cdx.json`，落盘后过 `scripts/check_image_sbom.py` 的形状判据。工具镜像钉死为 `public.ecr.aws/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`；这一份 digest 的**方向**单独核过：ECR Public 匿名令牌 + `Accept: …image.index.v1+json` 取回 manifest body（3772 B）逐字节重算 sha256 得同一个值，子清单 amd64 `ee940acb…`／arm64 `55ad20f8…` 各在——钉的是多架构索引，不是本机 arm64 那一份（§2 上一条留过「钉错方向会让所有人的构建当场失败」这条教训） | VERIFIED（本轮，§8 第 3 项闭合）：判据条款＝被审对象必须是 `type=container` 且 purl 带 `@sha256:`（只写 tag 的清单会在 tag 移动后描述另一份字节）、至少一个 `pkg:deb/`（OS 层）、至少一个 `pkg:pypi/`（wheel 层，缺它这份就与 `make sbom` 没区别）、`bomFormat=CycloneDX`、`components` 非空、不得混入 `vulnerabilities` 结论；量具自带 10 档注入（`--self-test` 全 OK）＋常驻 `test_image_sbom_validator_fires_per_clause`。**真读数**：trivy 0.74.0 对配方里那份钉死的基础镜像跑 `image --format cyclonedx` 用时 12.5s，产出 `components=89 / deb=87 / pypi=1`，其自报 purl 里的摘要 `f77ac9e4…` 与 §2 钉进 `Dockerfile.control-plane` 的那个 digest 同值——两把独立的尺子（构建配方 / 清单工具自报）对上同一个事实。**两条实测记账**：① 结果走 stdout 重定向而不是 `--output` 指挂载路径——这台机器（colima）的 `/tmp` **不是共享进虚拟机的挂载点**（容器内写成功、宿主看不见；同一分钟内换成工程目录下的挂载点就可见），产物由宿主自己写才不依赖这条随时会变的约定；② trivy 自己会打印「`--format cyclonedx` disables security scanning」，因此这份产物是**清单**、不是"没有漏洞"的结论（OS 层漏洞扫描另立 §8 第 5 项）。**接线常驻**：docker 档 `test_pinned_sbom_tool_actually_produces_a_checkable_image_sbom` 每轮核"工具 digest 取得到 + 挂 docker.sock 读得到本地镜像 + 输出过同一份判据"（判据只有一份实现，测试与脚本共用，不抄读数）；控制面镜像那一份产物需要真构建，而本轮构建 5 次全部失败在容器侧→PyPI CDN 那条通道（逐条读数与并排探针见 §8 第 3 项），故 `image-sbom` 与 `control-image` 一样留在人工/CI 档，不折进每轮 |
 | 漏洞审计 | `make audit` = `uv audit --locked`，CI 在 sbom 之后执行 | VERIFIED（v0.5.0） |
 | 集成档真实性 | CI 断言需要 docker 的档位（postgres/docker/browser/**object store**/**k8s 控制面**）必须 PASS，否则红；只有需要 GPU device plugin 的 `integration_k8s` 允许 PENDING。拉取测试镜像的步骤已移到 `make validate` **之前**（原顺序会让档位读数来自镜像尚未缓存的那一刻） | VERIFIED（本轮扩展） |
 
@@ -65,6 +68,12 @@
   `tests/test_supply_chain.py::test_exception_reconciliation_fires_in_both_directions`
 - **测试档位镜像同样不许用可变 tag**：`versity/versitygw:v1.8.0`、`kindest/node:v1.37.0`、
   `postgres:16-alpine` 均带具体版本；`test_test_tier_image_tag_is_pinned` 常驻把关
+- **产线工具镜像同样必须钉 digest，且钉的那份逐字出现在本文**：`scripts/image_sbom.sh` 的
+  `TRIVY_IMAGE` 默认值由 `test_image_sbom_step_exists_and_is_pinned` 把关，两个方向各注入一次
+  （裸 tag／钉了但没进文档／钉了且进了文档＝不开火）常驻在
+  `test_tool_image_criterion_fires_in_both_directions`。这条比基础镜像更要紧的理由是取字节的通道：
+  本机到得了的那个注册表是**第三方公开镜像**，字节不经过我们自己的构建流水线，
+  内容摘要就是把"拿到的东西"和"想要的东西"对上的唯一手段
 
 ## 7. 测试档位自带的外部制品（本轮登记）
 
@@ -87,10 +96,33 @@
    `registry-1.docker.io`）；**守护进程自己那条出网路径从没被试过**，一试就通。这与"Isaac Sim 钉 digest
    阻塞于 NGC 凭据"是同一类错——把"我试过的某条通道不通"记成"这件事做不了"。今后写"取不到权威读数"之前，
    必须先把通道列全（CLI 直连／守护进程／构建器／另一台机器），并写明哪几条试过、怎么试的。
-3. **控制面镜像 SBOM 化**：wheel 级 SBOM 已有，镜像层 SBOM 需真实构建后由 trivy/syft 生成
+3. ~~**控制面镜像 SBOM 化**~~ **本轮闭合**（机制与判据见 §5 新增那一行）：wheel 级 SBOM 之外，
+   现在有 `make image-sbom` 出镜像层 CycloneDX，形状判据与工具 digest 都有常驻把关。
+   留一条**没做完**的部分：控制面镜像那一份产物本轮没落盘。构建这一步在同一棵树上连跑
+   **5 次全部失败**（用时 153s／102s／224s／156s／50s），全部死在
+   `Step 7/10 : RUN pip install --no-cache-dir ".[postgres]"`，成因两种形状：
+   `ReadTimeoutError(host='files.pythonhosted.org')` 与
+   `Could not find a version that satisfies the requirement setuptools>=75 (from versions: none)`。
+   把成因定位到**容器侧→PyPI CDN**而不是"配方坏了"，靠的是同一时刻两条并排探针：容器内
+   `urlopen('https://pypi.org/simple/setuptools/')` 得到 **200 / 535 KB / 1.3s**，而容器内对
+   `https://files.pythonhosted.org/packages/source/s/setuptools/…` **TLS 握手超时**；
+   宿主 `curl` 同一 URL 拿得到 `302`。同一份配方上一轮 160s 构建成功过（读数见 §2），
+   所以这是外网通道波动、不是仓库缺陷；`make image-sbom` 在这种情况下退 2，
+   不会交出一份空产物或假清单。接线本身由 docker 档常驻用例覆盖（它对真实可取到的镜像
+   出过 `components=89 / deb=87 / pypi=1` 的读数）
 4. **完整镜像构建不常驻**（本轮实测后如实记下）：新增的常驻判据覆盖的是**配方里的基础镜像取得到**这一半（docker 档，默认 21.99s）；整条 `docker build` 冷跑实测约 160s（pip 层要重装），折进每轮 validate 不划算，因此它仍是 `make control-image` 的人工/CI 步骤，本轮的构建读数见 §2 同一行
+5. **镜像层漏洞扫描（OS 包）**：`make audit`（uv）只看 Python 侧，Debian 层那 87 个 `pkg:deb` 组件今天没有任何东西在比 CVE。同一份钉死的 trivy 就能做（`--scanners vuln`），代价是它运行时要从自己的分发点下载漏洞库——那是**又一条出网依赖 + 一份非确定性读数**，所以这一步单独立项而不是顺手并进 §5 那一行；要做时先量库里有没有当天数据，别把"拉不到库"洗成"没有漏洞"
 
 （原"Isaac Sim 基础镜像钉 digest"一项已于本轮闭合：它曾被登记为"阻塞于 NGC 凭据"，实测**不成立**——
 nvcr.io 的 manifest 与 digest 用匿名 pull 令牌即可解析，凭据只在拉层字节时才需要。
 原第 2 项 code-server SHA256 与原第 3 项 IsaacLab exact revision 已于 v0.6.0 落地，见 §2/§3。
 原第 1 项 Python lockfile 与原第 4 项 SBOM 已于 v0.5.0 落地，见 §4/§5。）
+
+> 第 2 条那条方法论记账（"把'我试过的某条通道不通'记成'这件事做不了'"）本轮又添一手读数，
+> 方向恰好相反，因此更值得留在原地：**通道会自己变**。同一台机器同一晚，
+> `docker pull` 走守护进程配置的镜像站 `docker.1panel.live` 时 TLS handshake 超时（上一轮它就是那条
+> 唯一通的通道），`ghcr.io` 拨号 i/o timeout，GitHub release 下载在宿主 `curl` 与容器内 `urllib`
+> 两处都拿不到字节，而 `api.github.com` 与 `raw.githubusercontent.com` 全程可读。
+> 所以"取不到"必须写成**哪条通道、什么错误、几点钟的读数**，并且下一次动手前重跑那条探针——
+> 本轮 SBOM 工具的选型就是被这件事直接改变的：功能上更对口的候选取不到字节，
+> 于是采用官方列了三个注册表、当天还到得了的那一个（读数见 §5 同一行）。
