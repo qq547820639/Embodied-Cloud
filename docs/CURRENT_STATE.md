@@ -7,7 +7,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 529 / passed 528 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
+| Test | **PASS（collected 531 / passed 530 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
 | Lint / Type | PASS（ruff 0 / mypy 45 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS 21/21**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -42,6 +42,7 @@
 | N-15 | **两条"前提竞态"各由一次真实红抓出并修掉，判据的超时一分没加**：①真集群档负向对照在 `wait_ready(...) is False` 之后直接 `_pods(...)[0]` —— Pod 及其 conditions 由集群控制器写，provider 只给 6s 窗口（主树全量复算 517 passed / 1 failed，红的就是取 Pod 那行的 `IndexError`，其余 6 条真集群用例同轮全绿 ⇒ 既非 kind 引导失败也非产品缺陷）；②换树换环境复算又红一条 docker 档：`exit 0` 的"已启动→已退出"只差几毫秒，工作区又无 ide_port/healthcheck，`wait_ready` 首次 inspect 抓到 running 便返回 True（519 passed / 1 failed，`assert True is False`，同一内容主树刚绿过；这个 True 本身是产品正确行为，另有用例钉着） | 两处同法：判据行留在最前，前提改走 `tests/k8s_server.poll_until/await_pod/await_condition_reason` 与新加的 `wait_exited`（超时抛"前提未达成 + 最后一次读数"，不返回 False 冒充结论）；工具自身各有开火对照（假 list 函数三种边界 / 不起 exit 的容器 2s 内必须红）。复跑：真集群档 7/7（254s）、docker 档 21/21（57.6s），全套 519 → 522 |
 | N-16 | **`allocate()` 的重试预算被量过，"等不到"与"没卡"分成两句话**：参数（5 次 × 0.05s 退避）此前无从解释；实测预算 0.500s、真实放弃发生在 0.816s / 0.821s，16 线程抢 4 卡 ×3 轮里单个分配事务 median 30.5→43.1ms、max 35.5→70.8ms 且每轮赢家 4/4 ⇒ 参数保持不动，"改成 deadline 式长等待"被同一批读数否掉（只是把假空换成更慢的首包）。真正的缺陷是可确定性复现的谎话：唯一候选被别的会话 `FOR UPDATE` 持住时，`still_waiting` 每轮都数得到 1 张，却仍抛 `No GPU available` | 新增 `GpuPoolContendedError`（含等待卡数与预算）+ 窗口/持锁两支实测常驻用例 + `truly_empty` 反面档；`test_unbounded_candidate_read_starves_concurrent_allocate` 的断言就地反转（从钉住谎话改为钉住"必须报 contention 且不得出现容量那句"）；变异 CONT1 短路 contention 分支 → 两支红、反面那支照旧绿。pg 档 18 → 21，全套 522 → 525 |
 | N-17 | **workspace 在「还要重试」的那一刻被宣布死亡**：`make validate` 连两轮同一条红（`tests.test_workspace_credential::test_access_endpoint_returns_plaintext_password`，`assert 'failed' == 'running'`）。归因靠仓库外临时诊断插件打出的两份现场读数：失败瞬间 8 张卡里 6 张 ALLOCATED、victim 自己没卡；而**收尾**读数里同一个 workspace 已经 `running`、它的 `provision` op 是 `succeeded(2)` —— 那句「这个任务失败了」是第 1 次尝试替第 2 次尝试下的结论。放大器另有一处：`tests/test_gpu_pool_guard.py` 的 `rig` 留 8 行 CREATED workspace，app 每次启动都跑 `reconcile_all()`（「QUEUED/CREATED 且无 active op ⇒ 重新入队 PROVISION」），于是下一个模块的 worker 先替残骸抢卡（本文件 + `test_api` 配对即红，日志 4 条 `provision(ws-guard) failed, retrying`） | ①重试判据收成一个函数 `OperationWorker.will_retry(op)`，`finish_failure` 与 `orchestrator._fail(terminal=...)` 同读它（两侧各写一遍 `attempts >= MAX_ATTEMPTS` 时，任何一侧改动都会让「op 在重试」和「workspace 已 FAILED」同时成立）；非终态失败写 QUEUED + 保留 `error_message` + 归还卡。`workspace_operations` 在 API 层零读者（`grep -rn WorkspaceOperation app/routers/` = 0），所以 status 是「还在重试」的唯一出口；②`tests/settle.py::await_workspace_settled`：终态集合 + 前提预算 30s（旧轮询 2s < backoff 1+2s）+ 失败回显池子现场，4 处 `{running, failed}` 轮询全部接上；③守卫收尾归还自己借的卡并删自己的行；④`test_api` 补上它一直缺的前置声明。反证两支：CONT2 把判据短路成「永远终态」→ 新增两支红、其余 10 支照旧绿；settle 助手带正反两支（永远 queued 必须红且报「前提未达成」+ 池子读数；running/failed 都不红，且首读数未收敛 ⇒ 它真在轮询）。复跑：全套两连绿 528 passed / 1 skipped（宿主 load 15.7 与 28.4），全套 525 → 529 |
+| N-18 | **上一轮那条"取不到权威 digest"的登记，错在通道清单没列全**：`python:3.12-slim` 的例外理由写的是"本机三条路径均不可达"，而那三条全是 **CLI/curl 那条传输**（`auth.docker.io` / `hub.docker.com` / `registry-1.docker.io`）；**守护进程自己的出网路径从没被试过**。这与 N-11 拆掉的"Isaac Sim 钉 digest 阻塞于 NGC 凭据"是同一类错：把"我试过的那条通道不通"记成"这件事做不了" | 权威读数取自 docker.io 本身：`docker pull --platform linux/amd64 python:3.12-slim` 打印的 `Digest` ＝ `sha256:f77ac9e4…`，与上一轮独立从 `public.ecr.aws` 读到的索引 digest 逐字同值；再按该 digest 直拉一次成功。钉进 `runtime/Dockerfile.control-plane`（多架构索引，tag 仅留可读性）并从例外登记表删除。**登记表清空会让 `unpinned == registered` 与恒真同形**，所以双向对账抽成纯函数 `_exception_table_offenders`，配常驻注入夹具（漏登记、死登记各开一次火；两侧皆空与两侧相等都不开火），作用域判据同时改为"真实树必须零个未钉外部镜像"。构建侧实跑：`make control-image` 的 `Step 1/10` 用的正是这条引用，`Successfully built`，产物容器内 `python -V` ＝ `Python 3.12.14`（本次构建产物随后 `docker rmi` 删除）。supply-chain 档 10 → 12，全套 529 → 531 |
 
 
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
@@ -105,11 +106,14 @@ Streaming 媒体面（Isaac Sim WebRTC）· Robot 真机 · Warm pool SLA。
 ### BLOCKED_EXTERNAL_DEPENDENCY
 NGC 凭据（**构建并推送 workspace 镜像**后回填 `TemplateVersion.image_digest`）·
 云 S3 真实账号凭据（协议语义已由本地真服务端覆盖，缺的只是"云厂商那份实现"）·
-物理机器人 · 带 GPU 的 K8s 集群凭据 · 能出到 Docker Hub 权威 registry 的网络位置
-（`python:3.12-slim` 的 digest 因此仍未钉，按例外登记，见 SUPPLY_CHAIN §2）。
+物理机器人 · 带 GPU 的 K8s 集群凭据。
 > 已解除：docker daemon、postgres 镜像（v0.5.0）、S3 兼容服务端与真 K8s 集群（v0.6.0，
 > 本机自起自删）、**`nvcr.io` 基础镜像钉 digest**（v0.7.0：这条曾被登记为"阻塞于 NGC 凭据"，
-> 实测不成立——manifest 与 digest 用匿名 pull 令牌即可解析，凭据只在拉层字节时才要）。
+> 实测不成立——manifest 与 digest 用匿名 pull 令牌即可解析，凭据只在拉层字节时才要）、
+> **Docker Hub 权威 digest**（v0.7.0：登记理由写的是"本机三条路径均不可达"，而那三条全是
+> CLI/curl 那条传输；守护进程自己的出网路径从没试过，一试就通 ⇒ `python:3.12-slim` 已钉索引
+> digest、例外登记表清空）。两条同为"把我试过的某条通道不通记成这件事做不了"——
+> 写"取不到"之前必须先把通道列全（CLI 直连／守护进程／构建器／另一台机器）并逐条记怎么试的。
 
 ### TECH DEBT（已知、有意延后 —— 本轮逐条量过，不是照抄旧措辞）
 

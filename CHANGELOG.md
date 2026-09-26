@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 529 / passed 528 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 531 / passed 530 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -305,6 +305,37 @@ workspace，而 app 每次启动都跑 `reconcile_all()`，其规则包含"QUEUE
 
 **本轮明确不做**：不给共用池加 per-test 配额或改造成每用例独立库——那只是把"谁借谁还"的责任
 挪进框架，而 N-17 的读数指向的正是"留下行的模块没收尾"这一条已经写进文档、这次被机器追上的规矩。
+
+### 补一条自己写下的假阻塞：`python:3.12-slim` 的权威 digest 其实拿得到
+
+上一轮把控制面基础镜像按**例外**登记，理由写着"Docker Hub 的三个端点本机实测均不可达"。
+这句话今天被自己推翻：那三条路径全是 **CLI/curl 那条传输**（`auth.docker.io`、`hub.docker.com`、
+`registry-1.docker.io` 确实都超时，`docker manifest inspect` 走 CLI 直连也超时），
+但**守护进程自己那条出网路径一次都没试过**。一试就通：
+
+- 权威读数：`docker pull --platform linux/amd64 python:3.12-slim` 打印
+  `Digest: sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f`，
+  与上一轮**独立**从 `public.ecr.aws/docker/library/python` 读到的索引 digest 逐字同值
+  （镜像站复制的是同一份 manifest，同值本就是预期——差别在于这次一手来自权威侧）；
+  再 `docker pull docker.io/library/python@sha256:f77ac9e4…` 按 digest 直拉一次，成功。
+- 钉进 `runtime/Dockerfile.control-plane`：`FROM python:3.12-slim@sha256:f77ac9e4…`
+  钉的是**多架构索引**（本机 arm64 与 GPU 主机 amd64 各自按平台解析），tag 只留可读性。
+- 构建侧实跑：`make control-image` 的 `Step 1/10` 用的正是这条引用，`Successfully built
+  53af23a7ecd0`，产物容器内 `python -V` ＝ `Python 3.12.14`；构建产物随后 `docker rmi` 删除。
+  顺带记一笔：**在此之前没有任何常驻门禁构建过控制面镜像**（`make validate` 的 `build`
+  检查量的是 `python -m build` 出的 wheel），所以这条配方能不能构建此前只有文档说法。
+
+**登记表清空带来的真问题**：`assert unpinned == set(UNPINNED_EXCEPTIONS)` 在两个集合都为空时
+与恒真同形——"以后有人加裸 tag 忘了登记"和"钉上了忘了删登记"都会静默通过。所以双向对账
+抽成纯函数 `_exception_table_offenders(unpinned, registered)`，并补常驻注入夹具
+`test_exception_reconciliation_fires_in_both_directions`：漏登记开火、死登记开火、
+"两侧相等"与"两侧皆空"都不开火；作用域判据同时改成"真实树必须**零个**未钉的外部基础镜像"。
+supply-chain 档 10 → 12（两支注入夹具：表级双向 + 条目级三把判据）。
+
+方法论记账（写进 SUPPLY_CHAIN §8 与 CURRENT_STATE 的已解除清单）：本轮之前已经有**两条**
+同类假阻塞——"Isaac Sim 钉 digest 阻塞于 NGC 凭据"（匿名 pull 令牌就能解析 manifest/digest）
+与这条"三条路径不可达"（漏了守护进程）。规则改写成：**写"取不到"之前必须先把通道列全**
+（CLI 直连／守护进程／构建器／另一台机器），并逐条记下哪几条试过、怎么试的、失败形状是什么。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

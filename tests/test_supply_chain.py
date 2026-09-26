@@ -128,21 +128,14 @@ SAMENESS_DOCS = (REPO_ROOT / "docs" / "GPU_HOST.md",)
 # 未钉 digest 的外部基础镜像 = 例外登记处。**双向核对**：登记表多一项（那项其实已经钉上或
 # 已删）与少一项（新引入的裸 tag）都必须红，否则例外会变成永久免检通道。
 # grade 只允许固定词表，且必须与 docs/SUPPLY_CHAIN.md 的例外表逐字对得上。
+#
+# 现在这张表是**空的**：两个外部基础镜像（isaac-sim 与 python:3.12-slim）都已钉上多架构
+# 索引 digest。空表本身不能让对账判据失效——它由下面那支注入式夹具常驻钉住
+# （`test_exception_reconciliation_fires_in_both_directions`：漏登记、死登记各开一次火，
+# 合规侧不开火）。把判据从"表里恰好有一项"改成"两侧集合必须相等 + 判据可被注入证伪"，
+# 是因为表格清空后，`assert unpinned == set(UNPINNED_EXCEPTIONS)` 会与恒真同形。
 EVIDENCE_GRADES = {"authoritative-reading-not-obtained", "third-party-reading-only", "accepted-risk"}
-UNPINNED_EXCEPTIONS: dict[str, dict[str, str]] = {
-    "python:3.12-slim": {
-        "grade": "authoritative-reading-not-obtained",
-        "reason": (
-            "Docker Hub 的三个端点本机实测均不可达（auth.docker.io 与 hub.docker.com 都是 "
-            "curl 28 超时），拿不到该 tag 当前指向的索引 digest。"
-            "public.ecr.aws 的 Docker 官方镜像镜像站给出 sha256:f77ac9e4…"
-            "（body 重算 sha256 与该读数一致，OCI index，16 个子清单），但它是第三方镜像而非权威源；"
-            "且它 amd64/arm64 子清单的 config digest（9e87977b… / 8630ab77…）都不等于本机缓存那份 "
-            "python:3.12-slim 的 config（2f17fc04…）——两个来源互不印证，正好说明该 tag 会移动，"
-            "而今天权威侧指向哪个 digest 未证实。钉一个未证实的 digest 会让构建直接失败，故按例外登记。"
-        ),
-    },
-}
+UNPINNED_EXCEPTIONS: dict[str, dict[str, str]] = {}
 
 
 def _base_refs(dockerfiles: list[Path]) -> list[tuple[str, str]]:
@@ -224,30 +217,96 @@ def test_image_path_key_strips_tag_but_not_registry_port() -> None:
     assert _image_path("localhost:5000/team/app") == "localhost:5000/team/app"
 
 
+def _exception_entry_offenders(ref: str, entry: dict[str, str], doc: str) -> list[str]:
+    """一条例外登记项自己合不合规：等级在词表内、理由够长、且与本文逐字对得上。"""
+    offenders: list[str] = []
+    if entry.get("grade") not in EVIDENCE_GRADES:
+        offenders.append(f"{ref} 的证据等级 {entry.get('grade')!r} 不在词表内")
+    if len(entry.get("reason", "")) < 40:
+        offenders.append(f"{ref} 的例外理由过短，不足以支撑免检")
+    if ref not in doc:
+        offenders.append(f"{ref} 未登记在 docs/SUPPLY_CHAIN.md")
+    return offenders
+
+
+def _exception_table_offenders(unpinned: set[str], registered: set[str]) -> list[str]:
+    """双向对账的纯函数：多登记与漏登记分别点名，两侧都空时不开火。
+
+    抽成纯函数是为了能注入两个方向的夹具——真实树现在没有任何未钉镜像，
+    若判据只写成 `unpinned == set(UNPINNED_EXCEPTIONS)`，清空后的表会让它恒真。
+    """
+    offenders = [f"死登记（已钉上或已删，却还占着免检名额）：{ref}" for ref in sorted(registered - unpinned)]
+    offenders += [
+        f"漏登记（新引入的裸 tag，既没钉 digest 也没有分级理由）：{ref}" for ref in sorted(unpinned - registered)
+    ]
+    return offenders
+
+
 def test_base_image_criterion_has_scope() -> None:
-    """三个作用域都必须非空，否则下面的判据全部恒真。"""
+    """作用域与"能不能匹配"是两件事：这里只断言作用域非空 + 配方侧已到全钉状态。"""
     dockerfiles = _dockerfiles()
     refs = [r for _, r in _base_refs(dockerfiles)]
     assert refs, "runtime/Dockerfile* 里一个 FROM 都没解析到——钉 digest 的判据会恒真"
     assert any(_is_pinned(r) for r in refs), "没有任何已钉 digest 的基础镜像——逐字相等判据会恒真"
-    assert _unpinned_external(dockerfiles), "没有任何未钉的外部基础镜像——例外登记表的核对会恒真"
+    # 主判据：真实树里**不该再有**未钉的外部基础镜像。例外判据的可证伪性由
+    # test_exception_reconciliation_fires_in_both_directions 的注入夹具常驻承担。
+    unpinned = _unpinned_external(dockerfiles)
+    assert not unpinned, (
+        f"这些外部基础镜像没钉 digest：{sorted(unpinned)}；"
+        "确实拿不到权威读数时，必须按固定词表定级后登记进 UNPINNED_EXCEPTIONS 并写进 SUPPLY_CHAIN §2"
+    )
 
 
 def test_external_base_images_are_digest_pinned() -> None:
     doc = (REPO_ROOT / "docs" / "SUPPLY_CHAIN.md").read_text(encoding="utf-8")
-    for ref, entry in UNPINNED_EXCEPTIONS.items():
-        assert entry["grade"] in EVIDENCE_GRADES, f"{ref} 的证据等级 {entry['grade']!r} 不在词表内"
-        assert len(entry["reason"]) >= 40, f"{ref} 的例外理由过短，不足以支撑免检"
-        assert ref in doc, f"例外 {ref} 未登记在 docs/SUPPLY_CHAIN.md"
+    offenders = [
+        o for ref, entry in UNPINNED_EXCEPTIONS.items() for o in _exception_entry_offenders(ref, entry, doc)
+    ]
     # 已钉的那份 digest 也必须出现在文档里：文档只写 tag 就等于把移动的东西当成钉死的
     for pinned in {r for group in _pinned_authorities(_dockerfiles()).values() for r in group}:
-        assert pinned in doc, f"{pinned} 已钉进 Dockerfile，但 docs/SUPPLY_CHAIN.md 未逐字记录"
-    unpinned = _unpinned_external(_dockerfiles())
-    assert unpinned == set(UNPINNED_EXCEPTIONS), (
-        "未钉 digest 的外部基础镜像与例外登记表不符："
-        f"多登记（应删）{sorted(set(UNPINNED_EXCEPTIONS) - unpinned)} / "
-        f"漏登记（要么钉要么补理由）{sorted(unpinned - set(UNPINNED_EXCEPTIONS))}"
+        if pinned not in doc:
+            offenders.append(f"{pinned} 已钉进 Dockerfile，但 docs/SUPPLY_CHAIN.md 未逐字记录")
+    offenders += _exception_table_offenders(_unpinned_external(_dockerfiles()), set(UNPINNED_EXCEPTIONS))
+    assert not offenders, "供应链配方层不合规：" + " | ".join(offenders)
+
+
+def test_exception_entry_criteria_fire_on_injected_entries() -> None:
+    """登记表为空时，"每条登记项都要定级/给理由/进文档"这三把判据也无事可做——注入证伪。"""
+    doc = "…只有 example.registry/team/app:1.0.0 出现在这里…"
+    good = {"grade": "authoritative-reading-not-obtained", "reason": "x" * 40}
+    assert _exception_entry_offenders("example.registry/team/app:1.0.0", good, doc) == []
+    bad_grade = _exception_entry_offenders(
+        "example.registry/team/app:1.0.0", {"grade": "trust-me", "reason": "x" * 40}, doc
     )
+    assert len(bad_grade) == 1 and "不在词表内" in bad_grade[0], bad_grade
+    short = _exception_entry_offenders(
+        "example.registry/team/app:1.0.0", {"grade": "accepted-risk", "reason": "先放着"}, doc
+    )
+    assert len(short) == 1 and "过短" in short[0], short
+    undocumented = _exception_entry_offenders(
+        "other.registry/team/app:2.0.0", dict(good), doc
+    )
+    assert len(undocumented) == 1 and "未登记在" in undocumented[0], undocumented
+
+
+def test_exception_reconciliation_fires_in_both_directions() -> None:
+    """例外判据的两个方向各注入一次，另配两侧都空的合规档——空表不得等于免检通道被打开。
+
+    真实树现在既无未钉镜像也无登记项，`unpinned == registered == set()` 那一行天然成立；
+    没有这支注入夹具，"以后有人加了裸 tag 却忘了登记"与"以后有人钉上了却忘了删登记"
+    都会静默通过。
+    """
+    bare = "example.registry/team/app:1.0.0"
+    # 漏登记：配方里出现裸 tag，表里没有它
+    missing = _exception_table_offenders({bare}, set())
+    assert len(missing) == 1 and "漏登记" in missing[0], missing
+    # 死登记：表里登记着，但配方里已经没有这个未钉镜像（钉上了或删了）
+    dead = _exception_table_offenders(set(), {bare})
+    assert len(dead) == 1 and "死登记" in dead[0], dead
+    # 两边都有＝已经合规，不该开火（否则双向对账只是恒真）
+    assert _exception_table_offenders({bare}, {bare}) == []
+    # 真实树的现状：两侧皆空，且判据在这种形状下也不开火
+    assert _exception_table_offenders(_unpinned_external(_dockerfiles()), set(UNPINNED_EXCEPTIONS)) == []
 
 
 def test_pinned_base_ref_is_used_verbatim_by_every_consumer() -> None:

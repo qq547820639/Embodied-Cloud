@@ -16,7 +16,7 @@
 | 项 | 现状 | 状态 |
 |---|---|---|
 | Isaac Sim 版本 | `FROM nvcr.io/nvidia/isaac-sim:6.0.1@sha256:783444c706538aa76cf5126e911ddc5e618779e6105305ad4af4260362a30aa9` | VERIFIED（本轮由 tag 升级为钉 digest）：digest 由**权威源 nvcr.io 本身**匿名解析得到（`/proxy_auth` 换取 pull 令牌 → `HEAD /v2/nvidia/isaac-sim/manifests/6.0.1` 的 `docker-content-digest`），并 `GET` 同一 manifest list 重算 body 的 sha256 与该读数一致（743 B，`…manifest.list.v2+json`）；子清单 linux/amd64 `sha256:b1c542b2…`、linux/arm64 `sha256:20269735…`。**钉的是多架构索引而非单个平台清单**，amd64 GPU 主机与 arm64 本机各自按平台解析。`name:tag@digest` 形式由本机 `docker build` 实测接受（进入解析并按 digest 开始拉层），tag 保留只为可读性。**"阻塞于 NGC 凭据"是错的**：解析 digest 不需要凭据，凭据只在拉层字节时才要 |
-| 控制面基础镜像 | `FROM python:3.12-slim`（**未钉 digest，已登记的例外**） | 证据等级 `authoritative-reading-not-obtained`：Docker Hub 的 `auth.docker.io` 与 `hub.docker.com` 本机实测均不可达（curl 28 超时），拿不到该 tag 当前指向的索引 digest。`public.ecr.aws/docker/library/python` 的官方镜像镜像站给到 `sha256:f77ac9e4…`（body 重算 sha256 一致，OCI index，16 个子清单），但它是第三方镜像而非权威源；且其 amd64/arm64 子清单的 config digest（`9e87977b…` / `8630ab77…`）**都不等于**本机缓存那份 `python:3.12-slim` 的 config（`2f17fc04…`）——两个来源互不印证。这既证明该 tag 确实会移动（本机缓存已是旧内容），也说明"今天的权威 digest"仍未证实；钉一个未证实的 digest 会让构建直接失败，故按例外登记而非钉死 |
+| 控制面基础镜像 | `FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f` | VERIFIED（本轮由"已登记的例外"升级为钉 digest）：**权威读数取自 docker.io 本身**——`docker pull --platform linux/amd64 python:3.12-slim` 打印的 `Digest` 即此值，随后 `docker pull docker.io/library/python@sha256:f77ac9e4…` 按 digest 再解析一次并成功（本机 arm64 走同一索引解析出可运行镜像）。上一轮只在第三方镜像 `public.ecr.aws/docker/library/python` 上读到同一个索引 digest，当时记为"两源互不印证"（第三方索引 digest 与权威一致本就是镜像站的预期行为，但当时缺权威侧那一手）；本轮补上的正是这一手，两个独立传输路径同值。取证路径本身要记一条限制：本机 `curl` 到 `auth.docker.io`/`registry-1.docker.io`/`hub.docker.com` 仍全部超时，能出网的是 **docker 守护进程**那条传输（`docker manifest inspect` 走 CLI 直连，同样超时、读不到），所以读数只能来自 pull 这条路径，不是"三条路径都试过"。钉的是多架构索引而非单个平台清单 ⇒ amd64 GPU 主机与 arm64 本机各自按平台解析。**构建侧实跑**：`make control-image` 的 `Step 1/10 : FROM python:3.12-slim@sha256:f77ac9e4…` 用的就是这条引用，`Successfully built 53af23a7ecd0`，产物容器内 `python -V` = `Python 3.12.14`（本次构建产物随后 `docker rmi` 删除；此前没有任何常驻门禁构建过控制面镜像，见 §8 第 3 项） |
 | Isaac Lab 版本 | `ARG ISAACLAB_REF=v3.0.0-beta2.patch1` + `ARG ISAACLAB_COMMIT=ffff603eafc6b74264a5261cc0183d6a65390d78`，clone 后 `test "$(git rev-parse HEAD)" = "$ISAACLAB_COMMIT"` | VERIFIED（v0.6.0）：commit 由两个独立来源核对——GitHub refs API 与 `git ls-remote` 给出同一 sha（该 tag 是 lightweight tag，直接指向 commit）。tag 可被 force push 移动，故只认 commit |
 | 启动命令 | 模板 entrypoint 版本锁定（TemplateVersion） | VERIFIED |
 | 配方机检 | `tests/test_supply_chain.py`：任何 `curl/wget -o` 必须同块 `sha256sum -c`；任何 `git clone --branch` 必须比对 HEAD commit；**任何非自有命名空间的 `FROM` 必须带 `@sha256:`，未钉者必须出现在双向对账的例外登记表里（多登记与漏登记都红），且登记表与本文逐字互核**；**消费侧引用同一基础镜像时必须与 Dockerfile 钉死的那份逐字相等**（`gpu_acceptance.sh`／`isaac_sim_smoke.sh`／`release.sh`／`docs/GPU_HOST.md` 四处，归属键刻意剥掉 tag）；并断言三条判据的作用域均非空 | VERIFIED（v0.6.0 建下载/克隆两条；本轮新增 digest 三条，改钉之前对两处开火，读数见 CHANGELOG 0.6.0 与本轮记录） |
@@ -59,7 +59,10 @@
   且登记表与本文双向对账——多登记（其实已经钉上）与漏登记（新引入的裸 tag）都判红，
   例外条目必须带固定词表里的证据等级（`authoritative-reading-not-obtained` /
   `third-party-reading-only` / `accepted-risk`）与 ≥40 字的理由。登记即定级：
-  例外不接受无等级的"先放着"
+  例外不接受无等级的"先放着"。**当前该表为空**（`nvcr.io/nvidia/isaac-sim` 与
+  `python:3.12-slim` 两个外部基础镜像都已钉多架构索引 digest）；空表不等于判据停摆——
+  两个方向的开火夹具常驻在
+  `tests/test_supply_chain.py::test_exception_reconciliation_fires_in_both_directions`
 - **测试档位镜像同样不许用可变 tag**：`versity/versitygw:v1.8.0`、`kindest/node:v1.37.0`、
   `postgres:16-alpine` 均带具体版本；`test_test_tier_image_tag_is_pinned` 常驻把关
 
@@ -78,7 +81,12 @@
    常驻用例把整条链连起来跑）。剩下的只是"没人拿真镜像跑过它"——阻塞于 NGC 条款 + x86 GPU 主机
    （要的是把 workspace 镜像**建出来**；本机是 Apple Silicon，且 G2–G4 的验收口径本来就要求
    NVIDIA x86 主机）
-2. **`python:3.12-slim` 钉 digest**：当前按例外登记（见 §2）。补上只需一次"在能出网的环境里向**权威源** `registry-1.docker.io` 解析该 tag 的索引 digest"的机会（本机三条路径均不可达，见 §2 同一行）；拿到后把 `@sha256:` 加进 `runtime/Dockerfile.control-plane` 并从例外登记表删除——登记表是双向核对的，钉上却不删登记会直接红
+2. ~~**`python:3.12-slim` 钉 digest**~~ **本轮闭合**（见 §2 同一行：权威索引 digest 已从 docker.io 取到并钉进
+   `runtime/Dockerfile.control-plane`，登记表同步清空）。留一条方法论记账：上一条登记写的阻塞理由是
+   "本机三条路径均不可达"，而那三条全是 **CLI/curl 那条传输**（`auth.docker.io`、`hub.docker.com`、
+   `registry-1.docker.io`）；**守护进程自己那条出网路径从没被试过**，一试就通。这与"Isaac Sim 钉 digest
+   阻塞于 NGC 凭据"是同一类错——把"我试过的某条通道不通"记成"这件事做不了"。今后写"取不到权威读数"之前，
+   必须先把通道列全（CLI 直连／守护进程／构建器／另一台机器），并写明哪几条试过、怎么试的。
 3. **控制面镜像 SBOM 化**：wheel 级 SBOM 已有，镜像层 SBOM 需真实构建后由 trivy/syft 生成
 
 （原"Isaac Sim 基础镜像钉 digest"一项已于本轮闭合：它曾被登记为"阻塞于 NGC 凭据"，实测**不成立**——
