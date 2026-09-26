@@ -16,6 +16,7 @@ docs/CURRENT_STATE.md 的 supply-chain 行）。
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 RUNTIME = Path(__file__).resolve().parents[1] / "runtime"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -372,16 +373,95 @@ def test_sameness_criterion_fires_when_a_script_drifts(tmp_path: Path) -> None:
 
 IMAGE_SBOM_SCRIPT = SCRIPTS / "image_sbom.sh"
 
-# 只认"默认值即生效引用"这一条赋值形状（`FOO_IMAGE="${FOO_IMAGE:-<ref>}"`），不扫全文：
-# 脚本正文的注释里会提到别的注册表名（三通道实测记录），把它们也当成"消费中的引用"
-# 会把判据变成对措辞的红——那是判错对象。
-TOOL_IMAGE_ASSIGN_RE = re.compile(r'^\w+_IMAGE="\$\{\w+:-(?P<ref>[^"}]+)\}"$', re.MULTILINE)
+# 判据看的是**这一步实际拉起来的东西**，不是措辞：
+# - 折掉 `\` 续行（脚本里的 `docker run` 就是三行折一句），去掉整行注释
+#   （注释里记着三条通道的注册表名，把它们当成"消费中的引用"就变成对措辞的红）；
+# - 只看 `docker run` / `docker pull` 这些逻辑行上的镜像来源——字面量，以及这一行引用到的
+#   变量在文件里的默认值。只认"变量赋值那一行"是不够的：把变量改名成 `TRIVY_IMG=`、
+#   或者直接在这行写 `aquasec/trivy:latest`，都能绕过赋值形状检查而真的把没钉的字节拉下来。
+DOCKER_PULL_RE = re.compile(r"\bdocker\s+(?:run|pull)\b")
+IMAGE_REF_RE = re.compile(
+    r"""(?<![\w/.-])                                   # 前面不能是词字符/斜杠/点（排除路径与挂载）
+    (?:
+        [A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z][A-Za-z0-9.-]*/[A-Za-z0-9._\-/:@]+  # host/repo[:tag][@digest]
+      | [a-z0-9][a-z0-9._-]{1,62}/[a-z0-9][a-z0-9._-]*(?::[A-Za-z0-9._-]+)?  # 两段名（Docker Hub）
+    )""",
+    re.VERBOSE,
+)
+VAR_REF_RE = re.compile(r"\$\{?(\w+)")
+# 两种赋值形状各自解析，不用一条带可选前缀的 regex：合成一条时 `${CONTROL_IMAGE:-embodiedcloud/x:1}`
+# 的前缀会留在捕获值里（本轮真踩过），于是"自有命名空间"的过滤看不见它，判据在自己的
+# 生产脚本上直接误报。
+ASSIGN_DEFAULT_RE = re.compile(r'^\s*(\w+)="\$\{[^:}]+:-(?P<ref>[^"}]*)\}"\s*$', re.MULTILINE)
+ASSIGN_LITERAL_RE = re.compile(r'^\s*(\w+)="(?P<ref>[^"$]*)"\s*$', re.MULTILINE)
+# 首段是仓库里的目录名时它是路径不是镜像（`dist/sbom.image.cdx.json` 之类）。
+PATH_FIRST_SEGMENTS = {"scripts", "dist", "docs", "tests", "app", "runtime", "alembic", "edge_agent"}
+FILE_SUFFIXES = (".py", ".sh", ".json", ".sock", ".toml", ".log", ".txt", ".tmp")
+
+
+def _logical_lines(text: str) -> list[str]:
+    """折掉行尾的续行反斜杠、丢掉整行注释，返回可以执行的逻辑行。"""
+    out: list[str] = []
+    buf = ""
+    for line in text.splitlines():
+        if not buf and not line.lstrip().startswith("#"):
+            buf = line.strip()
+            if buf.endswith("\\"):
+                buf = buf[:-1].strip()
+                continue
+            out.append(buf)
+            buf = ""
+        elif buf:
+            buf += " " + line.strip()
+            if buf.endswith("\\"):
+                buf = buf[:-1].strip()
+                continue
+            out.append(buf)
+            buf = ""
+    if buf:
+        out.append(buf)
+    return out
+
+
+def _looks_like_image(ref: str) -> bool:
+    ref = ref.strip()
+    if not ref or "/" not in ref or ref[0] in "./":
+        return False
+    head = ref.split("/", 1)[0]
+    if head in PATH_FIRST_SEGMENTS:
+        return False
+    # 带点的头是 registry 主机名，必须凑满 host/namespace/repo 三段；两段名的头不许带点，
+    # 否则 `.venv/bin/python` 这类宿主路径会被读成"一个镜像引用"。
+    if "." in head and ref.count("/") < 2:
+        return False
+    return not ref.rsplit("/", 1)[-1].split(":", 1)[0].endswith(FILE_SUFFIXES)
+
+
+def _assigned_defaults(text: str) -> dict[str, str]:
+    """`NAME="字面量"` 与 `NAME="${OTHER:-…}"` 两张默认值表（只收看起来像镜像引用的）。"""
+    out: dict[str, str] = {}
+    for regex in (ASSIGN_LITERAL_RE, ASSIGN_DEFAULT_RE):
+        for m in regex.finditer(text):
+            ref = m.group("ref").strip()
+            if _looks_like_image(ref):
+                out[m.group(1)] = ref
+    return out
 
 
 def _tool_image_refs(text: str) -> set[str]:
-    """这一步真正拉起来用的外部工具镜像引用（自有命名空间不算）。"""
-    refs = {m.group("ref") for m in TOOL_IMAGE_ASSIGN_RE.finditer(text)}
-    return {r for r in refs if not r.startswith(OWN_NAMESPACE)}
+    """这一步真正会拉下来的外部镜像引用（自有命名空间不算）。"""
+    defaults = _assigned_defaults(text)
+    refs: set[str] = set()
+    for line in _logical_lines(text):
+        if not DOCKER_PULL_RE.search(line):
+            continue
+        for token in IMAGE_REF_RE.findall(line):
+            if _looks_like_image(token):
+                refs.add(token.strip())
+        for var in VAR_REF_RE.findall(line):
+            if var in defaults:
+                refs.add(defaults[var])
+    return {r for r in refs if r and not r.startswith(OWN_NAMESPACE)}
 
 
 def _tool_image_offenders(refs: set[str], doc: str) -> list[str]:
@@ -394,9 +474,9 @@ def _tool_image_offenders(refs: set[str], doc: str) -> list[str]:
     offenders: list[str] = []
     for ref in sorted(refs):
         if not _is_pinned(ref):
-            offenders.append(f"镜像层 SBOM 步骤的工具镜像 {ref} 没钉 digest")
+            offenders.append(f"镜像层 SBOM 步骤要拉起的 {ref} 没钉 digest")
         elif ref not in doc:
-            offenders.append(f"{ref} 已钉进 scripts/image_sbom.sh，但 docs/SUPPLY_CHAIN.md 未逐字记录")
+            offenders.append(f"{ref} 已被 scripts/image_sbom.sh 拉起，但 docs/SUPPLY_CHAIN.md 未逐字记录")
     return offenders
 
 
@@ -415,46 +495,110 @@ def test_image_sbom_step_exists_and_is_pinned() -> None:
     doc = (REPO_ROOT / "docs" / "SUPPLY_CHAIN.md").read_text(encoding="utf-8")
     assert IMAGE_SBOM_SCRIPT.exists(), "scripts/image_sbom.sh 不存在——镜像层 SBOM 步骤消失了"
     refs = _tool_image_refs(IMAGE_SBOM_SCRIPT.read_text(encoding="utf-8"))
-    assert refs, "image_sbom.sh 里解析不到任何工具镜像赋值——下面的判据会恒真"
+    assert refs, "image_sbom.sh 的 docker run/pull 行上解析不到任何外部镜像引用——下面的判据会恒真"
     offenders = _tool_image_offenders(refs, doc)
     assert not offenders, "镜像层 SBOM 步骤的配方层不合规：" + " | ".join(offenders)
 
 
 def test_tool_image_criterion_fires_in_both_directions() -> None:
-    """注入三档：裸 tag、钉了但没进文档、钉了且进了文档——第三档必须不开火。"""
-    doc = "…只有 example.registry/team/tool:1.0.0@sha256:" + "ab" * 32 + " 出现在这里…"
-    bare = _tool_image_offenders({"example.registry/team/tool:1.0.0"}, doc)
-    assert len(bare) == 1 and "没钉 digest" in bare[0], bare
-    undocumented = _tool_image_offenders({"example.registry/team/tool:2.0.0@sha256:" + "cd" * 32}, doc)
-    assert len(undocumented) == 1 and "未逐字记录" in undocumented[0], undocumented
-    assert _tool_image_offenders({"example.registry/team/tool:1.0.0@sha256:" + "ab" * 32}, doc) == []
-    # 自有命名空间的赋值不参与这条判据（工具镜像不可能是我们自己的）
-    assert _tool_image_refs('IMAGE="${IMAGE:-embodiedcloud/control-plane:0.7.0}"\n') == set()
+    """每个绕过形状都各注入一次，合规档不开火。
+
+    这些档不是装饰：`_tool_image_refs` 若退化成只扫赋值行，(a)/(b)/(c) 三档就会静默通过，
+    而它们正是"脚本真的把一个没钉的镜像拉下来"的三种写法。
+    """
+    pinned = "example.registry/team/tool:1.0.0@sha256:" + "ab" * 32
+    doc = f"…只有 {pinned} 出现在这里…"
+
+    def offenders_of(body: str) -> list[str]:
+        return _tool_image_offenders(_tool_image_refs(body), doc)
+
+    # (a) 改名后的赋值变量 + 没钉的默认值：赋值形状不是判据，被拉起来的引用才是
+    renamed = (
+        'TRIVY_IMG="${TRIVY_IMG:-example.registry/team/tool:9.9.9}"\n'
+        'docker run --rm "$TRIVY_IMG" image x\n'
+    )
+    assert len(offenders_of(renamed)) == 1, renamed
+    # (b) 直接写在 run 行上的字面量（Docker Hub 两段名，最容易漏的一种形状）
+    assert len(offenders_of('docker run --rm aquasec/trivy:latest image x\n')) == 1
+    # (c) 反斜杠续行：判据必须折行才看得见第二行上的变量
+    folded = ('T_IMAGE="${T_IMAGE:-example.registry/team/tool:0.0.1}"\n'
+              'docker run --rm \\\n  -v /var/run/x:/y \\\n  "$T_IMAGE" image x\n')
+    assert len(offenders_of(folded)) == 1, folded
+    # (d) 钉上了但文档没逐字记（文档只写 tag＝把移动的东西当成钉死的）
+    assert len(offenders_of(f'docker run --rm example.registry/team/tool:2.0.0@sha256:{"cd" * 32} image x\n')) == 1
+    # 合规档：钉上且进文档，不开火
+    assert offenders_of(f'docker run --rm {pinned} image x\n') == []
+    # 注释里的注册表名不参与（判措辞会误伤实测记录）
+    assert _tool_image_refs(f'# 另一条通道是 aquasec/trivy:latest\ndocker run --rm {pinned} image x\n') == {pinned}
+    # 挂载点与宿主路径不能被当成镜像（这是判据的假红侧）
+    assert _tool_image_refs("docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "
+                            f'{pinned} image x > "$OUT.tmp"\n') == {pinned}
+    # 自有命名空间的引用确实被扫到、再被规则排除（不是"根本没匹配"）
+    scanned = _tool_image_refs('docker run --rm embodiedcloud/control-plane:0.7.0 image x\n')
+    assert scanned == set(), scanned
+    assert "embodiedcloud/control-plane:0.7.0" in {
+        t for line in _logical_lines('docker run --rm embodiedcloud/control-plane:0.7.0 image x\n')
+        for t in IMAGE_REF_RE.findall(line)
+    }
 
 
 def test_image_sbom_validator_fires_per_clause() -> None:
-    """产出侧判据的每一条都要单独开火，合规夹具整体不开火——与量具自己的 --self-test 同源。"""
+    """产出侧判据的每一条都要单独开火且**只开自己那一枪**——与量具 --self-test 同源。"""
     v = _load_image_sbom_validator()
     ref = "embodiedcloud/control-plane:0.7.0"
     good = v._compliant()
-    assert v.sbom_offenders(good, ref) == []
+    good_id = "sha256:" + "ab" * 32
+    assert v.sbom_offenders(good, ref, good_id) == []
 
-    no_pypi = json.loads(json.dumps(good))
-    no_pypi["components"] = [c for c in no_pypi["components"] if not str(c.get("purl")).startswith("pkg:pypi/")]
-    one = v.sbom_offenders(no_pypi, ref)
-    assert len(one) == 1 and "pkg:pypi" in one[0], one
+    def subject(**kv: Any) -> dict[str, Any]:
+        doc = json.loads(json.dumps(good))
+        doc["metadata"]["component"].update(kv)
+        return doc
 
-    no_deb = json.loads(json.dumps(good))
-    no_deb["components"] = [c for c in no_deb["components"] if not str(c.get("purl")).startswith("pkg:deb/")]
-    one = v.sbom_offenders(no_deb, ref)
-    assert len(one) == 1 and "pkg:deb" in one[0], one
-
-    floating = json.loads(json.dumps(good))
-    floating["metadata"]["component"]["purl"] = "pkg:oci/control-plane?arch=arm64"
-    one = v.sbom_offenders(floating, ref)
-    assert len(one) == 1 and "sha256" in one[0], one
+    arms: list[tuple[str, dict[str, Any], str, str, int]] = [
+        ("缺 pkg:pypi（只解出 OS 包）", _drop_purl_prefix(good, "pkg:pypi/"), ref, good_id, 1),
+        ("缺 pkg:deb（只解出 wheel）", _drop_purl_prefix(good, "pkg:deb/"), ref, good_id, 1),
+        ("purl 没有摘要", subject(purl="pkg:oci/control-plane?arch=arm64"), ref, "", 1),
+        ("摘要落在查询参数位", subject(purl=f"pkg:oci/control-plane?tag=latest@sha256:{'ab' * 32}"), ref, "", 1),
+        ("type 不是 container", subject(type="file"), ref, "", 1),
+        ("描述的是别的镜像（名字回声）", subject(name="somebody-else/image:9.9.9"), ref, "", 1),
+        ("inspect 的 Id 与清单自报不符", good, ref, "sha256:" + "cd" * 32, 1),
+        ("调用方没给被审镜像名字", good, "", good_id, 1),
+        ("components 为空", _empty_components(good), ref, good_id, 1),
+        ("bomFormat 不是 CycloneDX", _with_bom_format(good, "SPDX"), ref, good_id, 1),
+        ("漏洞结论（列表形）", _with_vulnerabilities(good, [{"id": "CVE-0000-0000"}]), ref, good_id, 1),
+        ("漏洞结论（对象形）",
+         _with_vulnerabilities(good, {"vulnerabilities": [{"id": "CVE-0001-0001"}]}), ref, good_id, 1),
+    ]
+    for label, doc, arm_ref, arm_id, expected in arms:
+        got = v.sbom_offenders(doc, arm_ref, arm_id)
+        assert len(got) == expected, f"{label}：实际 {len(got)} 条，期望 {expected} 条 → {got}"
 
     # 落盘失败这一类：判据必须报「文件不存在」，而不是抛异常或读成合规
     missing = v.check_file(REPO_ROOT / "definitely-not-here.cdx.json", ref)
     assert len(missing) == 1 and "不存在" in missing[0], missing
+
+
+def _drop_purl_prefix(doc: dict[str, Any], prefix: str) -> dict[str, Any]:
+    new = json.loads(json.dumps(doc))
+    new["components"] = [c for c in new["components"] if not str(c.get("purl", "")).startswith(prefix)]
+    return new
+
+
+def _empty_components(doc: dict[str, Any]) -> dict[str, Any]:
+    new = json.loads(json.dumps(doc))
+    new["components"] = []
+    return new
+
+
+def _with_bom_format(doc: dict[str, Any], fmt: str) -> dict[str, Any]:
+    new = json.loads(json.dumps(doc))
+    new["bomFormat"] = fmt
+    return new
+
+
+def _with_vulnerabilities(doc: dict[str, Any], value: Any) -> dict[str, Any]:
+    new = json.loads(json.dumps(doc))
+    new["vulnerabilities"] = value
+    return new
 

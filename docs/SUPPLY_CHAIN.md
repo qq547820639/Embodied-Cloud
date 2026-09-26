@@ -49,7 +49,7 @@
 | release 流程 | scripts/release.sh：semver → lint/type/test → build → checksums → 分级验证矩阵 | VERIFIED（脚本存在且 CI 通过） |
 | OpenAPI 新鲜度 | CI 重新生成 + git diff 门禁 | VERIFIED |
 | SBOM | `make sbom` = `uv export --format cyclonedx1.5` → `dist/sbom.cdx.json`，随 `dist/checksums.txt` 入产物清单 | VERIFIED（v0.5.0） |
-| 镜像层 SBOM（控制面镜像） | `make image-sbom` = `scripts/image_sbom.sh`：对已构建的控制面镜像跑 trivy 出 CycloneDX → `dist/sbom.image.cdx.json`，落盘后过 `scripts/check_image_sbom.py` 的形状判据。工具镜像钉死为 `public.ecr.aws/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`；这一份 digest 的**方向**单独核过：ECR Public 匿名令牌 + `Accept: …image.index.v1+json` 取回 manifest body（3772 B）逐字节重算 sha256 得同一个值，子清单 amd64 `ee940acb…`／arm64 `55ad20f8…` 各在——钉的是多架构索引，不是本机 arm64 那一份（§2 上一条留过「钉错方向会让所有人的构建当场失败」这条教训） | VERIFIED（本轮，§8 第 3 项闭合）：判据条款＝被审对象必须是 `type=container` 且 purl 带 `@sha256:`（只写 tag 的清单会在 tag 移动后描述另一份字节）、至少一个 `pkg:deb/`（OS 层）、至少一个 `pkg:pypi/`（wheel 层，缺它这份就与 `make sbom` 没区别）、`bomFormat=CycloneDX`、`components` 非空、不得混入 `vulnerabilities` 结论；量具自带 10 档注入（`--self-test` 全 OK）＋常驻 `test_image_sbom_validator_fires_per_clause`。**真读数**：trivy 0.74.0 对配方里那份钉死的基础镜像跑 `image --format cyclonedx` 用时 12.5s，产出 `components=89 / deb=87 / pypi=1`，其自报 purl 里的摘要 `f77ac9e4…` 与 §2 钉进 `Dockerfile.control-plane` 的那个 digest 同值——两把独立的尺子（构建配方 / 清单工具自报）对上同一个事实。**两条实测记账**：① 结果走 stdout 重定向而不是 `--output` 指挂载路径——这台机器（colima）的 `/tmp` **不是共享进虚拟机的挂载点**（容器内写成功、宿主看不见；同一分钟内换成工程目录下的挂载点就可见），产物由宿主自己写才不依赖这条随时会变的约定；② trivy 自己会打印「`--format cyclonedx` disables security scanning」，因此这份产物是**清单**、不是"没有漏洞"的结论（OS 层漏洞扫描另立 §8 第 5 项）。**接线常驻**：docker 档 `test_pinned_sbom_tool_actually_produces_a_checkable_image_sbom` 每轮核"工具 digest 取得到 + 挂 docker.sock 读得到本地镜像 + 输出过同一份判据"（判据只有一份实现，测试与脚本共用，不抄读数）；控制面镜像那一份产物需要真构建，而本轮构建 5 次全部失败在容器侧→PyPI CDN 那条通道（逐条读数与并排探针见 §8 第 3 项），故 `image-sbom` 与 `control-image` 一样留在人工/CI 档，不折进每轮 |
+| 镜像层 SBOM（控制面镜像） | `make image-sbom` = `scripts/image_sbom.sh`：对已构建的控制面镜像跑 trivy 出 CycloneDX → `dist/sbom.image.cdx.json`，落盘后过 `scripts/check_image_sbom.py` 的形状判据。工具镜像钉死为 `public.ecr.aws/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`；这一份 digest 的**方向**单独核过：ECR Public 匿名令牌 + `Accept: …image.index.v1+json` 取回 manifest body（3772 B）逐字节重算 sha256 得同一个值，子清单 amd64 `ee940acb…`／arm64 `55ad20f8…` 各在——钉的是多架构索引，不是本机 arm64 那一份（§2 上一条留过「钉错方向会让所有人的构建当场失败」这条教训） | VERIFIED（本轮，§8 第 3 项闭合）：判据条款＝被审对象必须是 `type=container` 且 purl 严格是 `pkg:oci/<name>@sha256:<64>` 的形状（只写 tag、或把摘要塞进查询参数位的清单都不算）＋**清单自报的摘要必须等于 `docker image inspect` 的 `.Id`**（这一条才是防"扫错对象"：名字只是 trivy 对它收到的命令行参数的回声）、至少一个 `pkg:deb/`（OS 层）、至少一个 `pkg:pypi/`（wheel 层，缺它这份就与 `make sbom` 没区别）、`bomFormat=CycloneDX`、`components` 非空、不得混入 `vulnerabilities` 结论；量具自带 14 档注入（`--self-test` 全 OK，**每档核对精确条数**，不只判"有没有开火"）＋常驻 `test_image_sbom_validator_fires_per_clause` 覆盖同样这批条款。**真读数**：trivy 0.74.0 对配方里那份钉死的基础镜像跑 `image --format cyclonedx` 用时 12.5s，产出 `components=89 / deb=87 / pypi=1`，其自报 purl 里的摘要 `f77ac9e4…` 与 §2 钉进 `Dockerfile.control-plane` 的那个 digest 同值——两把独立的尺子（构建配方 / 清单工具自报）对上同一个事实。**两条实测记账**：① 结果走 stdout 重定向而不是 `--output` 指挂载路径——这台机器（colima）的 `/tmp` **不是共享进虚拟机的挂载点**（容器内写成功、宿主看不见；同一分钟内换成工程目录下的挂载点就可见），产物由宿主自己写才不依赖这条随时会变的约定；② trivy 自己会打印「`--format cyclonedx` disables security scanning」，因此这份产物是**清单**、不是"没有漏洞"的结论（OS 层漏洞扫描另立 §8 第 5 项）。**接线常驻**：docker 档 `test_pinned_sbom_tool_actually_produces_a_checkable_image_sbom` 每轮核"工具 digest 取得到 + 挂 docker.sock 读得到本地镜像 + 输出过同一份判据"（判据只有一份实现，测试与脚本共用，不抄读数）；**控制面镜像那一份产物本轮已真落盘**：`dist/sbom.image.cdx.json`，`components=137 / deb=87 / pypi=49`，并绑到 inspect 的 `.Id`＝`sha256:cd371b31…`（＝trivy 自报 ImageID＝purl 摘要，三处同值）；但因 `image-sbom` 依赖一次真构建（今晚前 5 次全败在容器侧→PyPI CDN 那条通道，第 6 次 165s 才成，逐条读数见 §8 第 3 项），它与 `control-image` 一样留在人工/CI 档，不折进每轮 |
 | 漏洞审计 | `make audit` = `uv audit --locked`，CI 在 sbom 之后执行 | VERIFIED（v0.5.0） |
 | 集成档真实性 | CI 断言需要 docker 的档位（postgres/docker/browser/**object store**/**k8s 控制面**）必须 PASS，否则红；只有需要 GPU device plugin 的 `integration_k8s` 允许 PENDING。拉取测试镜像的步骤已移到 `make validate` **之前**（原顺序会让档位读数来自镜像尚未缓存的那一刻） | VERIFIED（本轮扩展） |
 
@@ -96,20 +96,21 @@
    `registry-1.docker.io`）；**守护进程自己那条出网路径从没被试过**，一试就通。这与"Isaac Sim 钉 digest
    阻塞于 NGC 凭据"是同一类错——把"我试过的某条通道不通"记成"这件事做不了"。今后写"取不到权威读数"之前，
    必须先把通道列全（CLI 直连／守护进程／构建器／另一台机器），并写明哪几条试过、怎么试的。
-3. ~~**控制面镜像 SBOM 化**~~ **本轮闭合**（机制与判据见 §5 新增那一行）：wheel 级 SBOM 之外，
-   现在有 `make image-sbom` 出镜像层 CycloneDX，形状判据与工具 digest 都有常驻把关。
-   留一条**没做完**的部分：控制面镜像那一份产物本轮没落盘。构建这一步在同一棵树上连跑
-   **5 次全部失败**（用时 153s／102s／224s／156s／50s），全部死在
-   `Step 7/10 : RUN pip install --no-cache-dir ".[postgres]"`，成因两种形状：
+3. ~~**控制面镜像 SBOM 化**~~ **本轮闭合（机制与真产物都在）**：机制与判据见 §5 新增那一行。
+   真产物 `dist/sbom.image.cdx.json` 由 `make image-sbom` 对**本轮真构建出来的**
+   `embodiedcloud/control-plane:0.7.0` 产出，读数 `components=137 / deb=87 / pypi=49`
+   （OS 层 87 个 Debian 包 + 镜像里实际装上的 49 个 wheel），判据还把它绑到
+   `docker image inspect` 的 `.Id`＝`sha256:cd371b31…`——三处同值（Id＝trivy 自报的 ImageID 属性
+   ＝purl 里的摘要），所以"扫错对象"这一次是真的会被判红，而不是靠名字回声。
+   构建侧今晚确实难：**前 5 次全败**（153s／102s／224s／156s／50s，全部死在
+   `Step 7/10 : RUN pip install --no-cache-dir ".[postgres]"`，两种形状——
    `ReadTimeoutError(host='files.pythonhosted.org')` 与
-   `Could not find a version that satisfies the requirement setuptools>=75 (from versions: none)`。
-   把成因定位到**容器侧→PyPI CDN**而不是"配方坏了"，靠的是同一时刻两条并排探针：容器内
-   `urlopen('https://pypi.org/simple/setuptools/')` 得到 **200 / 535 KB / 1.3s**，而容器内对
-   `https://files.pythonhosted.org/packages/source/s/setuptools/…` **TLS 握手超时**；
-   宿主 `curl` 同一 URL 拿得到 `302`。同一份配方上一轮 160s 构建成功过（读数见 §2），
-   所以这是外网通道波动、不是仓库缺陷；`make image-sbom` 在这种情况下退 2，
-   不会交出一份空产物或假清单。接线本身由 docker 档常驻用例覆盖（它对真实可取到的镜像
-   出过 `components=89 / deb=87 / pypi=1` 的读数）
+   `Could not find a version that satisfies the requirement setuptools>=75 (from versions: none)`），
+   第 6 次 165s 成功。定位靠同一时刻两条并排探针：容器内取
+   `https://pypi.org/simple/setuptools/` 是 **200／535 KB／1.3s**，容器内对
+   `https://files.pythonhosted.org/packages/source/s/setuptools/…` **TLS 握手超时**，
+   而宿主 `curl` 同一 URL 拿得到 `302`——卡的是**容器侧→PyPI CDN** 那条通道，不是配方
+   （同一配方 §2 那行 160s 成功过）。`make image-sbom` 在这种情况下退 2，不交空产物或假清单。
 4. **完整镜像构建不常驻**（本轮实测后如实记下）：新增的常驻判据覆盖的是**配方里的基础镜像取得到**这一半（docker 档，默认 21.99s）；整条 `docker build` 冷跑实测约 160s（pip 层要重装），折进每轮 validate 不划算，因此它仍是 `make control-image` 的人工/CI 步骤，本轮的构建读数见 §2 同一行
 5. **镜像层漏洞扫描（OS 包）**：`make audit`（uv）只看 Python 侧，Debian 层那 87 个 `pkg:deb` 组件今天没有任何东西在比 CVE。同一份钉死的 trivy 就能做（`--scanners vuln`），代价是它运行时要从自己的分发点下载漏洞库——那是**又一条出网依赖 + 一份非确定性读数**，所以这一步单独立项而不是顺手并进 §5 那一行；要做时先量库里有没有当天数据，别把"拉不到库"洗成"没有漏洞"
 

@@ -664,22 +664,36 @@ def test_provider_argv_is_accepted_by_the_daemon_and_gpu_failure_is_not_a_usage_
     assert _docker("inspect", "-f", "{{.State.Status}}", name).returncode != 0
 
 
-def _pull_verdict_action(daemon_reading: str, verdict: str, detail: str) -> tuple[str, str]:
-    """把"守护进程取不到 + 第二条通道的读数"映射成 (动作, 给读者看的一句话)。
+TRANSPORT_KEYS = ("timeout", "dial tcp", "no such host", "connection refused", "unreachable")
+
+
+def _pull_failure_action(daemon_reading: str, verdict: str, detail: str) -> tuple[str, str]:
+    """把"守护进程取不到（含它的错误文本）+ 第二条通道的读数"映射成 (动作, 一句话)。
 
     纯函数是为了能被常驻用例逐档打靶（这一支判据今晚真被镜像站的一次 `not found` 打过，
     但下一轮多半是绿的——不把它抽出来，分流逻辑就只能等下一次故障才第一次运行）。
-    动作只有三种：`skip`（通道故障，主张未获证）、`red_pin`（两条传输都说没有＝钉错了）、
-    `red_undecided`（两条通道一条说没有、另一条自己也不通＝无法定案，留着别洗）。
+
+    **顺序是判点**：第二通道说"这份摘要不存在"时，无论守护进程的错误文本长得像不像通道故障，
+    都判红。上一版按关键字先跳过，等于让"钉错 digest 恰好又被传输问题掩盖"这种组合免检。
+    动作三种：`skip`（主张未获证，两条读数都打出来）、`red_pin`（钉错了）、
+    `red_undecided`（取不到且无法定案，留着别洗）。
     """
-    if verdict == "present":
-        return (
-            "skip",
-            f"{GATE_SENTINEL}: 守护进程这条传输答 not found，第二条传输确认该摘要存在（{detail}）"
-            f"⇒ 判为通道故障而非配方错误，主张本轮未获证。daemon 读数：{daemon_reading}",
-        )
+    transport = any(k in daemon_reading.lower() for k in TRANSPORT_KEYS)
     if verdict == "absent":
-        return "red_pin", f"两条独立传输都说这份摘要不存在 ⇒ 钉进配方的引用是错的：{daemon_reading}；{detail}"
+        return "red_pin", (
+            f"两条独立传输都指认这份摘要不存在 ⇒ 钉进配方的引用是错的"
+            f"（daemon 读数即使长得像通道故障也不改判）：{daemon_reading}；{detail}"
+        )
+    if transport:
+        return "skip", (
+            f"{GATE_SENTINEL}: 本机这条传输没走到 registry（{daemon_reading}）；"
+            f"第二通道读数 {verdict}（{detail}）——没有任何通道指认这份摘要是错的，主张本轮未获证"
+        )
+    if verdict == "present":
+        return "skip", (
+            f"{GATE_SENTINEL}: 守护进程这条传输答 not found，第二条传输逐字节确认该摘要存在（{detail}）"
+            f"⇒ 判为通道故障而非配方错误，主张本轮未获证。daemon 读数：{daemon_reading}"
+        )
     return "red_undecided", f"守护进程取不到、独立通道也无法定案（{detail}）：{daemon_reading}"
 
 
@@ -710,15 +724,25 @@ def test_independent_digest_read_discriminates_present_from_absent() -> None:
     assert _independent_digest_read(other, "sha256:" + digest)[0] == "unknown"
 
 
-def test_pull_verdict_action_has_three_distinct_exits() -> None:
-    """三种读数组合各自映射到不同动作，且都不是一句空话（消息里必须带两条读数）。"""
-    skip_msg = _pull_verdict_action("daemon: not found", "present", "HTTP 200 / 10373 B")
-    red_pin = _pull_verdict_action("daemon: not found", "absent", "独立通道 404 Not Found")
-    undecided = _pull_verdict_action("daemon: not found", "unknown", "独立通道不可用 URLError")
-    assert skip_msg[0] == "skip" and GATE_SENTINEL in skip_msg[1], skip_msg
-    assert red_pin[0] == "red_pin" and "钉进配方的引用是错的" in red_pin[1], red_pin
-    assert undecided[0] == "red_undecided" and "无法定案" in undecided[1], undecided
-    assert len({skip_msg[0], red_pin[0], undecided[0]}) == 3
+def test_pull_failure_action_adjudicates_every_combination() -> None:
+    """2×3 全组合各有出口：坏摘要在任何 daemon 读数下都必须红，好摘要不能被洗成通过。"""
+    combos = {
+        ("TLS handshake timeout", "present"): "skip",
+        ("TLS handshake timeout", "absent"): "red_pin",
+        ("TLS handshake timeout", "unknown"): "skip",
+        ("manifest unknown: not found", "present"): "skip",
+        ("manifest unknown: not found", "absent"): "red_pin",
+        ("manifest unknown: not found", "unknown"): "red_undecided",
+    }
+    seen: set[str] = set()
+    for (reading, verdict), expected in combos.items():
+        action, message = _pull_failure_action(reading, verdict, "读数详情")
+        assert action == expected, f"{reading} + {verdict} → {action}，期望 {expected}：{message}"
+        assert GATE_SENTINEL in message if action == "skip" else "钉进配方" in message or "无法定案" in message, message
+        seen.add(action)
+    assert seen == {"skip", "red_pin", "red_undecided"}, seen
+    # 坏摘要那一档必须压过"长得像通道故障"的读数：这一条就是上一版的漏洞所在
+    assert _pull_failure_action("TLS handshake timeout", "absent", "独立通道 404")[0] == "red_pin"
 
 
 def _independent_digest_read(ref: str, digest: str) -> tuple[str, str]:
@@ -790,19 +814,16 @@ def test_pinned_base_of_the_control_plane_recipe_is_fetchable():
 
     pulled = _docker("pull", ref, timeout=300)
     if pulled.returncode != 0:
-        low = (pulled.stderr or "").lower()
-        if any(k in low for k in ("timeout", "dial tcp", "no such host", "connection refused", "unreachable")):
-            pytest.skip(f"{GATE_SENTINEL}: 基础镜像引用无法核验（registry 不可达）：{pulled.stderr[-200:]}")
         # 守护进程的 docker.io 传输今天走的是它配置里的第三方镜像站（错误串里能看见
         # `docker.1panel.live`），而镜像站对**有效**的摘要也会回 `not found`（2026-09-26 实测：
         # 同一份 `python:3.12-slim@sha256:f77ac9e4…` 上一轮经同一条传输 pull 成功、本轮回 not found）。
-        # 所以这里不能"取不到就红"，也不能"取不到就跳"——用第二条独立传输定案，
-        # 三个方向各有出口：两边都说没有＝钉错了，必须红；镜像站说没有而独立通道逐字节确认有
-        # ＝通道故障，报"前提未达成 + 两条读数"；独立通道自己也不通＝无法定案，如实留红。
+        # 所以这里不"取不到就红"、也不"看着像超时就跳"：先让第二条独立传输对摘要本身表态，
+        # 再由 _pull_failure_action 定档（坏摘要在任何 daemon 读数下都必须红）。
         digest = ref.rsplit("@sha256:", 1)[1]
         verdict, detail = _independent_digest_read(ref, "sha256:" + digest)
-        daemon_reading = (pulled.stderr or "").strip().splitlines()[-1][:180]
-        action, message = _pull_verdict_action(daemon_reading, verdict, detail)
+        stderr = (pulled.stderr or "").strip()
+        daemon_reading = stderr.splitlines()[-1][:200] if stderr else "(守护进程没有给出任何错误文本)"
+        action, message = _pull_failure_action(daemon_reading, verdict, detail)
         if action == "skip":
             pytest.skip(message)
         raise AssertionError(message)
@@ -915,7 +936,11 @@ def test_pinned_sbom_tool_actually_produces_a_checkable_image_sbom(tmp_path: Pat
     out.write_text(run.stdout, encoding="utf-8")
     validator = _load_image_sbom_validator()
     doc = json.loads(out.read_text(encoding="utf-8"))
-    offenders = validator.sbom_offenders(doc, subject)
+    # 把判据绑在"这个镜像的字节"上，而不只是这个名字上：Id 由 inspect 独立取得，
+    # 清单自报的摘要必须与它相等（缺了这一步，扫错对象也能过——名字只是 trivy 的回声）。
+    id_read = _docker("image", "inspect", "--format", "{{.Id}}", subject, timeout=60)
+    assert id_read.returncode == 0, f"被审对象 inspect 不到 Id：{id_read.stderr[-200:]}"
+    offenders = validator.sbom_offenders(doc, subject, id_read.stdout.strip())
     assert not offenders, "工具产出的镜像层 SBOM 过不了形状判据：" + " | ".join(offenders)
 
     purls = [str(c.get("purl", "")) for c in doc.get("components", []) if isinstance(c, dict)]

@@ -402,7 +402,17 @@ docker 档 21 → 22，全套 531 → 532。
   **不进** release 链，理由写在 RELEASE_PROCESS §6）＋ `scripts/check_image_sbom.py`（产物层判据：
   被审对象 `type=container` 且 purl 带 `@sha256:`、≥1 `pkg:deb/`、≥1 `pkg:pypi/`、
   `bomFormat=CycloneDX`、`components` 非空、不得混漏洞结论，外加"文件不存在必须红"）。
-  `--self-test` 10 档（合规档不开火 + 每条反例单独开火）全 OK，`mypy` 零错。
+  `--self-test` 14 档全 OK（每档核对**精确条数**，不只判"有没有开火"——一条注入顺手打中三条判据时，
+  只判真假的那版会让从未单独运行过的条款藏在邻居后面），`mypy` 零错。
+  **加固来自一轮独立评审**（子代理交回 10 条，逐条重开原行后落地 7 条）：配方层原判据只认
+  `*_IMAGE="${VAR:-…}"` 这一种赋值形状，把变量改名成 `TRIVY_IMG=`、或直接在
+  `docker run` 那一行写 `aquasec/trivy:latest`，都能绕过而判据照绿——现在判据看的是
+  **会被拉起来的那些引用**（折续行、去整行注释、认 Docker Hub 两段名，路径与挂载点不算镜像），
+  四种绕过形状各有注入对照；产物层加 `--image-id`（清单自报摘要必须等于 `docker image inspect`
+  的 `.Id`）——在此之前"扫错对象也能过"是真实存在的：接线用例自己就拿基础镜像跑，
+  两层条款它同样满足。另补 2×3 组合的常驻分流（坏摘要在任何 daemon 读数形状下都必须红；
+  上一版按关键字先跳过，等于让"钉错 digest 恰好被传输问题掩盖"免检）、空 stderr 的
+  `splitlines()[-1]` 越界、以及失败时 `.tmp` 残留的 trap。
 - **真读数**：trivy 0.74.0 对配方里那份钉死的基础镜像 `image --format cyclonedx` 用时 12.5s，
   `components=89 / deb=87 / pypi=1 / spec=1.7`，其自报 purl 摘要 `f77ac9e4…` 与 §2 钉进
   `Dockerfile.control-plane` 的 digest 同值——两把独立的尺子（构建配方／清单工具自报）对上同一个事实。
@@ -420,16 +430,22 @@ docker 档 21 → 22，全套 531 → 532。
 - **两条常驻机制的补强**：`test_pinned_base_of_the_control_plane_recipe_is_fetchable` 今晚被镜像站的
   一次 `not found` 打过（对**有效**摘要回 not found，同一条通道上一轮还能 pull 成功），于是
   "取不到就红"换成两条传输定案的三档分流：present→skip 并把两条读数都打出来、absent→红＝钉错、
-  unknown→红＝无法定案不洗；分流逻辑抽成纯函数 `_pull_verdict_action` 并各配一支常驻对照，
+  unknown→红＝无法定案不洗；分流逻辑抽成纯函数 `_pull_failure_action` 并配 2×3 全组合常驻对照
+  （坏摘要在任何 daemon 读数形状下都必须红——上一版按关键字先跳过，等于让"钉错 digest
+  恰好被传输问题掩盖"免检），
   第二通道自己也有正反对照（真摘要 present／翻一位 absent——否则它就是免检通道）。
   `tests/k8s_server.py:kind_binary()` 补第三档发现位：本机 kind 在仓库同级的 `.toolcache/`
   （实测 `kind version 0.33.0`＝ADR 0009 钉的那版），上一轮能跑靠的是某个 shell 导出过
   `EMBODIEDCLOUD_KIND_BIN`，换个 shell 就静默跳 7 例；补上发现档后真集群 7/7 恢复，用时 2:08。
-- **未做到的一面**：控制面镜像那一份产物本轮没落盘——同一配方连跑 5 次全部失败在
-  `Step 7/10 : RUN pip install`（153s／102s／224s／156s／50s），用并排探针把成因定位到
-  容器侧→`files.pythonhosted.org` 的 TLS 超时（同一时刻容器内取 `pypi.org/simple/` 是
-  200／1.3s、宿主 `curl` 同一条 CDN URL 拿得到 302、上一轮同一配方 160s 成功），属外网波动而非
-  仓库缺陷；OS 层的 CVE 比对新立 SUPPLY_CHAIN §8 第 5 项，不顺手并进本轮。
+- **真产物最后落地，过程值得记**：`make image-sbom` 对 `embodiedcloud/control-plane:0.7.0` 交出
+  `dist/sbom.image.cdx.json`，读数 `components=137 / deb=87 / pypi=49`，并绑到
+  `docker image inspect` 的 `.Id`＝`sha256:cd371b31…`（三处同值：Id＝trivy 自报 ImageID＝purl 摘要）。
+  同一配方今晚**前 5 次全败**在 `Step 7/10 : RUN pip install`（153s／102s／224s／156s／50s），
+  第 6 次 165s 成——把成因定成"容器侧→`files.pythonhosted.org` 的 TLS 超时"而不是"配方坏了"，
+  靠的是同一时刻两条并排探针（容器内取 `pypi.org/simple/setuptools/` 是 200／535 KB／1.3s；
+  宿主 `curl` 同一条 CDN URL 拿得到 302）与上一轮同一配方 160s 成功的那份读数。**没有**因为
+  "连红五次"就去改配方、加大 pip 超时或换基础镜像——那等于把外网波动记成代码变更。
+  OS 层的 CVE 比对新立 SUPPLY_CHAIN §8 第 5 项，不顺手并进本轮。
 - **连带更正三处旧措辞**（起因：把"哪些登记把单条通道当成了整件事"派给子代理普查，交回 16 条
   候选，逐条重开原行后落定）：`docs/ACCEPTANCE.md:19` 与 `docs/IMPLEMENTATION_PLAN.md:40` 都写着
   "当前执行环境没有 Docker daemon"，被 `scripts/release.sh:215`（"本环境可用（colima）"）与本轮

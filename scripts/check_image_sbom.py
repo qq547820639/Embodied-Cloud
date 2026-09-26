@@ -26,8 +26,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# 被审镜像必须以内容摘要身份出现在这份文档里：只写 tag 的 SBOM 描述的是一个会移动的东西。
-IMAGE_DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}")
+# 被审镜像必须以内容摘要身份出现在这份文档里，而且摘要要落在 purl 的 `@` 位上：
+# 只写 tag 的 SBOM 描述的是一个会移动的东西；而"串里任意位置有 64 位十六进制就算数"的话，
+# `pkg:oci/x?tag=1@sha256:<64>` 这种"标签在前、摘要当查询参数"的写法也会蒙混过关。
+# 收紧后的形状就是本机真跑 trivy 给出的那个：pkg:oci/<name>@sha256:<64>[?…]。
+OCI_SUBJECT_RE = re.compile(r"^pkg:oci/[^@?]+@sha256:[0-9a-f]{64}(\?.*)?$")
+SHA256_RE = re.compile(r"sha256:([0-9a-f]{64})")
 
 
 def _components(doc: dict[str, Any]) -> list[dict[str, Any]]:
@@ -39,11 +43,25 @@ def _purls(doc: dict[str, Any]) -> list[str]:
     return [str(c.get("purl", "")) for c in _components(doc)]
 
 
-def sbom_offenders(doc: dict[str, Any], image_ref: str) -> list[str]:
+def _declared_image_id(subject: dict[str, Any]) -> str:
+    """文档自己说它扫的是哪个镜像 ID（trivy 写进 metadata.component.properties）。"""
+    for prop in subject.get("properties") or []:
+        if isinstance(prop, dict) and prop.get("name") == "aquasecurity:trivy:ImageID":
+            return str(prop.get("value", ""))
+    return ""
+
+
+def sbom_offenders(doc: dict[str, Any], image_ref: str, image_id: str = "") -> list[str]:
     """返回这份 SBOM 不满足的主张列表；空列表＝它配得上"控制面镜像的镜像层清单"这句话。
 
     逐条都能单独开火：`--self-test` 与常驻用例各注入一处反例，其余保持合规，
     以免某条判据被邻居条款顺手救活（那样它其实是恒真的）。
+
+    `image_id` 是"扫错对象"唯一的真防线。名字那条比不出什么：trivy 把命令行给它的引用原样
+    写进 `metadata.component.name`，所以拿它对比"我传进去的名字"只是回声（下面那条已注明）。
+    而把 `docker image inspect` 的 `.Id` 拿过来一起比，就钉住了"这份清单描述的就是你手上
+    那个镜像的字节"。实测（本机构建物）：`.Id`＝trivy 的 ImageID 属性＝purl 里的摘要，三处同值
+    `sha256:cd371b31…`；而基础镜像那份清单的摘要是 `f77ac9e4…`，两者一比就分开了。
     """
     offenders: list[str] = []
 
@@ -54,21 +72,33 @@ def sbom_offenders(doc: dict[str, Any], image_ref: str) -> list[str]:
     metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     raw_subject = metadata.get("component")
     subject: dict[str, Any] = raw_subject if isinstance(raw_subject, dict) else {}
+    if not image_ref:
+        offenders.append("调用方没给出被审镜像的名字——对象一致性此刻无人检查")
     if subject.get("type") != "container":
         offenders.append(
             f"metadata.component.type={subject.get('type')!r}，这份文档没有把自己绑定到一个被审镜像"
             "（扫文件系统/目录也会产出结构完整的 CycloneDX，但那不是镜像层清单）"
         )
     subject_purl = str(subject.get("purl", ""))
-    if not IMAGE_DIGEST_RE.search(subject_purl):
+    purl_hit = SHA256_RE.search(subject_purl)
+    if not OCI_SUBJECT_RE.match(subject_purl):
         offenders.append(
-            f"metadata.component.purl={subject_purl!r} 里没有 @sha256: 摘要——"
+            f"metadata.component.purl={subject_purl!r} 不是 pkg:oci/<name>@sha256:<64> 的形状——"
             "只用 tag 命名的 SBOM 会在 tag 移动后描述一份不是构建时那份内容的镜像"
         )
-    # 注意这一条的证据强度有限：trivy 把命令行给它的那个引用原样写进 metadata.component.name，
-    # 所以它防的是"把别处抄来的 SBOM 当成本次产物"，真正的字节绑定是上面那条摘要判据。
+    # 这一条防的是"把别处抄来的 SBOM 当成本次产物"，防不了"扫错了对象"（见 docstring）。
     if image_ref and image_ref not in {str(subject.get("name", "")), subject_purl}:
         offenders.append(f"这份 SBOM 描述的对象不是 {image_ref!r}（自报 name={subject.get('name')!r}）")
+    if image_id:
+        wanted = image_id.removeprefix("sha256:")
+        declared = _declared_image_id(subject).removeprefix("sha256:")
+        stated = (purl_hit.group(1) if purl_hit else "") or declared
+        if stated != wanted:
+            offenders.append(
+                f"清单自报的镜像字节与被审镜像不符：inspect 给的 Id 是 {wanted[:12]}…，"
+                f"文档里是 purl={purl_hit.group(1)[:12] + '…' if purl_hit else '无'}"
+                f"／ImageID={declared[:12] + '…' if declared else '无'}——这就是「扫错对象」的形状"
+            )
 
     purls = _purls(doc)
     if not purls:
@@ -81,16 +111,21 @@ def sbom_offenders(doc: dict[str, Any], image_ref: str) -> list[str]:
                              "这份清单与 `make sbom` 的 wheel 级 SBOM 没有区别，不配叫镜像层清单")
 
     vulns = doc.get("vulnerabilities")
-    if isinstance(vulns, list) and vulns:
+    declared_vulns = (
+        len(vulns) if isinstance(vulns, list)
+        else len(vulns.get("vulnerabilities") or []) if isinstance(vulns, dict)
+        else 0
+    )
+    if declared_vulns:
         offenders.append(
-            f"文档里带了 {len(vulns)} 条 vulnerabilities：本步骤只出清单"
+            f"文档里带了 {declared_vulns} 条 vulnerabilities：本步骤只出清单"
             "（`--format cyclonedx` 按 trivy 自己的日志会关掉扫描），漏洞结论请另存并按另一条主张命名"
         )
 
     return offenders
 
 
-def check_file(path: Path, image_ref: str) -> list[str]:
+def check_file(path: Path, image_ref: str, image_id: str = "") -> list[str]:
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -99,13 +134,13 @@ def check_file(path: Path, image_ref: str) -> list[str]:
         return [f"{path} 不是合法 JSON：{exc}"]
     if not isinstance(doc, dict):
         return [f"{path} 的顶层不是对象"]
-    return sbom_offenders(doc, image_ref)
+    return sbom_offenders(doc, image_ref, image_id)
 
 
 # --- 判据自测：每条主张都要能单独开火，合规夹具要整体不开火 ---------------------
 
 def _compliant() -> dict[str, Any]:
-    """最小真形状：字段与本机 trivy 0.74.0 的 cyclonedx 输出一一对应。"""
+    """最小真形状：字段与本机 trivy 0.74.0 的 cyclonedx 输出一一对应（含 ImageID 属性）。"""
     digest = "ab" * 32
     return {
         "bomFormat": "CycloneDX",
@@ -115,6 +150,7 @@ def _compliant() -> dict[str, Any]:
                 "type": "container",
                 "name": "embodiedcloud/control-plane:0.7.0",
                 "purl": f"pkg:oci/control-plane@sha256:{digest}?arch=arm64",
+                "properties": [{"name": "aquasecurity:trivy:ImageID", "value": f"sha256:{digest}"}],
             }
         },
         "components": [
@@ -133,8 +169,13 @@ def _compliant() -> dict[str, Any]:
 
 
 def _self_test() -> int:
+    """每条主张一档反例，且**期望的是精确条数**。
+
+    只判"有没有开火"的话，一条注入顺手打中三条判据也算过——那等于允许某条判据躲在邻居后面
+    从来没有单独运行过。image_ref/image_id 也各有自己的档位（缺参与时序不符各一档）。
+    """
     ref = "embodiedcloud/control-plane:0.7.0"
-    rows: list[tuple[str, dict[str, Any], int]] = [("合规夹具（真形状）", _compliant(), 0)]
+    good_id = "sha256:" + "ab" * 32
 
     def drop_scheme(doc: dict[str, Any], prefix: str) -> dict[str, Any]:
         comps = [c for c in doc["components"] if not str(c.get("purl", "")).startswith(prefix)]
@@ -142,52 +183,70 @@ def _self_test() -> int:
         new["components"] = comps
         return new
 
-    rows.append(("缺 pkg:pypi（只解出 OS 包）", drop_scheme(_compliant(), "pkg:pypi/"), 1))
-    rows.append(("缺 pkg:deb（只解出 wheel）", drop_scheme(_compliant(), "pkg:deb/"), 1))
+    def mutate(doc: dict[str, Any], **kv: Any) -> dict[str, Any]:
+        new = json.loads(json.dumps(doc))
+        new["metadata"]["component"].update(kv)
+        return new
 
-    no_digest = _compliant()
-    no_digest["metadata"]["component"]["purl"] = "pkg:oci/control-plane?arch=arm64"
-    rows.append(("自报对象没有 digest", no_digest, 1))
+    purl_as_query = mutate(_compliant(), purl=f"pkg:oci/control-plane?tag=latest@sha256={'ab' * 32}")
+    wrong_id = _compliant()
 
-    wrong_type = _compliant()
-    wrong_type["metadata"]["component"]["type"] = "file"
-    rows.append(("metadata.component.type 不是 container", wrong_type, 1))
-
-    wrong_subject = _compliant()
-    wrong_subject["metadata"]["component"]["name"] = "somebody-else/image:9.9.9"
-    rows.append(("描述的是别的镜像", wrong_subject, 1))
-
-    empty = _compliant()
-    empty["components"] = []
-    rows.append(("components 为空", empty, 1))
-
-    not_cdx = _compliant()
-    not_cdx["bomFormat"] = "SPDX"
-    rows.append(("bomFormat 不是 CycloneDX", not_cdx, 1))
-
-    with_vulns = _compliant()
-    with_vulns["vulnerabilities"] = [{"id": "CVE-0000-0000"}]
-    rows.append(("清单里混进漏洞结论", with_vulns, 1))
+    rows: list[tuple[str, dict[str, Any], str, str, int]] = [
+        ("合规夹具（真形状，含 Id 一致性）", _compliant(), ref, good_id, 0),
+        ("缺 pkg:pypi（只解出 OS 包）", drop_scheme(_compliant(), "pkg:pypi/"), ref, good_id, 1),
+        ("缺 pkg:deb（只解出 wheel）", drop_scheme(_compliant(), "pkg:deb/"), ref, good_id, 1),
+        ("自报对象没有 digest", mutate(_compliant(), purl="pkg:oci/control-plane?arch=arm64"), ref, "", 1),
+        ("digest 落在查询参数位而不是 @ 位", purl_as_query, ref, "", 1),
+        ("metadata.component.type 不是 container", mutate(_compliant(), type="file"), ref, "", 1),
+        ("描述的是别的镜像（名字回声失效）", mutate(_compliant(), name="somebody-else/image:9.9.9"), ref, "", 1),
+        ("inspect 的 Id 与清单自报的字节不符", wrong_id, ref, "sha256:" + "cd" * 32, 1),
+        ("调用方没给被审镜像的名字", _compliant(), "", good_id, 1),
+        ("components 为空", _with_no_components(), ref, good_id, 1),
+        ("bomFormat 不是 CycloneDX", _with_bom_format("SPDX"), ref, good_id, 1),
+        ("清单里混进漏洞结论（列表形）", _with_vulns([{"id": "CVE-0000-0000"}]), ref, good_id, 1),
+        ("清单里混进漏洞结论（对象形）", _with_vulns({"vulnerabilities": [{"id": "CVE-0001-0001"}]}), ref, good_id, 1),
+    ]
 
     bad = 0
-    for label, doc, expected in rows:
-        got = len(sbom_offenders(doc, ref))
-        ok = (got > 0) == (expected > 0)
+    for label, doc, row_ref, row_id, expected in rows:
+        got = sbom_offenders(doc, row_ref, row_id)
+        ok = len(got) == expected
         bad += not ok
-        print(f"[check_image_sbom] {'OK ' if ok else 'BAD'} {label}：offenders={got} 期望{'开火' if expected else '不开火'}")
+        print(f"[check_image_sbom] {'OK ' if ok else 'BAD'} {label}：offenders={len(got)} 期望 {expected}")
+        if not ok and got:
+            print(f"    实际开火：{got[0][:120]}")
 
     # 反向对照：读一个不存在的路径必须红，否则"文件没落盘"这一类失败看不见
     missing = check_file(Path("definitely-not-here.json"), ref)
-    ok = bool(missing)
+    ok = len(missing) == 1
     bad += not ok
     print(f"[check_image_sbom] {'OK ' if ok else 'BAD'} 文件缺失必须红：{missing[:1]}")
     return 1 if bad else 0
+
+
+def _with_no_components() -> dict[str, Any]:
+    doc = _compliant()
+    doc["components"] = []
+    return doc
+
+
+def _with_bom_format(fmt: str) -> dict[str, Any]:
+    doc = _compliant()
+    doc["bomFormat"] = fmt
+    return doc
+
+
+def _with_vulns(value: Any) -> dict[str, Any]:
+    doc = _compliant()
+    doc["vulnerabilities"] = value
+    return doc
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("sbom", nargs="?", type=Path)
     parser.add_argument("image_ref", nargs="?", default="")
+    parser.add_argument("--image-id", default="", help="docker image inspect 的 .Id，用来钉住清单描述的就是这个镜像的字节")
     parser.add_argument("--self-test", action="store_true", help="注入反例，验每条判据都能单独开火")
     args = parser.parse_args(argv)
 
@@ -197,14 +256,18 @@ def main(argv: list[str]) -> int:
         parser.error("需要 <sbom.json> [image_ref]，或用 --self-test")
         return 2
 
-    offenders = check_file(args.sbom, args.image_ref)
-    doc = json.loads(args.sbom.read_text(encoding="utf-8")) if not offenders else {}
-    comps = _purls(doc)
-    print(
-        f"[image-sbom] {args.sbom} components={len(_components(doc))} "
-        f"deb={sum(1 for p in comps if p.startswith('pkg:deb/'))} "
-        f"pypi={sum(1 for p in comps if p.startswith('pkg:pypi/'))}"
-    )
+    offenders = check_file(args.sbom, args.image_ref, args.image_id)
+    try:
+        doc = json.loads(args.sbom.read_text(encoding="utf-8"))
+        comps = _purls(doc) if isinstance(doc, dict) else []
+        reading = (
+            f"components={len(_components(doc))} "
+            f"deb={sum(1 for p in comps if p.startswith('pkg:deb/'))} "
+            f"pypi={sum(1 for p in comps if p.startswith('pkg:pypi/'))}"
+        )
+    except (OSError, json.JSONDecodeError):
+        reading = "读不出内容"
+    print(f"[image-sbom] {args.sbom} {reading}")
     for line in offenders:
         print(f"  ✗ {line}")
     return 1 if offenders else 0

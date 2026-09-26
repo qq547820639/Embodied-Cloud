@@ -22,6 +22,8 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 mkdir -p "$(dirname "$OUT")"
+# 失败也要扫掉半成品：读侧不该看见上一次没做完的那份 JSON。
+trap 'rm -f "$OUT.tmp"' EXIT
 # 两个刻意的选择，都记在这里免得下一个人重新踩：
 # 1) 结果走 stdout 重定向，不用 trivy 的 --output 指到挂载路径：这台机器（colima）的 /tmp
 #    **不是共享进虚拟机的挂载点**，实测容器内写 /tmp 挂载点里的文件宿主看不见（同一分钟内
@@ -32,7 +34,12 @@ docker run --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
   "$TRIVY_IMAGE" image --format cyclonedx "$IMAGE" > "$OUT.tmp"
 mv "$OUT.tmp" "$OUT"
+trap - EXIT
 
-# 落盘之后必须过形状判据（scripts/check_image_sbom.py --self-test 证它每条都能开火）
-"$PYTHON" scripts/check_image_sbom.py "$OUT" "$IMAGE"
+# 落盘之后必须过形状判据（scripts/check_image_sbom.py --self-test 证它每条都能开火）。
+# --image-id 是"扫错对象"的真防线：清单自报的摘要必须等于 inspect 这个镜像拿到的 Id。
+# 本机实测三处同值——`.Id`＝trivy 的 ImageID 属性＝purl 里的摘要＝sha256:cd371b31…；
+# 只比名字的话比的是 trivy 回声它自己收到的命令行参数，比不出字节。
+"$PYTHON" scripts/check_image_sbom.py "$OUT" "$IMAGE" \
+  --image-id "$(docker image inspect --format '{{.Id}}' "$IMAGE")"
 echo "[image-sbom] 产物 $OUT —— 这份是**清单**，不是「没有漏洞」的结论：--format cyclonedx 按 trivy 自己的日志会关掉安全扫描"
