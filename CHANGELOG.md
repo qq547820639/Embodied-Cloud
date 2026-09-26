@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 543 / passed 542 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 545 / passed 544 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -587,6 +587,45 @@ docker 档 21 → 22，全套 531 → 532。
   `os-pkgs 156 / lang-pkgs 6`、`HIGH 44`、17 包 8 CVE、带 `FixedVersion` 的 6 条全部逐格不变——
   换 wheel 没有动那 156 条 OS 命中，基线不绑定某一次构建。`scripts/image_cve.sh` 末尾那句
   "HIGH 未分诊前不接成门禁"是改前写的，已按分诊结论改成陈述事实而不是陈述待办。
+
+### 闭合之后再过一遍刀：评审量出「门禁全绿但覆盖是假的」两处（N-24）
+
+- **做法**：本轮四笔提交交给一个只读评审子代理（45 次工具调用），任务书里点名要找的六类病
+  （恒真控制、极性缺一侧、断言强于证据、参数没转发、跨文件重复决定、死代码）。交回 6 项，
+  我逐项重开原行与真镜像后落 5 项。**评审的读数不直接采用**：它说"两条 lookaround 都不起作用"，
+  我自己在内存里把两条分别删掉跑六份输入，实测**后置那条确实删了没差别、前置那条删了会把
+  `x--extra grpc`／`---extra grpc` 读成一组 extra**——于是只删不起作用的那条，并把注释改成
+  实测因果（它原话"两道缺一不可"是假的）。
+- **两处「闭合之后仍然是错」都是真的**：① `docs/OPERATIONS.md` 还在教运维"在容器里
+  `pip install ".[s3]"`"，而新配方下容器里 `pip` 属基础镜像（实测 `readlink -f $(command -v pip)`
+  → `/usr/local/bin/pip…`，`python` 是 `/app/.venv/bin/python`）——照做就是把 SDK 装到应用
+  import 不到的地方；同一晚 `pyproject.toml` 的注释已经改成"构建时 `--extra s3`"，
+  **同一件事两个面互斥**。② 生产清单两处 `image: embodiedcloud/control-plane:0.4.0` 停在三个版本
+  之前，而版本一致性判据只读另一份清单——绿灯的覆盖面是假的，走那份部署连新镜像都拿不到。
+  都已改，并把 `test_k8s_manifest_version_matches` 从"读一个文件"扩成"扫 `deploy/kubernetes/*.yaml`
+  全部＋钉分母下界（≥3 处）＋就地注入旧号必须被点名"。
+- **镜像运行时形状第一次被钉成判据**（docker 档）：venv 的 `python`、`app` 从源码 import、
+  `alembic` 解析到 venv 且 `alembic heads` 真列修订号（迁移 job 依赖这条，此前无人验证过
+  `WORKDIR /app` + `prepend_sys_path = .` 在 venv 布局下是否还成立）、`pip` 属基础镜像
+  （把运维陷阱的成因从巧合变成被钉住的事实，它翻转就红）、本项目两个 `[project.scripts]`
+  名字**有意**不在镜像里。
+- **量具的自测接进每轮**：`--self-test` 那 23 档此前只有人手跑，`lock_offenders` 一族等于没有
+  常驻反证。现在由 `test_image_sbom_validator_self_test_runs_in_this_gate` 起子进程跑它，
+  除退码外还钉"无 BAD 且档位数 ≥23"（只判全 OK 不够——档数掉到 1 也全 OK）。牙是量过的：
+  把 `lock_offenders` 换成永不开火的桩 → 6 档转 BAD、退码 1。
+- **第二通道的分支覆盖**：present/absent 极性对照原来只核 `pinned[0]`，那么多阶段之后新加的
+  ghcr 分支（同注册表、换传输）从来没被执行过。改成配方里每份钉死的引用各跑一对。
+- **判据自我修正的第二处**：折续行那条控制原来只证明"不许漏红"，我要的其实是它另一个方向——
+  `RUN pip install \` 换行才接 `-r reqs.txt` 是**合规**形状，不折叠就会误红。现在两对方向都在。
+- **不补的那一项与理由**：`BASE_IMAGE_WHEELS` 是一张只认 `pip` 的白名单，理论上可以被人无声加宽。
+  不为此开判据：加宽它必然伴随一个"镜像里真有那个锁外 wheel"的产物变化，那条变化已经被
+  `--lock` 对账抓住；而为"集合恰好等于 {pip}"写断言只会得到一条天天要维护的空规则。
+  这条判断写在这里，是因为它是一次"评审建议 ≠ 该做的动作"的裁决记录。
+- 计数：supply-chain 档 20 → 21、docker 档 25 → 26，全套 543 → 545；OPERATIONS 补"本机别用
+  `docker build --platform` 做跨架构复算"与两个判环境红的 tell；`scripts/image_cve.sh` 头部注释
+  与 Makefile 目标注释都从"未分诊"改成分诊后的裁决。**另一手记账**：插入 N-24 之后我在
+  表格里留下一个空行（会把一张表劈成两张、只有读回磁盘才看得见），是 `docs_row_order` 之外
+  自己复算行号区间抓到的——写进记忆，别再靠"跑一遍没事"。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

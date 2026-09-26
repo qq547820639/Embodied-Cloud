@@ -705,23 +705,33 @@ def test_independent_digest_read_discriminates_present_from_absent() -> None:
     """
     from tests.test_supply_chain import REPO_ROOT, _base_refs, _is_pinned
 
-    pinned = [r for _, r in _base_refs([REPO_ROOT / "runtime" / "Dockerfile.control-plane"]) if _is_pinned(r)]
-    assert pinned, "没有钉 digest 的 FROM，无法取真摘要做对照"
-    ref = pinned[0]
-    digest = ref.rsplit("@sha256:", 1)[1]
+    pinned = sorted({r for _, r in _base_refs([REPO_ROOT / "runtime" / "Dockerfile.control-plane"]) if _is_pinned(r)})
+    assert pinned, "没有钉 digest 的引用，无法取真摘要做对照"
+    # 逐份核，不是只核第一份：改成多阶段之后配方里两份钉死的引用（基础镜像＋builder 的 uv）
+    # 分别走两条不同的第二通道映射（ECR Public 换注册表／ghcr 换传输），只跑 pinned[0] 的话
+    # 后一条分支从来没被执行过——它写错也无人知道。
+    unknowns = []
+    for ref in pinned:
+        digest = ref.rsplit("@sha256:", 1)[1]
+        good_verdict, good_detail = _independent_digest_read(ref, "sha256:" + digest)
+        if good_verdict == "unknown":
+            unknowns.append(f"{ref.split('@')[0]}：{good_detail}")
+            continue
+        assert good_verdict == "present", f"配方里钉着的真摘要在第二通道不是 present：{good_verdict} / {good_detail}"
 
-    good_verdict, good_detail = _independent_digest_read(ref, "sha256:" + digest)
-    if good_verdict == "unknown":
-        pytest.skip(f"{GATE_SENTINEL}: 第二通道本身不可达，无法给这支对照定档：{good_detail}")
-    assert good_verdict == "present", f"配方里钉着的真摘要在第二通道不是 present：{good_verdict} / {good_detail}"
+        flipped = ("0" if digest[0] != "0" else "1") + digest[1:]
+        bad_verdict, bad_detail = _independent_digest_read(ref, "sha256:" + flipped)
+        assert bad_verdict == "absent", f"翻掉一位的摘要竟然不是 absent（{bad_verdict} / {bad_detail}）⇒ 分流逻辑不可信"
 
-    flipped = ("0" if digest[0] != "0" else "1") + digest[1:]
-    bad_verdict, bad_detail = _independent_digest_read(ref, "sha256:" + flipped)
-    assert bad_verdict == "absent", f"翻掉一位的摘要竟然不是 absent（{bad_verdict} / {bad_detail}）⇒ 分流逻辑不可信"
+    if unknowns:
+        # 全部够不到＝前提未达成（如实跳过并带每份的读数）；只有一份够不到＝另一份已经
+        # 把它那条分支的正反两档跑完了，不能拿邻居的不可达把这一份的失败洗掉。
+        assert len(unknowns) < len(pinned), "两条第二通道都够不到：" + " | ".join(unknowns)
 
     # 映射不出的仓库必须落到 unknown，不能靠猜把别家的名字拼到官方库前缀上
-    other = "registry.example.com/team/app:1.0.0@sha256:" + digest
-    assert _independent_digest_read(other, "sha256:" + digest)[0] == "unknown"
+    other_digest = "ab" * 32
+    assert _independent_digest_read(f"registry.example.com/team/app:1.0.0@sha256:{other_digest}",
+                                    "sha256:" + other_digest)[0] == "unknown"
 
 
 def test_pull_failure_action_adjudicates_every_combination() -> None:
@@ -980,4 +990,49 @@ def test_pinned_sbom_tool_actually_produces_a_checkable_image_sbom(tmp_path: Pat
         f"spec={doc.get('specVersion')}；自报对象="
         f"{doc.get('metadata', {}).get('component', {}).get('type')}"
     )
+def test_control_plane_image_runtime_layout_is_what_the_docs_assume():
+    """新配方把项目改成"不装发行包、只给 venv+源码"之后，运行时形状必须被核住。
 
+    三条都是本轮改动的直接后果，任何一条变了就意味着某份运维说明在骗人：
+    1. `python` 落在 venv 里（依赖由 uv.lock 决定），`app` 从 /app 源码 import 得到；
+    2. `pip` 仍然指向**基础镜像**那套解释器（`/usr/local/bin/pip`）——这就是"往运行中的
+       容器里 `pip install` 会装到应用看不见的地方"这条运维陷阱的成因。它现在是**被钉住的
+       事实**而不是巧合：哪天 uv 改成往 venv 里种 pip（或有人 `--seed`），这一条会红，
+       人就必须回去核对 docs/OPERATIONS.md 里 s3 那一格与 SUPPLY_CHAIN §4；
+    3. 迁移动作 `command: ["alembic", "upgrade", "head"]` 真能在镜像里跑通（`alembic heads`
+       列出修订号）——它靠的是 `WORKDIR /app` + `alembic.ini` 的 `prepend_sys_path = .`，
+       在此之前没有任何用例验证过这条链在 venv 布局下仍然成立。
+    另外钉一条"本项目自己的入口脚本**有意**不在镜像里"：CMD 是 `python -m app.main`，
+    `[project.scripts]` 那两个名字是设备侧/宿主侧装包时用的。哪天有人把项目装回镜像，
+    这条也会红，逼他确认那是有意的还是又漂回了旧配方。
+    """
+    import re
+
+    subject = os.environ.get("CONTROL_IMAGE", "embodiedcloud/control-plane:0.7.0")
+    if _docker("image", "inspect", subject, timeout=60).returncode != 0:
+        pytest.skip(f"{GATE_SENTINEL}: 被审镜像不在场（先跑 make control-image）：{subject}")
+
+    def _sh(script: str) -> str:
+        run = _docker("run", "--rm", "--entrypoint", "sh", subject, "-c", script, timeout=180)
+        assert run.returncode == 0, f"{script} 退 {run.returncode}：{(run.stderr or '')[-300:]}"
+        return run.stdout.strip()
+
+    assert _sh("python -c 'import sys; print(sys.prefix)'").endswith("/.venv"), "python 不在 venv 里"
+    assert "app/__init__.py" in _sh("python -c 'import app; print(app.__file__)'")
+
+    pip_path = _sh('readlink -f "$(command -v pip)"')
+    assert "/usr/local/" in pip_path, (
+        f"pip 不再指向基础镜像那套解释器（实测 {pip_path}）⇒ 运维说明要跟着改：回去核对 "
+        "docs/OPERATIONS.md 的 s3 那一格与 SUPPLY_CHAIN §4"
+    )
+    venv_python_dir = _sh("python -c 'import sys; print(sys.executable)'")
+    assert venv_python_dir.startswith("/app/.venv/"), venv_python_dir
+    assert pip_path.startswith("/usr/local/"), pip_path
+
+    assert _sh('readlink -f "$(command -v alembic)"') == "/app/.venv/bin/alembic"
+    heads = _sh("alembic heads")
+    assert re.search(r"^[0-9a-f]{4,} \(head\)", heads, re.M), f"alembic heads 没列出修订号：{heads}"
+    for script_name in ("embodiedcloud", "embodiedcloud-edge-agent"):
+        assert _sh(f"command -v {script_name} || echo ABSENT").endswith("ABSENT"), (
+            f"{script_name} 又出现在镜像 PATH 里——项目被装回发行包了？确认是有意的并同步改本用例"
+        )

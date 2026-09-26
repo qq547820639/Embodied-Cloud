@@ -15,6 +15,8 @@ docs/CURRENT_STATE.md 的 supply-chain 行）。
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -733,9 +735,10 @@ LOCK_SYNC_RE = re.compile(r"\buv\s+(?:sync|export|pip\s+sync)\b[^\n]*--frozen")
 def _dockerfile_logic(text: str) -> str:
     """去掉整行注释、折掉 `\\` 续行之后的配方正文。
 
-    不折/不去就错两次：注释里那句"`uv sync --frozen` 的语义正是反过来"会被判据当成一条
-    安装指令（本轮注入的反例亲手抓到过——把 RUN 行里的 `--frozen` 摘掉，注释还在替它背书，
-    判据读成合规）；而一条拆成三行的 RUN 会让"这一条安装行有没有锁基准"读到半句。
+    去注释是挣出来的：注释里那句"`uv sync --frozen` 的语义正是反过来"会被判据当成一条安装
+    指令——本轮注入的反例亲手抓到过（把 RUN 行里的 `--frozen` 摘掉，注释还在替它背书，读成合规）。
+    折续行挣的是**反方向**：`RUN pip install ` 行尾带续行反斜杠、下一行才接 `-r reqs.txt`，折开之后
+    不折就会只看见上半句而误红（常驻控制里带这条）。
     """
     kept = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
     folded: list[str] = []
@@ -792,6 +795,22 @@ def test_control_plane_recipe_installs_from_the_lock() -> None:
     )
     assert _lock_install_offenders(alt) == [], _lock_install_offenders(alt)
     assert alt != text, "替换没生效，这支合规变体其实是原文件"
+
+    # 折续行那一半的对照（钉的是"不许误红"，与上面"不许漏红"是一对）：
+    # 合规形状写在两行上——行尾续行反斜杠、下一行才出现 `-r`。不折行就只能看见上半句，
+    # 于是这条判据会把一份合法配方判成违规；那种红不是"抓到问题"，是判据自己坏了。
+    wrapped = text.replace(
+        "RUN uv sync --frozen --no-dev --extra postgres --no-install-project --no-editable",
+        "RUN uv sync --frozen --no-dev --extra postgres --no-install-project --no-editable\n"
+        "RUN pip install \\\n    --require-hashes -r /tmp/reqs.txt",
+    )
+    assert wrapped != text, "替换没落地"
+    assert _lock_install_offenders(wrapped) == [], _lock_install_offenders(wrapped)
+    # 反向对照：把折叠那一步拿掉（只去注释），同一份文本就必须误红——证明上面那条绿是折叠挣来的
+    unfolded = "\n".join(ln for ln in wrapped.splitlines() if not ln.strip().startswith("#"))
+    assert re.search(r"^[ \t]*RUN[^\n]*\bpip install\b(?!.*(?:-r\s|--require-hashes))", unfolded, re.I | re.M), (
+        "去掉折叠后这条误红没出现，说明上面那条绿不是折叠挣来的（控制失效）"
+    )
 
 
 def test_lock_criterion_fires_on_a_real_drifted_artifact() -> None:
@@ -877,11 +896,12 @@ def test_copy_from_refs_are_under_the_same_pin_rule(tmp_path: Path) -> None:
 MAKEFILE = REPO_ROOT / "Makefile"
 
 # 两种 shell 写法都要认：`--extra postgres`（空格分隔）与 `--extras=s3`（等号）。
-# 两道 lookaround 缺一不可：后置 `(?![\w-])` 挡住 `--extra-index-url`——少它就把一条 PyPI 索引
-# 地址当成镜像装的 extra，判据立刻假红；前置 `(?<![\w-])` 挡住 `--all-extras`／`--no-extra`
-# 这类由它派生的旗标——它们都不指向某个具体的 extra 名，读成名字就是"凭空造名"。
+# 挡住 `--extra-index-url`／`--all-extras`／`--no-extra` 的是**强制的分隔符**（`=` 或空白，且名字
+# 紧跟其后），不是 lookaround——实测把这些 lookaround 逐个删掉，那三类输入的结果都不变，
+# 所以这里不留不起作用的装饰。唯一挣得出差别的是前置 `(?<![\w-])`：删了它，`x--extra grpc`
+# 与 `---extra grpc` 会被读成"有人声明了一组 grpc"（常驻控制里带这两条反例）。
 EXTRA_FLAG_RE = re.compile(
-    r"(?<![\w-])--extras?(?![\w-])[ \t]*(?:=[ \t]*|[ \t]+)(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?<![\w-])--extras?[ \t]*(?:=[ \t]*|[ \t]+)(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
 )
 # 只取 `sbom:` 目标的配方块，不扫整份 Makefile：别的目标传 `--extra` 是合法的（例如给 dev 档
 # 另出一份清单），整文件扫会把它们并进同一份分母，清单侧就永远比配方宽、判据失去方向。
@@ -920,6 +940,28 @@ def _undeclared_extra_offenders(dockerfile_text: str, makefile_text: str) -> lis
     return offenders
 
 
+def test_image_sbom_validator_self_test_runs_in_this_gate() -> None:
+    """量具自己那 23 档反证必须**每轮被跑**，而不是只存在于"每条都能开火"这句注释里。
+
+    起因是一处真实的措辞与事实不符：`test_image_sbom_validator_fires_per_clause` 只驱动
+    `sbom_offenders`，`lock_offenders`（锁一致性那一族）的档位从来没被任何常驻用例、Makefile
+    目标或 CI 步骤调用过——判据哪天退化成恒真，只有人手跑一次 `--self-test` 才知道。
+    这一支把脚本自己的自测接进每轮：它无网络、无 docker，纯内存跑，代价是一次子进程。
+    """
+    # 起子进程跑的这份量具脚本在本仓库内、参数固定为 --self-test（无用户输入），S603 不适用
+    out = subprocess.run(  # noqa: S603
+        [sys.executable, str(SCRIPTS / "check_image_sbom.py"), "--self-test"],
+        capture_output=True, text=True, timeout=120,
+    )
+    rows = [ln for ln in out.stdout.splitlines() if ln.startswith("[check_image_sbom]")]
+    fired = sum(1 for ln in rows if "] OK " in ln)
+    broken = [ln for ln in rows if "] BAD " in ln]
+    assert out.returncode == 0, f"自测退 {out.returncode}：{broken or rows[-3:]}\n{out.stderr[-300:]}"
+    # 只判"全 OK"不够：档位数掉到 1 也会全 OK。分母由脚本自己打出来，这里钉一个不低于当前基线的下界。
+    assert not broken, broken
+    assert fired >= 23, f"自测只跑了 {fired} 档，低于基线 23（有一族判据可能不再被驱动）"
+
+
 def test_image_recipe_extras_are_declared_in_the_release_sbom() -> None:
     """N-23 留下的那一格：镜像装什么，发布清单就得声明过什么。
 
@@ -937,8 +979,11 @@ def test_image_recipe_extras_are_declared_in_the_release_sbom() -> None:
     assert image_extras == {"postgres"}, image_extras
     assert sbom_extras == {"postgres", "s3"}, sbom_extras
 
-    # 真把它读成一个 extra，判据就会因为一条索引地址而假红——这道闸只在解析式自己手里
+    # 挡住索引地址的是强制分隔符；挡住"前缀粘连的畸形旗标"的是前置 lookaround——两条各测各的，
+    # 否则注释里说的"这道闸"其实没人验证过（评审就发现过一条被邻居满足的控制）。
     assert _extra_names("--extra-index-url https://pypi.org/simple --extras=s3") == {"s3"}
+    assert _extra_names("x--extra grpc") == set()
+    assert _extra_names("---extra grpc") == set()
 
     assert _undeclared_extra_offenders(dockerfile, makefile) == []
 

@@ -65,8 +65,12 @@
 
 两条运维含义容易踩：
 
-- **对象存储**：`EMBODIEDCLOUD_ARTIFACT_BACKEND=s3` 必须先装 SDK
-  （`pip install ".[s3]"`）。凭据或 endpoint 不全时**启动即失败**
+- **对象存储**：`EMBODIEDCLOUD_ARTIFACT_BACKEND=s3` 的 SDK 必须在**构建时**装进镜像：
+  给镜像的 `uv sync --frozen` 那一步加 `--extra s3`（见 `runtime/Dockerfile.control-plane`
+  与 SUPPLY_CHAIN §4）。事后在运行中的容器里 `pip install "…"` 已经没用——`python` 解析到
+  `/app/.venv/bin/python`，而 `pip` 仍是基础镜像的 `/usr/local/bin/pip`，那份 venv 又不暴露
+  基础镜像的 site-packages，装进去的东西应用 import 不到。
+  凭据或 endpoint 不全时**启动即失败**
   （`BLOCKED_EXTERNAL_DEPENDENCY`），不会退回本地目录 —— 退回会让产物落在控制面
   文件系统，而 `Artifact.store_name` 仍记 `s3`，校验时找不到对象。
 - **`EMBODIEDCLOUD_K8S_KUBECONFIG`**：留空时走 SDK 默认解析，但 kubernetes Python SDK

@@ -6,14 +6,14 @@
 
 | Gate | 状态 | 明细 |
 |---|---|---|
-| Test collected | PASS | 543 |
-| Test run | PASS | passed=542 skipped=1 failed=0 |
+| Test collected | PASS | 545 |
+| Test run | PASS | passed=544 skipped=1 failed=0 |
 | lint | PASS | |
 | typecheck | PASS | |
 | migration | PASS | |
 | build | PASS | |
 | Integration browser | PASS | 11/11 用例在真实后端上执行 |
-| Integration docker | PASS | 25/25 用例在真实后端上执行 |
+| Integration docker | PASS | 26/26 用例在真实后端上执行 |
 | Integration k8s | PENDING | 整档 1 用例未执行，原因：需要真实 Kubernetes 集群 + NVIDIA Device Plugin（export EMBODIEDCLOUD_K8S_TEST=1 且配置 kubeconfig 后运行）（哨兵 K8S_PHYSICAL_VALIDATION_PENDING） |
 | Integration k8s_control_plane | PASS | 7/7 用例在真实后端上执行 |
 | Integration object_store | PASS | 20/20 用例在真实后端上执行 |

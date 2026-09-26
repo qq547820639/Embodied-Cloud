@@ -144,9 +144,34 @@ def test_static_ui_version_dynamic():
     assert "h.version" in js  # loadHealth 更新版本 pill
 
 
-def test_k8s_manifest_version_matches():
-    yaml_text = Path("deploy/kubernetes/control-plane.yaml").read_text()
-    assert f"control-plane:{_pyproject_version()}" in yaml_text
+def _manifest_image_tags(text: str) -> list[str]:
+    return re.findall(r"image:\s*embodiedcloud/control-plane:([^\s@]+)", text)
+
+
+def test_k8s_manifest_version_matches() -> None:
+    """**所有** k8s 清单里的控制面镜像 tag 都必须等于当前版本，不是只有那一份被点名的。
+
+    本轮的真实缺陷：生产清单（deploy/kubernetes/control-plane-production.yaml）里两处
+    `image: …:0.4.0` 停在三个版本之前，而常驻判据只读了 `control-plane.yaml` 那一份——
+    于是"版本一致性已把守"这句话对生产那份是假的，走那份清单部署时连新构建的镜像都拿不到。
+    作用域非空自己也要断言：glob 一旦落空（目录改名）这条会静默恒绿。
+    """
+    version = _pyproject_version()
+    manifests = sorted(Path("deploy/kubernetes").glob("*.yaml"))
+    assert manifests, "deploy/kubernetes 下没有 yaml 清单——本判据会无事可做"
+    scanned = 0
+    for path in manifests:
+        tags = _manifest_image_tags(path.read_text(encoding="utf-8"))
+        scanned += len(tags)
+        bad = [t for t in tags if t != version]
+        assert not bad, f"{path} 的控制面镜像 tag 落后/不一致：{bad}，当前版本是 {version}"
+    assert scanned >= 3, f"只扫到 {scanned} 处控制面镜像引用，少于已知基线（3 处），判据可能已失效"
+
+    # 反证：把生产清单里的一份改成旧号，同一把尺子必须点名它（证明扫面真的覆盖到那份文件）
+    prod = Path("deploy/kubernetes/control-plane-production.yaml").read_text(encoding="utf-8")
+    drifted = prod.replace("control-plane:" + version, "control-plane:0.4.0", 1)
+    assert drifted != prod, "替换没落地，这支反例其实是原文件"
+    assert "0.4.0" in _manifest_image_tags(drifted), _manifest_image_tags(drifted)
 
 
 def test_openapi_version_matches():
