@@ -115,6 +115,8 @@ def test_release_script_heredocs_carry_no_backticks() -> None:
 
 # `FROM [--platform=…] [--as name] <ref>`：先把可选 flag 跳过，否则 --platform 会被当成引用。
 FROM_RE = re.compile(r"^[ \t]*FROM(?:\s+--[^\s]+)*\s+(?P<ref>[^\s]+)", re.IGNORECASE | re.MULTILINE)
+COPY_FROM_RE = re.compile(r"^[ \t]*COPY[ \t]+--from=(?P<ref>[A-Za-z0-9._\-/:@]+)", re.IGNORECASE | re.MULTILINE)
+STAGE_AS_RE = re.compile(r"^[ \t]*FROM[ \t]+\S+[ \t]+AS[ \t]+(?P<stage>[A-Za-z0-9._\-]+)", re.IGNORECASE | re.MULTILINE)
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 # Docker 参考文法允许的字符集：引号、反斜杠、$、括号、全角括号都不在其中，
 # 因此在 shell 脚本里能把一个完整 token 干净切出来（不会把 `${VAR:-` 的收尾符号吞进去，
@@ -131,7 +133,7 @@ SAMENESS_DOCS = (REPO_ROOT / "docs" / "GPU_HOST.md",)
 # 已删）与少一项（新引入的裸 tag）都必须红，否则例外会变成永久免检通道。
 # grade 只允许固定词表，且必须与 docs/SUPPLY_CHAIN.md 的例外表逐字对得上。
 #
-# 现在这张表是**空的**：两个外部基础镜像（isaac-sim 与 python:3.12-slim）都已钉上多架构
+# 现在这张表是**空的**：三份外部引用（isaac-sim、python:3.12-slim、builder 用的 uv）都钉上了多架构
 # 索引 digest。空表本身不能让对账判据失效——它由下面那支注入式夹具常驻钉住
 # （`test_exception_reconciliation_fires_in_both_directions`：漏登记、死登记各开一次火，
 # 合规侧不开火）。把判据从"表里恰好有一项"改成"两侧集合必须相等 + 判据可被注入证伪"，
@@ -141,11 +143,25 @@ UNPINNED_EXCEPTIONS: dict[str, dict[str, str]] = {}
 
 
 def _base_refs(dockerfiles: list[Path]) -> list[tuple[str, str]]:
-    """(文件标签, FROM 引用) 列表；`FROM image` 与 `FROM --platform=… image` 都能解析。"""
+    """(文件标签, 镜像引用) 列表：`FROM image`、`FROM --platform=… image` 与 `COPY --from=…`。
+
+    `COPY --from=` 必须在扫面上：多阶段配方里 builder 拉的那份工具镜像（uv）就是构建真正
+    消费的字节，只在 FROM 行上找的话，"把 uv 换成裸 latest"这种改动能一路绿过所有钉死判据。
+    这里**不**再套 shell 侧那套"像不像镜像"的形状启发：Dockerfile 的 `--from=` 只能是
+    本文件声明过的阶段名或一个镜像引用，二者按名字分开就够（shell 那边需要形状判据是因为
+    挂载路径 `$PWD/.trivy-cache` 与引用同形，这里不存在这个问题）。
+    """
     out: list[tuple[str, str]] = []
     for path in dockerfiles:
-        for m in FROM_RE.finditer(path.read_text(encoding="utf-8")):
+        text = path.read_text(encoding="utf-8")
+        stages = {m.group("stage").lower() for m in STAGE_AS_RE.finditer(text)}
+        for m in FROM_RE.finditer(text):
             out.append((path.name, m.group("ref")))
+        for m in COPY_FROM_RE.finditer(text):
+            ref = m.group("ref")
+            if ref.lower() in stages:
+                continue
+            out.append((path.name, ref))
     return out
 
 
@@ -684,3 +700,171 @@ def _with_vulnerabilities(doc: dict[str, Any], value: Any) -> dict[str, Any]:
     new["vulnerabilities"] = value
     return new
 
+
+
+# ---------------------------------------------------------------------------
+# 锁 ↔ 镜像内容一致性（SUPPLY_CHAIN §8 第 6 项 / 登记表 N-22）
+# ---------------------------------------------------------------------------
+
+CONTROL_DOCKERFILE = RUNTIME / "Dockerfile.control-plane"
+PREFIX_DRIFT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "sbom.image.prefix-drift.json"
+
+# 冻结的锁基准，**故意不读真实 uv.lock**：真实锁哪天把 sqlalchemy 升到 2.1.1，
+# 这条反证就会悄悄不再开火，而它必须永远能开火。夹具侧的版本也取自同一夜的真读数
+# （fastapi 0.141.1 就是当时锁里钉的那份），所以合规侧同样是真的。
+FIXED_LOCK = (
+    '[[package]]\nname = "sqlalchemy"\nversion = "2.1.0"\n\n'
+    '[[package]]\nname = "fastapi"\nversion = "0.141.1"\n'
+)
+
+# 构建时现解析的安装行：不带锁基准的 pip 安装。允许两种合规形状——
+# 从 requirements 装（`-r`）或哈希校验模式（`--require-hashes`），它们都不"现解析"。
+LIVE_RESOLVE_RE = re.compile(
+    r"^[ \t]*RUN[^\n]*\bpip install\b(?![^\n]*(?:-r\s|--require-hashes))(?P<line>[^\n]*)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# 合法形状有三种：`uv sync --frozen`／`uv export --frozen`（导出后再装）／`uv pip sync --frozen`。
+# 判"有没有 uv 读锁"而不是"是不是那一条子命令"——这条判据要钉的性质是"这一组依赖由 uv.lock
+# 决定"，而能读 uv.lock 的只有 uv（`uv pip sync` 的文档把格式枚举成 requirements.txt/pylock.toml
+# 等，不含 uv.lock），所以留 uv 是必要的，钉死子命令是多余的。
+LOCK_SYNC_RE = re.compile(r"\buv\s+(?:sync|export|pip\s+sync)\b[^\n]*--frozen")
+
+
+def _dockerfile_logic(text: str) -> str:
+    """去掉整行注释、折掉 `\\` 续行之后的配方正文。
+
+    不折/不去就错两次：注释里那句"`uv sync --frozen` 的语义正是反过来"会被判据当成一条
+    安装指令（本轮注入的反例亲手抓到过——把 RUN 行里的 `--frozen` 摘掉，注释还在替它背书，
+    判据读成合规）；而一条拆成三行的 RUN 会让"这一条安装行有没有锁基准"读到半句。
+    """
+    kept = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+    folded: list[str] = []
+    buf = ""
+    for ln in kept:
+        if ln.rstrip().endswith("\\"):
+            buf += ln.rstrip()[:-1] + " "
+            continue
+        folded.append(buf + ln)
+        buf = ""
+    if buf:
+        folded.append(buf)
+    return "\n".join(folded)
+
+
+def _lock_install_offenders(text: str) -> list[str]:
+    """配方层：依赖层的安装必须挂在那把锁上，且不许出现现解析的安装行。
+
+    两条一起才够用——只查"有没有 `uv sync --frozen`"，那么有人再补一条 `RUN pip install X`
+    也能绿；只查"有没有裸 pip install"，那么把锁换成别的解析器（poetry install、pdm）
+    也会绿。判的是谓词（装的那一组由谁决定），不是工具名字。
+    """
+    body = _dockerfile_logic(text)
+    offenders: list[str] = []
+    if not LOCK_SYNC_RE.search(body):
+        offenders.append(
+            "配方里没有 uv 读锁的安装步骤（`uv sync`/`uv export` 带 `--frozen`）——依赖层不是由 uv.lock 决定的"
+        )
+    for m in LIVE_RESOLVE_RE.finditer(body):
+        offenders.append(f"配方里有一条不带锁基准的现解析安装：RUN{m.group('line')[:70]}")
+    return offenders
+
+
+def test_control_plane_recipe_installs_from_the_lock() -> None:
+    """N-22 的配方侧：`pip install ".[postgres]"` 那种"构建时现解析"不许回来。"""
+    text = CONTROL_DOCKERFILE.read_text(encoding="utf-8")
+    offenders = _lock_install_offenders(text)
+    assert not offenders, "控制面配方的依赖层不合规：" + " | ".join(offenders)
+
+    # 反例一：退回旧配方（真实历史形状，不是编的）
+    old = text.replace("RUN uv sync", "RUN pip install --no-cache-dir \".[postgres]\"\\nRUN true && uv sync")
+    fired = _lock_install_offenders(old)
+    assert len(fired) == 1 and "现解析" in fired[0], fired
+
+    # 反例二：把 --frozen 摘掉（同一行、同一个工具，但锁不再是真源）
+    unfrozen = text.replace("--frozen ", "")
+    fired2 = _lock_install_offenders(unfrozen)
+    assert len(fired2) == 1 and "读锁" in fired2[0], fired2
+
+    # 合规变体：哈希校验模式的 pip 安装不该开火（证明它判的是谓词而不是 "pip" 这个词）
+    alt = text.replace(
+        "RUN uv sync --frozen --no-dev --extra postgres --no-install-project --no-editable",
+        'RUN uv export --frozen --no-emit-project -o /tmp/r.txt && pip install --require-hashes -r /tmp/r.txt',
+    )
+    assert _lock_install_offenders(alt) == [], _lock_install_offenders(alt)
+    assert alt != text, "替换没生效，这支合规变体其实是原文件"
+
+
+def test_lock_criterion_fires_on_a_real_drifted_artifact() -> None:
+    """判据必须拿**真产物**开火，而不是只在手写夹具里开火。
+
+    那份 JSON 是从改造前真的控制面镜像（`sha256:cd371b31…`，用旧配方构建）上跑真 trivy 得到的
+    逐字节选：镜像里的 SQLAlchemy 是 2.1.1，而 uv.lock 钉 2.1.0——N-22 就是这条读数。
+    名字那侧还顺手钉了一件事：真产物写的是 `SQLAlchemy`（大写），锁里是 `sqlalchemy`，
+    所以按大小写敏感的裸名比对会把它读成"锁里没这个包"（假红）。判据走的是 PEP 503 归一化。
+    """
+    validator = _load_image_sbom_validator()
+    raw = PREFIX_DRIFT_FIXTURE.read_text(encoding="utf-8")
+    doc = json.loads(raw)
+
+    offenders = validator.lock_offenders(doc, FIXED_LOCK)
+    assert len(offenders) == 1, offenders
+    assert "sqlalchemy" in offenders[0] and "2.1.1" in offenders[0] and "2.1.0" in offenders[0], offenders[0]
+
+    # 合规侧：把那一处版本改回锁里钉的那份，同一把尺子必须整体不开火
+    assert validator.lock_offenders(json.loads(raw.replace("2.1.1", "2.1.0")), FIXED_LOCK) == []
+
+    # 白名单侧：夹具里的 pip 25.0.1 不在 FIXED_LOCK 里，却不开火——它是基础镜像自带的邻居。
+    # 这一条同时钉住"锁文本里少一个包名不会让判据失声"（上面两档都只有 sqlalchemy/fastapi）。
+    only_sql = '[[package]]\nname = "sqlalchemy"\nversion = "2.1.0"\n'
+    assert [o for o in validator.lock_offenders(doc, only_sql) if "pip" in o] == []
+
+    # 真实锁的作用域：解析式哪天失效（uv 改了锁的书写形状），这里先红而不是让判据变恒真
+    real = validator.locked_versions((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    assert len(real) >= 50, f"从真实 uv.lock 只解析出 {len(real)} 个包名——解析式可能失效了"
+    assert real.get("sqlalchemy") == {"2.1.0"}, real.get("sqlalchemy")
+
+
+def test_image_sbom_step_forwards_the_lock_to_the_criterion() -> None:
+    """新参数不转发就是死缝：`--lock` 必须由产出这一步真的传进去。
+
+    判据侧缺省会红（那条自己有档位），但**接线**这一面只有在这里才看得见——AST/文本都比不出
+    "参数没转发"，除非有人去读调用行。形状按 AST 判（数关键字节点的实参位），不用 ±N 行窗口。
+    """
+    text = IMAGE_SBOM_SCRIPT.read_text(encoding="utf-8")
+    assert re.search(r"check_image_sbom\.py[^\n]*(?:\\\n[^\n]*)*?--lock\s+uv\.lock", text), (
+        "image_sbom.sh 没把 uv.lock 交给判据——锁一致性那条主张在生产路径上无人调用"
+    )
+
+
+def test_copy_from_refs_are_under_the_same_pin_rule(tmp_path: Path) -> None:
+    """多阶段配方的工具镜像也在钉 digest 的扫面里，但阶段名不算引用。"""
+    pinned = tmp_path / "Dockerfile.pinned"
+    pinned.write_text(
+        "FROM python:3.12-slim@sha256:" + "ab" * 32 + " AS builder\n"
+        "COPY --from=ghcr.io/astral-sh/uv:0.12.19@sha256:" + "cd" * 32 + " /uv /bin/\n"
+        "RUN uv sync --frozen\n"
+        "FROM python:3.12-slim@sha256:" + "ab" * 32 + "\n"
+        "COPY --from=builder /app/.venv /app/.venv\n",
+        encoding="utf-8",
+    )
+    refs = [r for _, r in _base_refs([pinned])]
+    assert len(refs) == 3, refs  # 两个 FROM + 一份外部工具镜像；builder 那条不算
+    assert "builder" not in refs and all("astral-sh/uv" not in r or _is_pinned(r) for r in refs), refs
+
+    drifting = tmp_path / "Dockerfile.drift"
+    drifting.write_text(
+        "FROM python:3.12-slim@sha256:" + "ab" * 32 + " AS builder\n"
+        "COPY --from=alpine:3.20 /uv /bin/\n"
+        "FROM python:3.12-slim@sha256:" + "ab" * 32 + "\n"
+        "COPY --from=builder /app/.venv /app/.venv\n",
+        encoding="utf-8",
+    )
+    unpinned = _unpinned_external([drifting])
+    assert unpinned == {"alpine:3.20"}, f"未钉的工具镜像没被抓到：{unpinned}"
+    assert _unpinned_external([pinned]) == set(), _unpinned_external([pinned])
+
+    # 真实树此刻的状态：控制面配方里那份 uv 引用必须在册且已钉死
+    uv_refs = [r for tag, r in _base_refs([CONTROL_DOCKERFILE]) if "astral-sh/uv" in r]
+    assert len(uv_refs) == 1 and _is_pinned(uv_refs[0]), uv_refs
+    doc = (REPO_ROOT / "docs" / "SUPPLY_CHAIN.md").read_text(encoding="utf-8")
+    assert uv_refs[0] in doc, "配方钉死的 uv 引用没逐字进 SUPPLY_CHAIN.md（文档只写 tag 就等于没钉）"

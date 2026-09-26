@@ -168,7 +168,7 @@ Embodied Cloud/
 - `deploy/kubernetes/control-plane.yaml`：**开发骨架**（SQLite + `emptyDir` + `AUTO_CREATE_TABLES=true`，文件头自述「生产需换 PostgreSQL」）——见 P1-8。
 - `deploy/kubernetes/namespace.yaml` / `workspace-rbac.yaml` / `workspace-network-policy.yaml`：命名空间 + workspace 最小 RBAC（只读 pods/svc/pvc）+ 默认拒绝 NetworkPolicy（Pod 标签 `embodiedcloud.workspace:true` 命中 selector）。
 - `deploy/nginx/embodiedcloud.conf`：控制面 TLS 反代；WebRTC UDP/TCP 动态端口仍需防火墙/独立网关。
-- `runtime/Dockerfile.control-plane`：python:3.12-slim，`pip install .`，CMD `python -m app.main`。
+- `runtime/Dockerfile.control-plane`：python:3.12-slim，`pip install .`，CMD `python -m app.main`。（这一行记的是 8 月时的形状；依赖层现已改由 uv 按 `uv.lock` 安装，见 SUPPLY_CHAIN §4 同一行）
 - `runtime/Dockerfile.isaaclab-workspace`：`nvcr.io/nvidia/isaac-sim:6.0.1` + Isaac Lab v3.0.0-beta2.patch1 + code-server 4.130.0；USER 1234:1234（非 root）。
 - `runtime/workspace-entrypoint.sh`：`set -euo pipefail`，校验 ACCEPT_EULA，启动 code-server。
 - `scripts/`：`preflight_gpu_host.sh`/`gpu_acceptance.sh`/`isaac_sim_smoke.sh`/`isaac_lab_cartpole_smoke.sh`/`franka_smoke.sh`（G1–G4 验收）；`build_workspace_image.sh`/`run_demo.sh`/`run_gpu_controlplane.sh`/`smoke_api.sh`/`release.sh`/`validate_release.py`（生成 VALIDATION.json）。

@@ -11,7 +11,7 @@
 #   - authenticated Ingress / TLS、对象存储（S3）artifact store、密钥管理
 #
 # 依赖说明：DATABASE_URL 使用 postgresql+psycopg://，需控制面镜像安装 postgres extra
-# （psycopg 驱动）。runtime/Dockerfile.control-plane 已改为 `pip install ".[postgres]"`。
+# （psycopg 驱动）。依赖层由 uv 按 uv.lock 安装：builder 跑 `uv sync --frozen --extra postgres`，运行层 COPY 那份 .venv 并进 PATH。
 apiVersion: v1
 kind: Secret
 metadata:

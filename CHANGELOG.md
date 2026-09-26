@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 538 / passed 537 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 542 / passed 541 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -497,6 +497,60 @@ docker 档 21 → 22，全套 531 → 532。
 - **lint 覆盖面补一格**：`make lint` 原来只扫 `app tests edge_agent`，而常驻用例 import 的
   `scripts/check_image_sbom.py` 不在里面——本轮它确实有一行 123>120 而门禁全绿。把 `scripts` 纳入
   lint 范围（`ruff check app tests edge_agent scripts` → `All checks passed!`），以后量具自身也在闸内。
+
+### 镜像内容与锁文件对上：`pip install ".[postgres]"` 换成 `uv sync --frozen`（N-22 闭合）
+
+- **这条缺陷是清单一手量出来的，不是审查出来的**：给镜像打漏洞库时顺手把镜像里的
+  `pkg:pypi` 与 `uv.lock` 逐名比对，抓到 `SQLAlchemy 2.1.1`（锁钉 `2.1.0`）。根因是配方
+  `runtime/Dockerfile.control-plane:14` 那条 `RUN pip install --no-cache-dir ".[postgres]"`
+  在构建时对 PyPI 现解析——`make verify-lock` 全绿也管不到它，因为它验的是仓库里的解析，
+  不是镜像里装上的东西。
+- **选型四档，全部开过官方文档**（docs.astral.sh/uv 的 docker／sync／export／uv-pip-sync 四页）：
+  多阶段 `uv sync --frozen`＋COPY `.venv`／`uv export` 出 requirements 再 `pip --require-hashes`／
+  `uv pip sync` 直读锁／pip-tools 自解析。第三条被文档自己否掉——`uv pip sync` 枚举的支持格式里
+  没有 `uv.lock`；第四条等于再造一个解析器（两份真源）；第二条的哈希校验确实强（实测 pip 25.0.1
+  在全部哈希置零时回 "THESE PACKAGES DO NOT MATCH THE HASHES"），但要留一份会漂移的
+  `requirements.txt`，而 uv 文档自己不建议同时保留两份真源。**引依赖＝第一条**。
+- **uv 到底校不校验锁里的哈希？实测两条极性**（本地 uv 0.11.28，冷缓存、真下载）：
+  把 `uv.lock` 里 **wheel** 的 sha256 整条置零 → `uv sync --frozen` 退 **1** 并打印
+  "Computed: 946d195a…"；还原后同命令退 **0**。记账一次自己的无效测试：**头两次我把 sdist
+  那一行改了、而安装走的是 wheel，于是得到两次"uv 不校验哈希"的错读数**——错的不是 uv，
+  是夹具没打在该打的那一行上。`$?` 取在 `| tail` 之后也骗了我一次，改成先重定向再取退码。
+- **改完的配方与产物**：builder 用 `uv sync --frozen --no-dev --extra postgres
+  --no-install-project --no-editable` 装出 `/app/.venv`，运行层只 COPY 那份 venv 加源码并把
+  venv 放进 PATH（迁移 job 的 `command: ["alembic", "upgrade", "head"]` 因此仍解析得到）。
+  真跑 `make control-image`＝**55.6s**（旧配方 160～165s，大头是现解析＋构建隔离装 setuptools），
+  产物 `import app.main` OK、`python -c "sqlalchemy.__version__"`＝`2.1.0`、`psycopg 3.3.6`。
+  重出清单：`components=135 / deb=87 / pypi=47`（少掉的两条是原先作为发行包装进去的本项目
+  dist，旧清单里它以同一个 purl 出现了两次），**46/47 与 `uv.lock` 逐名逐版本相等**，
+  唯一剩下的 `pip 25.0.1` 是基础镜像自带的。
+- **两条常驻判据，反证用真产物**：配方层 `test_control_plane_recipe_installs_from_the_lock`
+  三档注入（退回旧配方／摘 `--frozen`／换成 `pip install --require-hashes -r` 的合规变体），
+  产物层 `check_image_sbom.py --lock uv.lock` 的白名单只认 `pip`（改个名即红）。反证是从旧配方
+  那台真镜像（`.Id`＝`sha256:cd371b31…`，dangling 还没被清掉）跑真 trivy 得到的清单里逐字节裁出的
+  `tests/fixtures/sbom.image.prefix-drift.json`，判据对它开 1 条点名 `sqlalchemy 2.1.1 vs 2.1.0`。
+  判据自己的 `--self-test` 从 14 档加到 **23 档**（逐档核对精确条数）。
+- **两处判据缺陷是被自己写的反例抓出来的，不是评审抓的**：① 配方判据原来直接读原文，
+  注释里那句讲 `uv sync --frozen` 的话替被摘掉旗标的 RUN 行背书 → 改成只看去掉注释、
+  折好续行之后的指令行；② 判据最初钉成"必须有 `uv sync --frozen`"，于是合法的
+  `uv export --frozen` ＋哈希安装被误红 → 改成判"uv 读锁"这一族（`sync|export|pip sync` 带
+  `--frozen`），因为要钉的性质是"这一组依赖由哪把锁决定"，不是工具名字。
+- **`COPY --from=` 进钉死判据的扫面**：多阶段之后 builder 还拉一份第三方工具镜像
+  （`ghcr.io/astral-sh/uv:0.12.19@sha256:04d046b1…`，digest 由两条独立通道同值取证：宿主匿名
+  令牌回的 `Docker-Content-Digest` 与对 2196 B 索引字节自算的 sha256 逐字相等；`docker pull` 退 0）。
+  如果判据只看 `FROM`，"把 uv 换成裸 latest"能一路绿过所有钉死判据。阶段名（`COPY --from=builder`）
+  按同文件声明的名字扣除，两个方向各有注入档。docker 档那条"取不到怎么定案"的覆盖面同时从
+  "第一个 FROM"扩成"配方里所有钉死的引用逐个 pull"，并为 ghcr 补了第二条通道（同注册表、
+  换传输——它能定案"摘要在不在"，不能定案"这家注册表有没有被篡改"，读数里写清楚）。
+- **顺手量出第二个盲区并修掉**：`make sbom` 用的是 `uv export --frozen --format cyclonedx1.5`，
+  默认只导主依赖集——导出的 **44** 个组件里没有 `psycopg`／`psycopg-binary`（生产镜像装的驱动）、
+  没有 `boto3`，而 `dist/sbom.cdx.json` 是进 `dist/checksums.txt` 的发布产物。加
+  `--extra postgres --extra s3` 后实测 **51** 个组件、三条到齐，dev 组仍不进（点名而不是
+  `--all-extras`）。留一格没做：wheel 清单（51）与镜像 pypi 组件（47）的基数本来就不该相等，
+  "部署要用的 extra 与配方里 `--extra` 那几个名字是否同集合"目前没有判据在核。
+- **通道读数又翻了一次**：上一轮记的是 `ghcr.io` 拨号 i/o timeout，本轮 `docker pull ghcr.io/…`
+  退 0 且 manifest 取到——同一台机器、隔几小时两种相反读数。所以 §8 那条方法论再加一句：
+  写"这条通道不行"只在它被记的那一刻成立，下一次要重跑而不是引用。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

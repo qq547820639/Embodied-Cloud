@@ -49,7 +49,7 @@ make release   # scripts/release.sh：校验 → build → 供应链 → 验证�
 `scripts/release.sh` 实际执行（按脚本内 `==========` 步骤名读，编号只是排版）：
 1. `make lint` / `make typecheck` / `make test`（任一失败即中止并输出原因）
 2. `make build` 生成 wheel 与 sdist
-3. `make verify-lock` / `make sbom` / `make audit`（uv.lock 一致性、CycloneDX SBOM、漏洞审计）
+3. `make verify-lock` / `make sbom` / `make audit`（uv.lock 一致性、CycloneDX SBOM、漏洞审计）——本轮起 `make sbom` 带 `--extra postgres --extra s3`，导出的清单才覆盖得住部署真装的那两组依赖（改前 44 个组件里没有 psycopg/boto3，改后 51 个）
 4. `make validate` 重生成 `docs/VALIDATION.json` / `.md`（分级矩阵的唯一事实源；
    无条件重跑 —— "版本一致就复用旧报告"会让工件比工作树少几条用例）
 5. 校验 sdist 清洁度（不得含 `__pycache__` / `*.pyc` / cache / `test-*.db` / `.env` / `.venv`）

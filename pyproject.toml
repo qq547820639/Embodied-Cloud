@@ -35,12 +35,12 @@ dev = [
   "boto3>=1.34,<2",
 ]
 # 生产 PostgreSQL 驱动（alembic 迁移 + 运行时连接）。dev/默认安装不含，
-# 生产镜像用 `pip install ".[postgres]"` 安装；见 deploy/kubernetes/control-plane-production.yaml。
+# 生产镜像由 uv 按 uv.lock 装这一组（`uv sync --frozen --extra postgres`），见 runtime/Dockerfile.control-plane。
 postgres = [
   "psycopg[binary]>=3.1,<4",
 ]
 # 生产对象存储后端（S3CompatibleArtifactStore 懒加载 boto3）。与 [postgres] 同理：
-# 默认/开发安装不带，用 MinIO/云 S3 的部署 `pip install ".[s3]"`；未安装时 store
+# 默认/开发安装不带；要用 MinIO/云 S3 的镜像必须把 `--extra s3` 加进构建那一步（锁外现装会让镜像脱离 uv.lock，见 SUPPLY_CHAIN §4）；未安装时 store
 # 明确抛 ArtifactStoreError，不静默降级到本地目录。
 s3 = [
   "boto3>=1.34,<2",

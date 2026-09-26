@@ -745,49 +745,68 @@ def test_pull_failure_action_adjudicates_every_combination() -> None:
     assert _pull_failure_action("TLS handshake timeout", "absent", "独立通道 404")[0] == "red_pin"
 
 
-def _independent_digest_read(ref: str, digest: str) -> tuple[str, str]:
-    """绕开守护进程那条传输，问另一个注册表："这份内容到底在不在"。
+def _registry_get(url: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+    """registry API 的一次 GET（两条独立通道共用）。
+
+    URL 全部由本模块内的常量与钉死的引用拼出（注册表主机＋仓库名＋摘要），没有用户输入。
+    """
+    import urllib.request
+
+    req = urllib.request.Request(url, headers=headers or {})  # noqa: S310
+    with urllib.request.urlopen(req, timeout=25) as resp:  # noqa: S310
+        return resp.status, resp.read()
+
+
+def _digest_channels(ref: str, digest: str) -> tuple[str, str]:
+    """守护进程之外的第二条通道，问"这份内容到底在不在"。
 
     返回 `present` / `absent` / `unknown` 三档之一 + 一句读数。判据不是"HTTP 200 就算在"：
     内容地址存储里"同一份东西"的定义是**逐字节重算的 sha256 与钉住的摘要相等**，
     所以这里取回 manifest body 自己算一遍（2026-09-26 实测：`python` 官方库那份
     10373 B、重算相符；把首位十六进制翻掉后同一通道回 404 —— 两个方向都验过才敢用它定案）。
+
+    两条通道按注册表分策略，各自能说的事实不同，所以 detail 里写明是哪一条：
+    - Docker Hub 官方库 → `public.ecr.aws/docker/library/<repo>`，**换一家注册表**，
+      能定案"这份字节在别处也认得"；
+    - `ghcr.io/...` → 还是 ghcr，但**换一条传输**（宿主 urllib 直连 registry API，与守护进程
+      那条独立）。这能定案"摘要在不在、字节对不对"，不能定案"这家注册表有没有被篡改"。
     """
     import hashlib
     import json as _json
     import urllib.error
-    import urllib.request
 
-    repo = ref.split("@", 1)[0].split(":", 1)[0]
-    if "/" in repo:
-        return "unknown", f"没有为 {repo} 建立第二通道映射（只覆盖 Docker Hub 官方库）"
-    base = "https://public.ecr.aws"
-    scope = f"repository:docker/library/{repo}:pull"
     accept = "application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json"
-
-    def _get(url: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
-        # S310: URL 由本函数外的常量拼出（public.ecr.aws + 仓库名 + 摘要），无用户输入
-        req = urllib.request.Request(url, headers=headers or {})  # noqa: S310
-        with urllib.request.urlopen(req, timeout=25) as resp:  # noqa: S310
-            return resp.status, resp.read()
+    repo = ref.split("@", 1)[0].split(":", 1)[0]
+    if repo.startswith("ghcr.io/"):
+        path, base, label = repo.split("/", 1)[1], "https://ghcr.io", "ghcr（同注册表、另一条传输）"
+        token_url = f"{base}/token?service=ghcr.io&scope=repository:{path}:pull"
+        manifest_url = f"{base}/v2/{path}/manifests/{digest}"
+    elif "/" not in repo:
+        path, base, label = f"docker/library/{repo}", "https://public.ecr.aws", "ECR Public（另一家注册表）"
+        token_url = f"{base}/token/?service=public.ecr.aws&scope=repository:{path}:pull"
+        manifest_url = f"{base}/v2/{path}/manifests/{digest}"
+    else:
+        return "unknown", f"没有为 {repo} 建立第二通道映射（只覆盖 Docker Hub 官方库与 ghcr）"
 
     try:
-        token = _json.loads(_get(f"{base}/token/?service=public.ecr.aws&scope={scope}")[1])["token"]
-        status, body = _get(
-            f"{base}/v2/docker/library/{repo}/manifests/{digest}",
-            {"Authorization": f"Bearer {token}", "Accept": accept},
-        )
+        token = _json.loads(_registry_get(token_url)[1])["token"]
+        status, body = _registry_get(manifest_url, {"Authorization": f"Bearer {token}", "Accept": accept})
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            return "absent", "独立通道 404 Not Found"
-        return "unknown", f"独立通道 HTTP {exc.code}"
+            return "absent", f"{label} 404 Not Found"
+        return "unknown", f"{label} HTTP {exc.code}"
     except Exception as exc:  # 网络/超时/JSON 解析：这一档就是"无法定案"，不假装成任何一个结论
-        return "unknown", f"独立通道不可用 {type(exc).__name__}: {str(exc)[:120]}"
+        return "unknown", f"{label} 不可用 {type(exc).__name__}: {str(exc)[:120]}"
     if status != 200:
-        return "unknown", f"独立通道 HTTP {status}"
+        return "unknown", f"{label} HTTP {status}"
     same = hashlib.sha256(body).hexdigest() == digest.split(":", 1)[1]
-    detail = f"独立通道 HTTP {status} / {len(body)} B / 重算 sha256 {'与钉住的值相等' if same else '不相等'}"
+    detail = f"{label} HTTP {status} / {len(body)} B / 重算 sha256 {'与钉住的值相等' if same else '不相等'}"
     return ("present" if same else "absent"), detail
+
+
+def _independent_digest_read(ref: str, digest: str) -> tuple[str, str]:
+    """既有调用名的薄壳：判据实现挪到 `_digest_channels`，这一层只保名字不改语义。"""
+    return _digest_channels(ref, digest)
 
 
 def test_pinned_base_of_the_control_plane_recipe_is_fetchable():
@@ -797,21 +816,27 @@ def test_pinned_base_of_the_control_plane_recipe_is_fetchable():
     `python -m build` 出的 wheel，`make control-image` 只在人手上跑过。于是"钉进去的
     digest 其实取不到"这类错误（上一轮就差点犯：第三方镜像站的读数与本机缓存不吻合时，
     钉错方向是让所有人的构建当场失败）只会在别人 build 的那一刻暴露。
-    本轮实测过一次完整构建（`Step 1/10 : FROM python:3.12-slim@sha256:f77ac9e4…`，
-    `Successfully built`，产物 `python -V` = 3.12.14，约 160s），这一支把其中"基础镜像取得到"
-    这一半变成每轮都算的判据；完整构建因 pip 层要重装（实测约 2.5 分钟）不常驻，如实记下。
+    本轮实测过一次完整构建（`Successfully built`，产物 `python -V` = 3.12.14）；改造配方后
+    再跑一次是 55.6s（旧配方那 165s 里有大半是 pip 层现解析＋构建隔离要装 setuptools），
+    这一支把其中"配方里每一份钉死的引用都取得到"这一半变成每轮都算的判据。完整构建本身
+    仍不常驻（要拉全部 wheel 字节，属于外网波动面，见 SUPPLY_CHAIN §8 第 4 项）。
 
+    覆盖面从"第一个 FROM"扩到**配方里所有钉死的引用**：改成多阶段之后 builder 还拉一份
+    工具镜像（uv），那份 digest 取不到时构建一样当场失败，没有理由只测基础镜像那一份。
     刻意**不**断言"tag 现在仍指向这个 digest"：钉住的内容本来就该在 tag 移动后保持不变，
     那样断言等于把配方钉成一个每漂移必红的项。tag 是否已移动只作为读数打印。
     """
-    # 判据只有一份实现：解析 FROM 与"有没有钉"都复用供应链档的那对纯函数
+    # 判据只有一份实现：解析 FROM/COPY --from 与"有没有钉"都复用供应链档的那对纯函数
     from tests.test_supply_chain import REPO_ROOT, _base_refs, _is_pinned
 
     refs = [r for _, r in _base_refs([REPO_ROOT / "runtime" / "Dockerfile.control-plane"])]
-    pinned = [r for r in refs if _is_pinned(r)]
-    assert pinned, f"控制面配方里没有钉 digest 的 FROM，逐字相等判据会失去权威侧：{refs}"
-    ref = pinned[0]
+    pinned = sorted({r for r in refs if _is_pinned(r)})
+    assert pinned, f"控制面配方里没有钉 digest 的引用，逐字相等判据会失去权威侧：{refs}"
+    for ref in pinned:
+        _assert_pinned_ref_fetchable(ref)
 
+
+def _assert_pinned_ref_fetchable(ref: str) -> None:
     pulled = _docker("pull", ref, timeout=300)
     if pulled.returncode != 0:
         # 守护进程的 docker.io 传输今天走的是它配置里的第三方镜像站（错误串里能看见

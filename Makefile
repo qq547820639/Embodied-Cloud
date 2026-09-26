@@ -117,7 +117,7 @@ verify-lock:
 
 sbom:
 	@mkdir -p dist
-	@$(UV) export --frozen --format cyclonedx1.5 > dist/sbom.cdx.json
+	@$(UV) export --frozen --extra postgres --extra s3 --format cyclonedx1.5 > dist/sbom.cdx.json
 	@$(PYTHON) -c "import json;d=json.load(open('dist/sbom.cdx.json'));print('[sbom] dist/sbom.cdx.json', d['bomFormat'], d['specVersion'], len(d['components']), 'components')"
 
 # 镜像层 SBOM：需要真实守护进程 + 已构建的控制面镜像，因此**不在** supply-chain 链里

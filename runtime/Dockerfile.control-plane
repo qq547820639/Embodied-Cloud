@@ -1,18 +1,45 @@
-# 钉多架构索引 digest（tag 保留只为可读性）。权威读数来自 docker.io 本身：
+# 基础镜像钉多架构索引 digest（tag 保留只为可读性）。权威读数来自 docker.io 本身：
 # `docker pull --platform linux/amd64 python:3.12-slim` 输出的 Digest 即此值（2026-09-26 实测），
 # 并与上一轮独立从 public.ecr.aws/docker/library/python 解析到的索引 digest 逐字相等。
 # 注：守护进程能出网而本机 curl 到 auth.docker.io/registry-1.docker.io 超时，故走
 # docker CLI 这条路径取证（见 docs/SUPPLY_CHAIN.md §2）。
+
+# ── 依赖层：由 uv.lock 唯一决定，构建时不做任何解析 ──────────────────────────
+# 为什么不再是 `pip install ".[postgres]"`（N-22）：那一条在构建时对 PyPI 现解析，
+# 结果镜像里的 wheel 集合没有任何锁文件能描述——实测过两笔：镜像 sqlalchemy 2.1.1 而
+# uv.lock 钉 2.1.0；当晚同一配方连跑 5 次全死在这一步（其中一次死在构建隔离要现取
+# `setuptools>=75`）。`uv sync --frozen` 的语义正是反过来：文档写明"uses the versions
+# in the lockfile as the source of truth"，且 exact sync 会把锁里没有的包移掉。
+# uv 二进制按 digest 钉死（同 §6 那条工具镜像规则，理由更硬：它是第三方注册表的字节）：
+# `ghcr.io/astral-sh/uv:0.12.19` 的多架构索引摘要，2026-09-27 实测两条通道同值——
+# 匿名令牌取 manifest 回 `Docker-Content-Digest`＝sha256:04d046b1…，2196 B 字节自算
+# sha256 亦等值；`docker pull` 该引用退 0。uv 的许可证是 MIT OR Apache-2.0（PyPI 元数据）。
+FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.12.19@sha256:04d046b13e60d6bcec73cbc5e1cad25d680dea90c8573340950a0ac2d1aef424 /uv /uvx /bin/
+# UV_PYTHON_DOWNLOADS=0：用基础镜像里那份 3.12，不让 uv 另下一份解释器（否则镜像里
+# 有两个 python，锁文件对不上号）；UV_LINK_MODE=copy：缓存与 .venv 可能不同文件系统。
+ENV UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+# `--extra postgres` 对齐原来的 `.[postgres]`（psycopg 驱动，alembic 与运行期连库必需）；
+# `--no-dev` 挡掉开发组；`--no-install-project` 让这一步**不构建本项目**——项目源码在运行
+# 阶段直接 COPY，版本由 app/__init__.py 提供，不依赖 dist-info（见下）。
+RUN uv sync --frozen --no-dev --extra postgres --no-install-project --no-editable
+
+# ── 运行层：只装依赖 venv + 源码，不装本项目发行包 ───────────────────────────
 FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 WORKDIR /app
+COPY --from=builder /app/.venv /app/.venv
 COPY pyproject.toml alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
 COPY scripts ./scripts
-# 生产镜像安装 postgres extra（psycopg 驱动）：alembic 迁移 + 运行时连接 PostgreSQL 必需。
-# 默认（无 extra）仍可跑 SQLite/mock；见 deploy/kubernetes/control-plane-production.yaml。
-RUN pip install --no-cache-dir ".[postgres]"
-ENV EMBODIEDCLOUD_BIND_HOST=0.0.0.0 \
+# venv 进 PATH：迁移动作在 k8s 里是 `command: ["alembic", "upgrade", "head"]`
+# （deploy/kubernetes/control-plane-production.yaml:56），那是 alembic 的控制脚本，
+# 必须由 venv 提供；本项目自己的 CMD 是 `python -m app.main`，不依赖入口脚本。
+ENV PATH="/app/.venv/bin:${PATH}" \
+    EMBODIEDCLOUD_BIND_HOST=0.0.0.0 \
     EMBODIEDCLOUD_BIND_PORT=8000 \
     EMBODIEDCLOUD_AUTO_CREATE_TABLES=true
 EXPOSE 8000

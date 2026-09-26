@@ -1,0 +1,398 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "metadata": {
+    "timestamp": "2026-09-26T20:54:38+00:00",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "manufacturer": {
+            "name": "Aqua Security Software Ltd."
+          },
+          "group": "aquasecurity",
+          "name": "trivy",
+          "version": "0.74.0"
+        }
+      ]
+    },
+    "component": {
+      "bom-ref": "2758831a-3e1b-4f01-b5f6-34be3ebd7518",
+      "type": "container",
+      "name": "sha256:cd371b313db722daad057074bfe50b3f8574828eeaafe5f1adc9d869a0c03f71",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:34fa5d379e3b1979fc72b896784d9e5f3261128e192055780c3b4897b5404dd2"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:5082115b0b64a3bbb754dcb2e1d41cc496949faf2188276a9625eea484f03fce"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:6efcb5f7fe739264929a072868c9a798d607a30d80b84398653534c4beaae922"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:77e3d8b6f2ffedf0e56807fd677c6ebb630288d92163c762271391b3f9100826"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:8227a1264c7ff2f8bd125b585e62c1cec77dd2099c985c33e08d34292d06144f"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:ba2c611f8c3d976fa272f36051c689d2bd2062e1e1b0c66a550fe7f986b1a916"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:bb98c47a575f471443d45d5e96aab7c0e646879bf372ba771288b008362ffc52"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:ca5428b5333f313164d5f9408d9051434a202a37c7ca3d4031d08669dcc0fb6e"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:d9a454691b8952308fa3b779dac6aabd4faab3cd0f9d1fdf56820cbeb6637fbd"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:ed81271af4968808356d9112f40712d9e3168bd0d1f97b2742341cdb50e27575"
+        },
+        {
+          "name": "aquasecurity:trivy:ImageID",
+          "value": "sha256:cd371b313db722daad057074bfe50b3f8574828eeaafe5f1adc9d869a0c03f71"
+        },
+        {
+          "name": "aquasecurity:trivy:SchemaVersion",
+          "value": "2"
+        },
+        {
+          "name": "aquasecurity:trivy:Size",
+          "value": "325511680"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=arm64&distro=debian-13.7",
+      "type": "library",
+      "supplier": {
+        "name": "GNU Libc Maintainers <debian-glibc@lists.debian.org>"
+      },
+      "name": "libc6",
+      "version": "2.41-12+deb13u4",
+      "licenses": [
+        {
+          "license": {
+            "id": "LGPL-2.1-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "name": "LGPL-2.1-or-later WITH link-exception"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-3.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL-2.0-or-later WITH link-exception"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "FSFAP"
+          }
+        },
+        {
+          "license": {
+            "name": "Carnegie"
+          }
+        },
+        {
+          "license": {
+            "name": "Inner-Net"
+          }
+        },
+        {
+          "license": {
+            "name": "MIT-like-Lord"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-like-Spencer"
+          }
+        },
+        {
+          "license": {
+            "name": "PCRE"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-clause-Carnegie"
+          }
+        },
+        {
+          "license": {
+            "id": "Unicode-DFS-2016"
+          }
+        },
+        {
+          "license": {
+            "id": "BSL-1.0"
+          }
+        },
+        {
+          "license": {
+            "id": "SunPro"
+          }
+        },
+        {
+          "license": {
+            "name": "CORE-MATH"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-clause-Berkeley"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-clause-WIDE"
+          }
+        },
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-clause-Oracle"
+          }
+        },
+        {
+          "license": {
+            "name": "DEC"
+          }
+        },
+        {
+          "license": {
+            "name": "IBM"
+          }
+        },
+        {
+          "license": {
+            "id": "ISC"
+          }
+        },
+        {
+          "license": {
+            "name": "Univ-Coimbra"
+          }
+        },
+        {
+          "license": {
+            "name": "public-domain"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-3.0-only"
+          }
+        }
+      ],
+      "purl": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=arm64&distro=debian-13.7",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:LayerDiffID",
+          "value": "sha256:8227a1264c7ff2f8bd125b585e62c1cec77dd2099c985c33e08d34292d06144f"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDigest",
+          "value": "sha256:bd36565c0fdebaf0f3af5c3b4ce610ca085ced32e9e9da850d95912f5f18f47b"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgID",
+          "value": "libc6@2.41-12+deb13u4"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgType",
+          "value": "debian"
+        },
+        {
+          "name": "aquasecurity:trivy:SrcName",
+          "value": "glibc"
+        },
+        {
+          "name": "aquasecurity:trivy:SrcRelease",
+          "value": "12+deb13u4"
+        },
+        {
+          "name": "aquasecurity:trivy:SrcVersion",
+          "value": "2.41"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:pypi/fastapi@0.141.1",
+      "type": "library",
+      "name": "fastapi",
+      "version": "0.141.1",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "3bcf40ca56f4d8a83467664b9c6d64dd8d70c6bc"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:pypi/fastapi@0.141.1",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:FilePath",
+          "value": "usr/local/lib/python3.12/site-packages/fastapi-0.141.1.dist-info/METADATA"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDiffID",
+          "value": "sha256:ed81271af4968808356d9112f40712d9e3168bd0d1f97b2742341cdb50e27575"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDigest",
+          "value": "sha256:12c2056ca5231454aab77f51ff9a4f4dbb6df5c75d69577d633b2e36357cfc80"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgType",
+          "value": "python-pkg"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:pypi/pip@25.0.1",
+      "type": "library",
+      "name": "pip",
+      "version": "25.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "7e11d8be93f8cb02d43d078fc3a87cceb5b6cac9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:pypi/pip@25.0.1",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:FilePath",
+          "value": "usr/local/lib/python3.12/site-packages/pip-25.0.1.dist-info/METADATA"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDiffID",
+          "value": "sha256:bb98c47a575f471443d45d5e96aab7c0e646879bf372ba771288b008362ffc52"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDigest",
+          "value": "sha256:d122ce05d52358f34d63025713fdaf36bd7f684c4861ef9715450970c8599024"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgType",
+          "value": "python-pkg"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:pypi/sqlalchemy@2.1.1",
+      "type": "library",
+      "name": "SQLAlchemy",
+      "version": "2.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "f59ae380183fe62d2bd817910ab8f50e04c06f42"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:pypi/sqlalchemy@2.1.1",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:FilePath",
+          "value": "usr/local/lib/python3.12/site-packages/sqlalchemy-2.1.1.dist-info/METADATA"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDiffID",
+          "value": "sha256:ed81271af4968808356d9112f40712d9e3168bd0d1f97b2742341cdb50e27575"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDigest",
+          "value": "sha256:12c2056ca5231454aab77f51ff9a4f4dbb6df5c75d69577d633b2e36357cfc80"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgType",
+          "value": "python-pkg"
+        }
+      ]
+    }
+  ],
+  "dependencies": []
+}
