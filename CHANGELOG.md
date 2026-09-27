@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 624 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 628 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -242,6 +242,22 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   三档 `gate_reason()` 统一给出 `docker daemon 不可达（命令超时（20s））`，三次前置合计 60.0s
   ⇒ 每档的挂起代价被单次探测封顶。这份真实原因喂进新判据 ⇒ `[]`。
 - 判据 2 支（五种夹具极性 + 接线次序），门禁目录 G0.58，计数面 622→624。
+
+
+### 挂起代价从估算变成测量，并做成可复跑的取证台（N-49）
+- N-48 留了一句估算："版本探测通、后续探测挂"时 docker 档大约付 80 秒。估算写进文档就是没人核的主张，
+  而且这个形状不可复跑。现在有了 `scripts/hang_probe.py` / `make hang-probe`（`TIMEOUT=2` 走快档）。
+- 造法是真挂：黑洞模式把 `DOCKER_HOST` 指向 TEST-NET-1（丢包≠拒连）；`hang-later` 在 PATH 前面放一个假
+  `docker`——`version`/`info` 正常答，其余子命令 `sleep`，于是每一层探测都被自己的超时掐掉。
+  每档跑在独立子进程里（互不污染环境），台子自带判据：给不出原因或原因不可行动 ⇒ 退出码非 0。
+- 实测（真实 20s 超时，整轮 245s，`hang_probe_rc=0`，无一条"判据未过"）：
+  blackhole 每档 20.06–20.53s；hang-later：docker **83.49s**、k8s 控制面 **40.07s**、postgres 20.23s、
+  object-store 20.05s。我的估算 80s 方向对但把 docker 档的候选镜像遍历算少了。
+- 常驻判据 4 支（两模式各一支 + 纯函数 rc 可翻 + Makefile 接线），门禁 G0.59；
+  `docs/OPERATIONS.md` 新增 §7.3 把这张表钉成运维口径。
+- 写判据过程中被 ruff 抓两处、被自己的测试抓两处：`pending_reason_offenders` 返回的是字符串而我把
+  它当元组解包（`ValueError: too many values to unpack`）、`.PHONY` 多行续行的扫描写成了
+  `(a and b) in line` 的胡话（`TypeError`），两处都由判据自己报出来后才修。
 
 
 ### 本轮新增的待收口项

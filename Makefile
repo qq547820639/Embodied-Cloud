@@ -8,7 +8,7 @@ SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
 export SOURCE_DATE_EPOCH
 
 .PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane policy-bench warm-sla warm-capacity \
-        lint typecheck build verify-artifacts smoke clean check demo amd64-probe \
+        lint typecheck build verify-artifacts hang-probe smoke clean check demo amd64-probe \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
         release api-docs validate lock verify-lock sbom image-sbom image-cve audit supply-chain
@@ -121,6 +121,11 @@ api-docs:
 
 validate:
 	$(PYTHON) scripts/validate_release.py
+
+# 挂起取证：真造一次"外部依赖卡住"（黑洞地址 / 假 docker CLI），量每档付几秒、说了什么。
+# 默认用真实 20s 超时；常驻判据用 --timeout 2 的同一份实现（见 tests/test_hang_probe.py）。
+hang-probe:
+	$(PYTHON) -m scripts.hang_probe $(if $(TIMEOUT),--timeout $(TIMEOUT),)
 
 # 产物可复算性探针：每类产物各建两次比 sha，全等才允许对第三方声明 recomputable=yes。
 # 读数写进 dist/checksums.manifest（gitignored），主张与实测不一致即退出码 1。
