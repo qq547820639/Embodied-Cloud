@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 644 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 647 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -403,6 +403,39 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 判据 2 支（公式两极、预热承重夹具）＋ 1 支改写（三档并发仍可判），门禁 G0.67；
   N-56 行内标注机制更正（本轮真的落了字）；计数面 641→644。
 
+
+### 分流判据改成"registry 答没答话"，并把被截掉的病因接回来（N-58）
+- 触发是一手红读数：HEAD `572ab15` 那轮 `make validate` 实测 `failed=1`，
+  AssertionError 原文里 daemon 回的是
+  `failed to resolve reference "ghcr.io/astral-sh/uv@sha256:04d0…": failed to do request: Head "https://ghcr.io/v2/a…`
+  （被我们自己的 `[:200]` 截断），第二通道 `Connection reset by peer` ⇒ `red_undecided`。
+  环境抖是触发因，代码里有三项放大项，全部改掉。
+- **① 截断方向**：containerd 把传输原因接在最后（containerd release/2.1 的 client 包 `pull.go` 第 188 行 →
+  同仓库 core/remotes/docker 包 `resolver.go` 第 649 行 → net 层，本轮重开源文件逐字核过），
+  所以取头部等于专门切掉唯一有区分力的一位。改 `_daemon_reading_of()` 取最后一条非空行的全部。
+  代价如实记：**今晚那条读数的病因字节已经没了**，复现只能按同一形状补尾。
+- **② 症状关键词表 → 答复形状**：`TRANSPORT_KEYS` 那五个词换成 `registry_reading()` 四档
+  （absent／answered／no-answer／unreadable）。分类轴取自一手来源（moby 的 `errors.As` +
+  `error from registry:` 前缀；go-containerregistry 的 `Temporary()` 按 OCI code ∪ HTTP status 判；
+  OCI spec 的码表与"manifest 不存在必须 404"）。**引思路不引依赖**：这里只有 CLI 文本可读。
+  `unreadable` 单开一档，专留"我们连错误文本都没拿到"——不折算成环境没问题，也不折算成钉错。
+- **③ 一个文件里两把尺**：SBOM 档的 `_transport_skippable` 是同一判断的第二份实现，盲区还不同
+  （它把 `denied`／429 这类真答复判成代码失败）。合并消费，新判据按**形状**（不是名字）钉"不许长回两份"，
+  因为本文件正文本来就要提这两个旧名字，按子串查会被自己命中——本轮在这条上连踩两次。
+- 打靶 7 条读数：4 条本机一手（假摘要 `: not found`／不存在仓库 `error from registry: denied`／
+  DNS 解析不到／端口拒连，命令与完整 stderr 见登记行），3 条第三方原文并注明未在本机重放
+  （ghcr 403 无 OCI body、TLS handshake timeout、`toomanyrequests` 429）。
+- 一支有意的放宽：`denied`/429 从"红"改成"干净跳过"。守护进程那条传输没资格对存在性表态，
+  能表态的是第二通道逐字节的 sha256 重算；坏摘要仍必须 `red_pin`（组合表逐档保留）。
+- 同一形状的第三处（本轮复算时自己撞上）：`test_the_probe_is_conclusive_across_concurrency_levels`
+  断的是 `--mode latency` 的 `rc==0`，而那个 rc 里含「这台机器今天忙不忙」。改成
+  rc∈{0,2} 且**与它自己打印的每档判定一致**：不可判集合为空 ⇔ 退 0，非空 ⇔ 退 2 且
+  stdout 必须出现「测不准」。这条一致性就是它的全部牙：把退码逻辑短路成永远 0，
+  只有真发生不可判的那跑会红（本机今晚三档都可判 ⇒ 这一支照绿），
+  而"预热不预热会不会翻转判定"由 N-57 那对夹具极单独钉住，不靠这台机器今天忙不忙。
+
+- 改前/改后同读数对比实测：旧尺 `red_undecided` → 新尺 `skip`，第二通道 absent 时两者都 `red_pin`。
+  docker 档 27→30 支真守护进程全绿；计数面 644→647；门禁 G0.68。
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到

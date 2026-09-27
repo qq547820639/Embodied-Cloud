@@ -17,6 +17,7 @@ pull_artifact/_streaming_workspace_running/_assert_streaming_slot_available。
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -684,37 +685,159 @@ def test_provider_argv_is_accepted_by_the_daemon_and_gpu_failure_is_not_a_usage_
     assert _docker("inspect", "-f", "{{.State.Status}}", name).returncode != 0
 
 
-TRANSPORT_KEYS = ("timeout", "dial tcp", "no such host", "connection refused", "unreachable")
+# --- 守护进程这条传输的读数分类：判"registry 有没有答过话"，不数症状关键词 -------------
+#
+# 为什么不用关键词表（本轮 2026-09-27 改的）：一次 ghcr 通道抖动把 docker 档 27 支里的 1 支
+# 变成**代码失败**，事后逐字对过一手来源，两处形状错在同一个地方——把病因按头部截断 + 按症状枚举：
+# - containerd 把传输原因接在**最后**：`client/pull.go:188` 的
+#   `failed to resolve reference %q: %w` 套 `core/remotes/docker/resolver.go:649` 的
+#   `failed to do request: %w`，最里层才是 net 层错误。所以"取前 200 字符"正好把唯一有区分力
+#   的那一段切掉，剩下的前缀在"通道没走到"与"registry 答了话"两种情形下逐字相同。
+# - moby 自己也按"有没有 registry 错误体"分流：`daemon/containerd/registry_errors.go`
+#   用 `errors.As` 取 `docker.Errors` / `ErrUnexpectedStatus`，命中才加 `error from registry: %w`
+#   前缀。⇒ "答复形状"是上游自己的分类轴，不是我发明的。
+# - go-containerregistry 的 `Error.Temporary()`（`pkg/v1/remote/transport/error.go`）把
+#   OCI code 与 HTTP status 两个命名空间并起来判（408/429/500/502/503/504 为临时），
+#   其余一律 fatal ⇒ 401/403/denied/manifest unknown 是**答复**，不是"没走到"。
+# - 码表与 404 规定见 OCI distribution-spec（`MANIFEST_UNKNOWN`／`NAME_UNKNOWN`／`DENIED`／
+#   `TOOMANYREQUESTS`，以及"manifest is not found in the repository, the response code MUST be
+#   404 Not Found"）。
+# 借的是它的**分类轴**（答复形状 + 存在性主张两分），不引依赖：这里只有守护进程打出的一行文本可读。
+
+ABSENT_CLAIMS = ("manifest unknown", "not found", "name unknown", "digest invalid")
+OTHER_ANSWERS = (
+    "error from registry:", "denied", "unauthorized", "toomanyrequests", "unexpected status",
+    "forbidden", "authentication required", "invalid repository name",
+)
+
+# 本机一手读数（2026-09-27，`docker pull <这些引用>` 的完整 stderr，未截断）
+DAEMON_READINGS: tuple[tuple[str, str, str], ...] = (
+    (
+        'Error response from daemon: failed to resolve reference '
+        '"ghcr.io/astral-sh/uv@sha256:' + "a" * 64 + '": ghcr.io/astral-sh/uv@sha256:' + "a" * 64
+        + ": not found",
+        "absent",
+        "本机：真 ghcr 仓库 + 全 a 的假摘要 ⇒ registry 明说没有",
+    ),
+    (
+        "Error response from daemon: error from registry: denied\ndenied",
+        "answered",
+        "本机：不存在的 ghcr 仓库 ⇒ 答的是权限/不泄漏存在性，不改写存在性主张",
+    ),
+    (
+        'Error response from daemon: failed to resolve reference "registry-embodiedcloud-'
+        'nonexistent-xyz.test/foo:1.0.0": failed to do request: Head "https://registry-'
+        'embodiedcloud-nonexistent-xyz.test/v2/foo/manifests/1.0.0": dial tcp: lookup '
+        "registry-embodiedcloud-nonexistent-xyz.test on 192.168.5.1:53: no such host",
+        "no-answer",
+        "本机：域名解析不到 ⇒ 根本没走到 registry",
+    ),
+    (
+        'Error response from daemon: failed to resolve reference "localhost:1/foo/bar:1.0.0": '
+        'failed to do request: Head "https://localhost:1/v2/foo/bar/manifests/1.0.0": dial tcp '
+        "127.0.0.1:1: connect: connection refused",
+        "no-answer",
+        "本机：端口拒连 ⇒ 同上，前缀与第一种假摘要逐字同形",
+    ),
+    (
+        'Error response from daemon: unknown: failed to resolve reference '
+        '"ghcr.io/mowglinext/mowglinext/mowglinext-gui:main": unexpected status from HEAD '
+        'request to https://ghcr.io/v2/mowglinext/mowglinext/mowglinext-gui/manifests/main: '
+        "403 Forbidden",
+        "answered",
+        "第三方原文（github.com/mowglinext/mowglinext/issues/358，本轮重开过正文）："
+        "含 failed to resolve reference 与 Head 字样却是**真答复**——症状关键词表在这种串上必错",
+    ),
+    (
+        'Error response from daemon: failed to resolve reference "ghcr.io/trufflesecurity/'
+        'trufflehog:latest": failed to do request: Head "https://ghcr.io/v2/trufflesecurity/'
+        'trufflehog/manifests/latest": net/http: TLS handshake timeout',
+        "no-answer",
+        "按第三方 issue 的形状构造（github.com/evoila/meho/issues/3310 正文里 "
+        "`net/http: TLS handshake timeout` 是**单独一行的日志**，我把它拼进了 containerd 的错误链；"
+        "本轮重开过该 issue 正文，逐字一整条未亲验、也未在本机重放）",
+    ),
+    (
+        "Error response from daemon: toomanyrequests: retry-after: 243.008µs, allowed: 44000/minute",
+        "answered",
+        "按第三方 issue 的形状构造（github.com/pdcarlson/Frapp/issues/2609；本轮取正文时被匿名 API "
+        "限流挡住，未亲验原文）。这一档的分类不依赖它：429/TOOMANYREQUESTS 属『临时答复』的依据是 "
+        "go-containerregistry 的 temporaryErrorCodes 与 OCI spec 码表（本轮重开过源）",
+    ),
+)
+
+
+def registry_reading(reading: str) -> str:
+    """守护进程这条传输的读数分四档：absent／answered／no-answer／unreadable。
+
+    absent    registry 明说"这份东西我这儿没有"（存在性主张——但镜像站会对**有效**摘要回
+              `not found`，2026-09-26 实测过，所以它不能单独定案，要第二通道表态）
+    answered  registry 答了话但不涉及存在性（denied／unauthorized／429／奇形状态码）
+    no-answer 根本没走到 registry（DNS／拒连／TLS／超时／黑洞……）
+    unreadable 我们连一行错误文本都没拿到——这是**我们自己的读数坏了**，
+              不许折算成"环境没问题"，也不许折算成"钉错了"，单独一档留着逼人来看
+    """
+    low = (reading or "").strip().lower()
+    if not low:
+        return "unreadable"
+    if any(k in low for k in ABSENT_CLAIMS):
+        return "absent"
+    if any(k in low for k in OTHER_ANSWERS):
+        return "answered"
+    return "no-answer"
+
+
+def _daemon_reading_of(stderr: str) -> str:
+    """取守护进程错误文本里最后一条非空行的**尾部**：病因在最后，截头等于截走判别位。"""
+    for line in reversed((stderr or "").strip().splitlines()):
+        if line.strip():
+            return line.strip()
+    return ""
 
 
 def _pull_failure_action(daemon_reading: str, verdict: str, detail: str) -> tuple[str, str]:
-    """把"守护进程取不到（含它的错误文本）+ 第二条通道的读数"映射成 (动作, 一句话)。
+    """把"守护进程这条传输的读数 + 第二通道的读数"映射成 (动作, 一句话)。
 
-    纯函数是为了能被常驻用例逐档打靶（这一支判据今晚真被镜像站的一次 `not found` 打过，
-    但下一轮多半是绿的——不把它抽出来，分流逻辑就只能等下一次故障才第一次运行）。
+    纯函数是为了能被常驻用例逐档打靶（这一支判据真被镜像站的一次 `not found` 打过，
+    下一轮多半是绿的——不抽出来，分流逻辑就只能等下一次故障才第一次运行）。
 
-    **顺序是判点**：第二通道说"这份摘要不存在"时，无论守护进程的错误文本长得像不像通道故障，
-    都判红。上一版按关键字先跳过，等于让"钉错 digest 恰好又被传输问题掩盖"这种组合免检。
-    动作三种：`skip`（主张未获证，两条读数都打出来）、`red_pin`（钉错了）、
-    `red_undecided`（取不到且无法定案，留着别洗）。
+    **判点在次序**，三档动作各有不能洗的理由：
+    1. 第二通道逐字节认定"这份摘要不存在" ⇒ `red_pin`。钉进配方的引用就是错的，
+       守护进程那边长得再像通道故障也不改判。
+    2. 第二通道逐字节认定"存在" ⇒ `skip`。内容寻址存储里"同一份东西"的定义已经被满足了，
+       剩下的都是本机这条传输的事——哪怕守护进程回的是 `not found`（镜像站会这么撒的实测过）。
+    3. 第二通道无法定案（`unknown`，它自己也够不到）时，才轮到守护进程的**答复形状**说话：
+       它说没有 ⇒ `red_undecided`（两条读数都没有指认"存在"，也没有一条能说"是配方错"，
+       留着别洗）；我们连文本都没拿到 ⇒ 同样 `red_undecided`；
+       其余（答了话但不涉及存在性、或压根没走到）⇒ `skip`，并打出两条读数——
+       这正是"环境抖动不得冒充代码失败"那一格：今晚的 ghcr 抖动就走在这里。
     """
-    transport = any(k in daemon_reading.lower() for k in TRANSPORT_KEYS)
+    kind = registry_reading(daemon_reading)
     if verdict == "absent":
         return "red_pin", (
             f"两条独立传输都指认这份摘要不存在 ⇒ 钉进配方的引用是错的"
-            f"（daemon 读数即使长得像通道故障也不改判）：{daemon_reading}；{detail}"
-        )
-    if transport:
-        return "skip", (
-            f"{GATE_SENTINEL}: 本机这条传输没走到 registry（{daemon_reading}）；"
-            f"第二通道读数 {verdict}（{detail}）——没有任何通道指认这份摘要是错的，主张本轮未获证"
+            f"（daemon 读数分类 {kind} 也不改判）：{daemon_reading}；{detail}"
         )
     if verdict == "present":
         return "skip", (
-            f"{GATE_SENTINEL}: 守护进程这条传输答 not found，第二条传输逐字节确认该摘要存在（{detail}）"
-            f"⇒ 判为通道故障而非配方错误，主张本轮未获证。daemon 读数：{daemon_reading}"
+            f"{GATE_SENTINEL}: 第二通道逐字节确认该摘要存在（{detail}）⇒ 守护进程这条传输的"
+            f"失败（分类 {kind}）判为通道问题，主张本轮未获证。daemon 读数：{daemon_reading}"
         )
-    return "red_undecided", f"守护进程取不到、独立通道也无法定案（{detail}）：{daemon_reading}"
+    if kind in ("absent", "unreadable"):
+        why = (
+            "registry 答了『没有』这条摘要，而第二通道够不到、无法反驳"
+            if kind == "absent"
+            else "守护进程失败却没留下任何错误文本——这条判据的读数本身坏了"
+        )
+        return "red_undecided", (
+            f"取不到且无法定案：{why}；第二通道读数 {verdict}（{detail}）；daemon 读数：{daemon_reading}"
+        )
+    what = "没走到 registry" if kind == "no-answer" else "答了话但不涉及存在性（鉴权/限流/状态码）"
+    return "skip", (
+        f"{GATE_SENTINEL}: 两条通道本轮都无法定案——daemon 这条{what}，第二通道 {verdict}"
+        f"（{detail}）。没有任何一方指认这份摘要是错的，主张本轮未获证；"
+        f"要定案就换一条出网通道再跑 `make control-image`。daemon 读数：{daemon_reading}"
+    )
 
 
 def test_independent_digest_read_discriminates_present_from_absent() -> None:
@@ -754,25 +877,100 @@ def test_independent_digest_read_discriminates_present_from_absent() -> None:
                                     "sha256:" + other_digest)[0] == "unknown"
 
 
+def test_daemon_reading_classifier_separates_the_two_families() -> None:
+    """一手读数逐条打靶：同一截前缀下的"没有"与"没走到"必须落到不同档。
+
+    这一支就是本轮的因果证明：写它之前，分流靠一张症状关键词表，而今晚那条
+    ghcr 抖动串（`failed to resolve reference … failed to do request: Head …`）
+    既不在表里、也不长得像"registry 说不存在"，于是环境抖动在发布门禁上表现为一支代码失败。
+    """
+    seen: set[str] = set()
+    for reading, expected, source in DAEMON_READINGS:
+        got = registry_reading(reading)
+        assert got == expected, f"分类成 {got}，期望 {expected}（{source}）：{reading[:90]}"
+        seen.add(got)
+    assert seen == {"absent", "answered", "no-answer"}, seen
+    # 两极之一：坏值不落到某一档就是判据没开火
+    assert registry_reading("") == "unreadable", "连错误文本都没有时必须单独一档，不许折算成环境没问题"
+    # 另一半：含 `failed to resolve reference` 与 `Head "https://…"` 的两条读数必须分家——
+    # 这正是症状关键词表做不到的事（前缀逐字同形，判别位在尾部）
+    same_prefix = [r for r, _k, _s in DAEMON_READINGS if "failed to resolve reference" in r]
+    classes = {registry_reading(r) for r in same_prefix}
+    assert len(same_prefix) >= 3 and classes == {"absent", "no-answer", "answered"}, (
+        len(same_prefix), sorted(classes))
+
+
+def test_truncation_direction_is_load_bearing() -> None:
+    """截断按头部会把病因切掉：本机那条 `: not found` 读数截到 200 字符就退化成 no-answer。
+
+    守护进程的错误链是 containerd 那种"外层在前、原因在最后"的形状，所以这一格不是
+    审美问题：旧写法 `splitlines()[-1][:200]` 与被切掉的那一位正好是分流唯一依据。
+    """
+    absent = next(r for r, k, _s in DAEMON_READINGS if k == "absent")
+    assert registry_reading(absent) == "absent"
+    assert registry_reading(absent[:200]) == "no-answer", (
+        "截头 200 字符后仍带着存在性主张 ⇒ 这条夹具不够长，控制失去区分力（该换夹具，不该改判据）"
+    )
+    # 取尾的读法不丢任何东西
+    assert registry_reading(_daemon_reading_of(f"层一\n层二\n{absent}")) == "absent"
+    # 这一行才是"截断方向"的牙：把取尾换成取头（旧写法 `[-1][:200]`），长读数尾部的
+    # 存在性主张就被丢掉，下面这条立刻红
+    assert _daemon_reading_of("头" * 300 + "\n" + absent).endswith("not found")
+    assert _daemon_reading_of("只有前缀\n") == "只有前缀"
+    assert _daemon_reading_of("全是空白\n   \n") == "全是空白"
+    assert _daemon_reading_of("") == ""
+
+
 def test_pull_failure_action_adjudicates_every_combination() -> None:
-    """2×3 全组合各有出口：坏摘要在任何 daemon 读数下都必须红，好摘要不能被洗成通过。"""
+    """答复形状 × 第二通道读数的全组合各有出口：坏摘要必须红，好摘要不能被洗成通过。"""
     combos = {
-        ("TLS handshake timeout", "present"): "skip",
-        ("TLS handshake timeout", "absent"): "red_pin",
-        ("TLS handshake timeout", "unknown"): "skip",
-        ("manifest unknown: not found", "present"): "skip",
-        ("manifest unknown: not found", "absent"): "red_pin",
-        ("manifest unknown: not found", "unknown"): "red_undecided",
+        # (daemon 读数, 第二通道) -> 动作
+        (next(r for r, k, _ in DAEMON_READINGS if k == "no-answer"), "present"): "skip",
+        (next(r for r, k, _ in DAEMON_READINGS if k == "no-answer"), "absent"): "red_pin",
+        (next(r for r, k, _ in DAEMON_READINGS if k == "no-answer"), "unknown"): "skip",
+        (next(r for r, k, _ in DAEMON_READINGS if k == "absent"), "present"): "skip",
+        (next(r for r, k, _ in DAEMON_READINGS if k == "absent"), "absent"): "red_pin",
+        (next(r for r, k, _ in DAEMON_READINGS if k == "absent"), "unknown"): "red_undecided",
+        (next(r for r, k, _ in DAEMON_READINGS if k == "answered"), "unknown"): "skip",
+        (next(r for r, k, _ in DAEMON_READINGS if k == "answered"), "present"): "skip",
+        ("", "unknown"): "red_undecided",
     }
     seen: set[str] = set()
     for (reading, verdict), expected in combos.items():
         action, message = _pull_failure_action(reading, verdict, "读数详情")
-        assert action == expected, f"{reading} + {verdict} → {action}，期望 {expected}：{message}"
-        assert GATE_SENTINEL in message if action == "skip" else "钉进配方" in message or "无法定案" in message, message
+        assert action == expected, f"{reading[:60]} + {verdict} → {action}，期望 {expected}：{message}"
+        if action == "skip":
+            assert GATE_SENTINEL in message, message
+        else:
+            assert "钉进配方" in message or "无法定案" in message, message
+        assert "读数详情" in message or action != "skip", f"skip 却没把第二通道读数打出来：{message}"
         seen.add(action)
     assert seen == {"skip", "red_pin", "red_undecided"}, seen
-    # 坏摘要那一档必须压过"长得像通道故障"的读数：这一条就是上一版的漏洞所在
-    assert _pull_failure_action("TLS handshake timeout", "absent", "独立通道 404")[0] == "red_pin"
+    # 坏摘要那一档必须压过一切daemon 读数形状（上一版在这里放过免检通道）
+    bad = next(r for r, k, _ in DAEMON_READINGS if k == "absent")
+    assert _pull_failure_action(bad, "absent", "独立通道 404")[0] == "red_pin"
+
+
+def test_the_daemon_reading_classifier_has_exactly_one_copy() -> None:
+    """同一件事的判断在这个文件里被写过两份（守护进程取回失败那一条按关键词表跳过，
+    镜像层 SBOM 那一条另起一个 `_skippable` 小函数）——两份各有盲区：今晚假红的是前者，
+    而后者会把 429／鉴权这类**真答复**判成代码失败。合并成一把尺之后，出现第三种拼写就红。
+
+    判的是形状不是名字：本文件的正文里本来就要提到这两个旧名字，按子串查会被自己命中。
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    for shape in (r"^TRANSPORT[_]KEYS\s*=", r"def _transport[_]skippable\("):
+        hit = re.findall(shape, src, flags=re.M)
+        assert not hit, f"{shape} 又长回来了：{hit}"
+    assert len(re.findall(r"^def registry[_]reading\(", src, flags=re.M)) == 1, "分流判据不该有第二份实现"
+    # 接线证明：合并后的那把尺必须真被 SBOM 那条路消费。名字是拼出来的、正文里也不写全名——
+    # 判据里只要多出现一次那个字面量，按计数判的断言就会被自己命中（本轮踩过两次）。
+    needle = "transport" + "_only"
+    hits = [i for i, ln in enumerate(src.splitlines(), 1) if needle + "(" in ln]
+    assert len(hits) == 3, (hits, needle)  # 定义 1 + 工具镜像 + trivy 运行期
+    body = src[src.index("def " + needle + "("):]
+    body = body[: body.index("\n    have =")]
+    assert "registry" + "_reading(" in body, "SBOM 那条路只是改了个名字，没真的走同一把尺"
 
 
 def _registry_get(url: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
@@ -876,8 +1074,8 @@ def _assert_pinned_ref_fetchable(ref: str) -> None:
         # 再由 _pull_failure_action 定档（坏摘要在任何 daemon 读数下都必须红）。
         digest = ref.rsplit("@sha256:", 1)[1]
         verdict, detail = _independent_digest_read(ref, "sha256:" + digest)
-        stderr = (pulled.stderr or "").strip()
-        daemon_reading = stderr.splitlines()[-1][:200] if stderr else "(守护进程没有给出任何错误文本)"
+        # 取**尾**不取头：containerd 的错误链把病因接在最后，截头等于把唯一有区分力的一位丢掉
+        daemon_reading = _daemon_reading_of(pulled.stderr)
         action, message = _pull_failure_action(daemon_reading, verdict, detail)
         if action == "skip":
             pytest.skip(message)
@@ -907,7 +1105,7 @@ def _assert_pinned_ref_fetchable(ref: str) -> None:
                 f"改掉 digest 一位之后仍然 pull 成功——上面的判据没有按 digest 解析：{bogus}"
             )
         assert (neg.stderr or "").strip(), "负向对照 pull 失败却没有任何错误文本，读数不可归因"
-        control = f"开火（pull 失败：{neg.stderr.strip().splitlines()[-1][:120]}）"
+        control = f"开火（pull 失败：{_daemon_reading_of(neg.stderr)[-160:]}）"
         # 第二通道也不能是橡皮图章：同一个翻转摘要在它那里必须同样"不存在"，
         # 否则上面那条"镜像站说没有＋独立通道说有 ⇒ 判为通道故障"的分流就永远没有反面。
         i_verdict, i_detail = _independent_digest_read(ref, "sha256:" + flipped)
@@ -961,16 +1159,22 @@ def test_pinned_sbom_tool_actually_produces_a_checkable_image_sbom(tmp_path: Pat
     assert subjects, "控制面配方没有钉 digest 的 FROM，被审对象无从选取"
     subject = subjects[0]
 
-    def _transport_skippable(stderr: str) -> bool:
-        low = (stderr or "").lower()
-        return any(k in low for k in ("timeout", "dial tcp", "no such host", "connection refused", "unreachable"))
+    def transport_only(stderr: str) -> bool:
+        # 与守护进程取回失败那一条共用同一把尺：registry 明说『没有』＝钉错了必须红，
+        # 连文本都没拿到＝我们自己的读数坏了；答了话但不涉及存在性（鉴权/限流）与
+        # 压根没走到 registry，都只说明本轮未获证。
+        return registry_reading(_daemon_reading_of(stderr)) not in ("absent", "unreadable")
 
     have = _docker("image", "inspect", tool, timeout=60)
     if have.returncode != 0:
         pulled = _docker("pull", tool, timeout=600)
         if pulled.returncode != 0:
-            if _transport_skippable(pulled.stderr):
-                pytest.skip(f"{GATE_SENTINEL}: SBOM 工具镜像取不到（registry 通道不可达）：{pulled.stderr[-200:]}")
+            if transport_only(pulled.stderr):
+                pytest.skip(
+                    f"{GATE_SENTINEL}: SBOM 工具镜像这条传输未定案"
+                    f"（{registry_reading(_daemon_reading_of(pulled.stderr))}）："
+                    f"{_daemon_reading_of(pulled.stderr)[-200:]}"
+                )
             raise AssertionError(f"钉进脚本的工具镜像取不到：{tool}\n{pulled.stderr[-400:]}")
 
     run = _docker(
@@ -986,8 +1190,12 @@ def test_pinned_sbom_tool_actually_produces_a_checkable_image_sbom(tmp_path: Pat
         timeout=600,
     )
     if run.returncode != 0:
-        if _transport_skippable(run.stderr):
-            pytest.skip(f"{GATE_SENTINEL}: trivy 运行期通道不可达：{run.stderr[-200:]}")
+        if transport_only(run.stderr):
+            pytest.skip(
+                f"{GATE_SENTINEL}: trivy 运行期未定案"
+                f"（{registry_reading(_daemon_reading_of(run.stderr))}）："
+                f"{_daemon_reading_of(run.stderr)[-200:]}"
+            )
         raise AssertionError(f"trivy 出清单失败：{run.stderr[-400:]}")
 
     # 落盘只为本数一遍；判据读的是这份 stdout（脚本侧同样走 stdout，理由见 image_sbom.sh 注释）
