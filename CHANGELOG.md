@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 598 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 602 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -154,6 +154,19 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 判据过宽一次，当场收到反例：全文扫 `*_total/*_seconds/*_ready` 被 provider 的方法名
   `wait_ready` 打红 ⇒ 收紧作用域到"表格首列"，保住牙齿（把 `gpu_allocated` 写成 `gpu_allocations` 仍红）
   又不禁正文提方法名。两支都配了必开对照 + 恢复后复算（`rc=0`）。
+
+
+### 指标三边对齐：声明 ↔ 文档 ↔ 实际暴露（N-43）
+- N-42 只把"文档"和"声明"两边核过；`/metrics` 真跑出来的是什么，没人看。这类缺口在命名规则上最容易咬人：
+  `warm_pool_claim_failed` 声明时不带 `_total`，prometheus 会把它派生成 `warm_pool_claim_failed_total` ——
+  文档与代码互相点头，运行时却是第三套。
+- 新增测试侧共享解析 `tests/metrics_spec.py`：AST 取声明、按**实测得到**的派生规则算序列名、解析 exposition 文本；
+  端到端判据真跑一次启动后抓 `/metrics` 对账（四条：解析非空／序列可派生／标签 ⊆ 声明＋`le` 例外／刚发生的启动确实带标签）。
+- 派生规则不靠记忆：`test_allowed_series_matches_the_librarys_own_naming` 现场建三类指标 `collect()` 后比对
+  （本机 prometheus_client 0.26.0：Counter→`{基名_total, 基名_created}`，Histogram→`_bucket/_count/_sum/_created`）。
+- 两次注入 + 一次反证：`app/main.py` 里注册 `gpu_stray_total` ⇒ `暴露了声明之外的序列：['gpu_stray_created','gpu_stray_total']`；
+  从声明里删掉 `provider` ⇒ 进程在记账处炸、启动收敛不到终态（活进程里标签越界走不到那条分支，于是它的开火证明移到解析层）；
+  已知样本喂解析 ⇒ 抓出"不校验数值列，把一句散文当成叫 `this` 的族"。判据 4 支、门禁 G0.53。
 
 
 ### 本轮新增的待收口项

@@ -154,6 +154,65 @@ def test_metrics_endpoint():
             assert metric in body
 
 
+def test_metrics_exposition_is_what_the_code_declares():
+    """`/metrics` 实际暴露的序列与标签，必须能由 `app/metrics.py` 的声明派生。
+
+    N-42 那两支核的是"文档 ↔ 声明"；这一支接上第三边——**跑出来的文本**。四条一起断：
+    ①  exposition 解析不出任何序列 ⇒ 判据恒真，先红；
+    ②  本仓前缀下出现的序列名必须在声明派生集合里（Counter 的 `_created`、Histogram 的
+        `_bucket/_sum/_count` 算派生内）；
+    ③  每条序列的标签键必须是声明标签的子集（`_bucket` 额外允许 `le`）；活进程里
+        prometheus_client 自己就拒绝未声明的标签键，所以这条分支的开火证明放在解析层
+        （`tests/test_metrics_spec.py` 的两支：`le` 不许漏给非 bucket 序列、喂一份带越界标签的文本）；
+    ④  刚刚真跑过一次启动 ⇒ `workspace_launch_total` 必须带着 `template_id`+`provider` 出现
+        （否则 ②③ 可以对着空集合恒真）。
+    已知边界：②③ 只覆盖"前缀来自声明"的序列，prometheus_client 自带的 `python_*`/`process_*`
+    被隔在外面——将来若有全新前缀的族，仍要靠 N-42 那两支接住。
+    """
+    from tests.metrics_spec import (
+        allowed_series,
+        app_prefixes,
+        declared_metrics,
+        expected_labels,
+        parse_exposition,
+    )
+
+    with TestClient(app) as client:
+        token = _register(client, "metrics-shape@example.com", "metrics-shape")
+        headers = _auth(token)
+        created = client.post(
+            "/api/workspaces", json={"template_id": "cartpole", "auto_start": True}, headers=headers
+        )
+        assert created.status_code == 201
+        await_workspace_settled(client, created.json()["id"], headers)
+        body = client.get("/metrics").text
+
+    declared = declared_metrics()
+    allowed = allowed_series(declared)
+    prefixes = app_prefixes(declared)
+    observed = parse_exposition(body)
+    assert observed, "exposition 里一个序列都没解析出来：本判据恒真"
+
+    unknown = sorted(name for name in observed if name.startswith(prefixes) and name not in allowed)
+    assert not unknown, f"暴露了声明之外的序列：{unknown}"
+
+    extra_labels: dict[str, list[str]] = {}
+    for series, keys in observed.items():
+        family = allowed.get(series)
+        if family is None or not series.startswith(prefixes):
+            continue
+        expected = expected_labels(series, set(declared[family]["labels"]))  # type: ignore[arg-type]
+        extra = sorted(keys - expected)
+        if extra:
+            extra_labels[series] = extra
+    assert not extra_labels, f"这些序列带了声明外的标签：{extra_labels}"
+
+    launch_labels = observed.get("workspace_launch_total", set())
+    assert {"template_id", "provider"} <= launch_labels, (
+        f"刚完成一次真启动，workspace_launch_total 却没带 template_id/provider：{sorted(launch_labels)}"
+    )
+
+
 def test_standalone_user_usage_balance_matches_ledger():
     """Regression: 无 organization 的 standalone user 有 CreditLedger 记录时，
     GET /api/usage 必须返回真实 balance，而不是 0。"""

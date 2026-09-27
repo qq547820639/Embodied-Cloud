@@ -140,29 +140,10 @@ def test_every_prometheus_metric_family_is_documented() -> None:
 
 
 def _declared_metrics() -> dict[str, list[str]]:
-    """从 app/metrics.py 的 AST 里取 {指标族名: 标签列表}（顺序按声明）。"""
-    import ast
-    from pathlib import Path as _P
+    """`{族名: 标签}`；解析实现与 test_api 的暴露对账共用 `tests/metrics_spec.py` 一份。"""
+    from tests.metrics_spec import declared_metrics
 
-    tree = ast.parse(_P("app/metrics.py").read_text(encoding="utf-8"))
-    out: dict[str, list[str]] = {}
-    for node in tree.body:
-        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
-            continue
-        func = node.value.func
-        fname = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-        if fname not in {"Counter", "Gauge", "Histogram"} or not node.value.args:
-            continue
-        if not isinstance(node.value.args[0], ast.Constant):
-            continue
-        name = node.value.args[0].value
-        labels: list[str] = []
-        for arg in node.value.args[1:]:
-            if isinstance(arg, ast.List):
-                labels = [e.value for e in arg.elts if isinstance(e, ast.Constant)]
-                break
-        out[name] = labels
-    return out
+    return {name: list(spec["labels"]) for name, spec in declared_metrics().items()}
 
 
 def test_metrics_table_documents_the_label_set_too() -> None:
