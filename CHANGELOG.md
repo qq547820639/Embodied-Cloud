@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 632 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 633 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -275,6 +275,20 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 记账时又踩自己写的坑两次：拼接脚本把 `# PENDING 的说明…` 那行注释切成半句（`SyntaxError: invalid character '：'`）、
   以及 `root/"app".rglob(...)` 的优先级把 `rglob` 挂到了字符串上（`AttributeError`）——两处都由"改完立刻编译/真跑"抓到。
 - 登记表 N-50、门禁 G0.60，计数面 628→631。
+
+
+### 指针的出处改成"真的被读"（N-51）
+- N-50 的 env 目录里有一条宽口径：只要 `EMBODIEDCLOUD_*` 以字符串形式出现在发行代码里就算出处。
+  结果注释、文档字符串，甚至写错一个字母的名字都能给假指针盖章。
+- 第一个受害者是今天的我：我在门禁注释与测试文档里写下 k8s 开关的**复数形式**，而仓里真正被读的是单数——
+  用 AST 扫全部读点后确认复数形式零处被读，也就是说，若只靠旧目录，这条我自己造的假指针会永远合法。
+- 收紧：`env_names_read_by()` 用 AST 只认 `os.environ[...]`、`os.environ.get(...)`、`getenv(...)` 三种读法，
+  并解析 `CONST = "名字"` 之后按变量索引的间接写法；注释不算。
+- 判据写成双向，避免"把判据调瞎当成调准"：喂一份混合三种情形的源码，目录只收两种；
+  同时断言对象存储镜像、kind 二进制、边缘凭据这些**真被读**的开关收紧后仍在目录里。
+- 收紧后的真面复扫：52 个变量名、40 个 make 目标、11 个 extras，越界引用 **0 条**；
+  我把注释与测试里那处假名字改回正确拼法，测试夹具改用明显不存在的占位名（不复用真开关的近似拼法）。
+  门禁 G0.61，计数面 632→633。
 
 
 ### 本轮新增的待收口项

@@ -336,9 +336,9 @@ def pending_reason_offenders(statuses: dict[str, object]) -> list[str]:
     return out
 
 
-# 操作指针核到"引用的东西真的存在"：档位原因与文档里写的 `EMBODIEDCLOUD_*`、`make xxx`、
-# `.[extra]` 是人照着补环境的入口，记错一个字母（我这轮就"记得"过 `EMBODIEDCLOUD_K8S_TESTS`，
-# 全仓零命中）就会让人白折腾。目录来自仓内事实，所以这条判据不依赖环境。
+# 操作指针核到"引用的东西真的存在"：档位原因与文档里的变量名、`make` 目标、`.[extra]`
+# 是人照着补环境的入口，而人会记错字母（这条判据上线后抓到的第一个真错就是我自己写的
+# 一个复数形式的开关名——仓里真正被读的是单数）。目录来自仓内事实，不依赖环境。
 POINTER_DOCS = ("docs",)
 POINTER_EXTRA_DOCS = ("DELIVERY.md", "README.md", "CHANGELOG.md")
 POINTER_MODULES = (
@@ -353,28 +353,64 @@ MAKE_RE = re.compile(r"\bmake ([a-z][a-z0-9-]*)")
 EXTRA_RE = re.compile(r"\.\[([a-z0-9]+)")
 
 
+def env_names_read_by(sources: dict[str, str]) -> set[str]:
+    """AST 找**真的被读**的环境变量名：`os.environ["X"]` / `.get("X")` / `getenv("X")`，
+    含 `CONST = "X"` 之后 `os.environ[CONST]` 这种间接写法。
+
+    注释与文档字符串里的名字不算出处——判据要能抓的正是"写着像有、其实没人读"。
+    """
+    from ast import Assign, Attribute, Call, Constant, Name, Subscript, parse, walk
+
+    def is_env_root(node: object) -> bool:
+        # os.environ / environ / os.getenv 的宿主
+        parts: list[str] = []
+        while isinstance(node, Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, Name):
+            parts.append(node.id)
+        return "environ" in parts or "os" in parts
+
+    found: set[str] = set()
+    for text in sources.values():
+        tree = parse(text)
+        consts: dict[str, str] = {}
+        for node in tree.body:
+            if (
+                isinstance(node, Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], Name)
+                and isinstance(node.value, Constant)
+                and isinstance(node.value.value, str)
+            ):
+                consts[node.targets[0].id] = node.value.value
+        for node in walk(tree):
+            first: object | None = None
+            if isinstance(node, Subscript) and is_env_root(node.value):
+                first = node.slice
+            elif isinstance(node, Call) and isinstance(node.func, (Attribute, Name)):
+                fname = node.func.attr if isinstance(node.func, Attribute) else node.func.id
+                if fname in {"get", "getenv"} and (fname == "getenv" or is_env_root(node.func.value)):
+                    first = node.args[0] if node.args else None
+            if isinstance(first, Constant) and isinstance(first.value, str):
+                found.add(first.value)
+            elif isinstance(first, Name) and first.id in consts:
+                found.add(consts[first.id])
+    return found
+
+
 def reference_catalog() -> dict[str, set[str]]:
     """{env, make, extra} 三个目录，全部从仓内来源现取。"""
-    shipped = "\n".join(
-        f.read_text(encoding="utf-8", errors="replace")
-        for d in ("app", "edge_agent")
-        for f in sorted((ROOT / d).rglob("*.py"))
-    )
-    everywhere = "\n".join(
-        f.read_text(encoding="utf-8", errors="replace")
+    everywhere = {
+        str(f): f.read_text(encoding="utf-8", errors="replace")
         for d in ("app", "edge_agent", "tests", "scripts")
         for f in sorted((ROOT / d).rglob("*.py"))
-    )
+    }
     config = (ROOT / "app/config.py").read_text(encoding="utf-8")
     prefix_match = re.search(r'env_prefix="([^"]+)"', config)
     prefix = prefix_match.group(1) if prefix_match else "EMBODIEDCLOUD_"
     fields = re.findall(r"^    ([a-z0-9_]+)\s*[:=]", config, re.M)
-    env = (
-        set(ENV_RE.findall(shipped))
-        | {prefix + f.upper() for f in fields}
-        | set(re.findall(r'os\.environ(?:\.get)?\(?\[?"([A-Z0-9_]+)"', everywhere))
-        | set(re.findall(r'getenv\(\s*"([A-Z0-9_]+)"', everywhere))
-    )
+    env = env_names_read_by(everywhere) | {prefix + f.upper() for f in fields}
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     targets = set(re.findall(r"^([a-z][a-z0-9-]*):", makefile, re.M))
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

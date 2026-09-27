@@ -514,7 +514,7 @@ def test_pending_reason_gate_is_wired_into_the_summary() -> None:
 def test_dangling_reference_check_catches_all_three_kinds() -> None:
     """纯函数层：三种失效引用都要点名，且"没引用任何东西"不能算通过。
 
-    动因是一条元事实：我在写这条判据之前"记得" k8s 档让人 `export EMBODIEDCLOUD_K8S_TESTS=1`，
+    动因是一条元事实：我在写这条判据之前"记得"的 k8s 开关名比仓里真正被读的那个多了一个字母，
     而全仓根本没有这个名字（`grep` 零命中）——人（和我）就是会记错这类指针，
     所以"可行动的原因"要核到引用的东西真的存在，而不只是含一个"缺"字。
     """
@@ -530,11 +530,13 @@ def test_dangling_reference_check_catches_all_three_kinds() -> None:
     }
     assert validator.dangling_reference_offenders(texts, catalog) == []
     bad = dict(texts)
-    bad["docs/OPERATIONS.md"] = "先 `make test-pgg`；export EMBODIEDCLOUD_K8S_TESTS=1；pip install -e .[postgre]"
+    bad["docs/OPERATIONS.md"] = (
+        "先 `make test-pgg`；export EMBODIEDCLOUD_NOT_A_REAL_SWITCH=1；pip install -e .[postgre]"
+    )
     offenders = validator.dangling_reference_offenders(bad, catalog)
     kinds = " ".join(offenders)
     assert len(offenders) == 3, offenders
-    assert "make test-pgg" in kinds and "EMBODIEDCLOUD_K8S_TESTS" in kinds and ".[postgre]" in kinds, offenders
+    assert "make test-pgg" in kinds and "EMBODIEDCLOUD_NOT_A_REAL_SWITCH" in kinds and ".[postgre]" in kinds, offenders
     # 空目录 / 零引用都不能被读成"通过"
     assert validator.dangling_reference_offenders(texts, {"env": set(), "make": set(), "extra": set()})
     assert validator.dangling_reference_offenders({"x.md": "这里什么指针都没写"}, catalog)
@@ -575,3 +577,33 @@ def test_generated_reports_are_not_scanned_for_pointers() -> None:
     assert "docs/VALIDATION.md" not in scanned, "生成报告被扫了 ⇒ 上一条偏离会被自我复述喂养"
     assert validator.GENERATED_DOCS, "排除表为空：排除逻辑没有事实依据"
     assert "docs/OPERATIONS.md" in scanned and any(k.startswith("tests/") for k in scanned), scanned.keys()
+
+
+def test_the_env_catalog_counts_reads_not_mentions() -> None:
+    """收紧目录：`EMBODIEDCLOUD_*` 只有**被读**才算出处；注释里提一句不算，常量间接读要算。
+
+    动因是这条判据上线后抓到的第一个真错，就是我自己的错：仓里真正读的 k8s 开关是单数形式，
+    而我写进注释与测试文档里的是复数形式——差一个字母的指针正是这类判据要抓的形状。
+    """
+    validator = _load_validator()
+    sources = {
+        "a.py": (
+            "import os\n"
+            "# 注释里提一句 EMBODIEDCLOUD_ONLY_MENTIONED 不算出处\n"
+            'VIA_CONST = "EMBODIEDCLOUD_READ_VIA_CONST"\n'
+            'VALUE = os.environ.get("EMBODIEDCLOUD_READ_DIRECT")\n'
+            "OTHER = os.environ[VIA_CONST]\n"
+        ),
+        "b.py": 'import os\nX = os.getenv("EMBODIEDCLOUD_READ_GETENV")\n',
+    }
+    read = validator.env_names_read_by(sources)
+    assert read == {
+        "EMBODIEDCLOUD_READ_VIA_CONST",
+        "EMBODIEDCLOUD_READ_DIRECT",
+        "EMBODIEDCLOUD_READ_GETENV",
+    }, read
+    assert "EMBODIEDCLOUD_ONLY_MENTIONED" not in read, "注释里的名字被当成出处：目录太宽"
+    # 收紧之后仍要覆盖仓内真实被读的开关，否则是调瞎不是调准
+    catalog = validator.reference_catalog()["env"]
+    for name in ("EMBODIEDCLOUD_PG_IMAGE", "EMBODIEDCLOUD_KIND_BIN", "EMBODIEDCLOUD_EDGE_TOKEN"):
+        assert name in catalog, f"真被读的开关掉出目录：{name}"
