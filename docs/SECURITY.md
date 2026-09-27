@@ -38,6 +38,12 @@ Reliability > Reproducibility > **Security** > Observability > DX > Performance 
 
 - 角色：user / admin / org_admin / instructor / student（课程模块按 instructor/org_admin 判定教师权限）。
 - Workspace / Course / Deployment 查询必须校验 `owner_id == current_user.id` 或 admin。
+- **有副作用的观测/诊断端点一律 admin，且副作用必须有上限**。这一条是 v0.7.0 补的：
+  `/api/streaming/warmpool/metrics` 与 `/warmpool/benchmark` 此前只挂 `CurrentUser`，
+  而后者每轮真的 `create + start` 一个**无主、不计费**的 workspace，`iterations` 只有下限
+  （登记表 N-27 有实测：普通用户拿到 200，一次调用留下 4 个活体）。今天的规则三条：
+  非 admin 403；参数走 `Query(ge=1, le=…)` 且**上限与服务侧夹紧共用同一份定义**
+  （`BENCHMARK_MAX_ITERATIONS`）；跑完自己回收。常驻在 `tests/test_warmpool_http_surface.py`。
 - 隔离测试：`tests/test_isolation.py` 必须保持全绿。
 
 ## 6. 容器安全基线（Docker/K8s Provider）

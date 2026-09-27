@@ -6,8 +6,8 @@
 
 | Gate | 状态 | 明细 |
 |---|---|---|
-| Test collected | PASS | 545 |
-| Test run | PASS | passed=544 skipped=1 failed=0 |
+| Test collected | PASS | 551 |
+| Test run | PASS | passed=550 skipped=1 failed=0 |
 | lint | PASS | |
 | typecheck | PASS | |
 | migration | PASS | |

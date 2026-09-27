@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 545 / passed 544 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 551 / passed 550 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -739,6 +739,53 @@ docker 档 21 → 22，全套 531 → 532。
 - 判据判别力实测（同一份 `image_sbom.sh`，两条正则并排）：
   真文本 命中／命中；摘旗标 无命中／无命中；挪出续行 **无命中／命中**——第三行正是第二支对照存在的理由：
   若哪天有人把判据放宽成"整份文件里两个 token 都出现过"，只有它拦得住。supply-chain 档 21 支全过。
+
+### 补上本轮自己撞见的一条越权面：warm pool 的两个观测端点普通用户可写
+
+- 起因不是评审也不是巡检——是给"P50<15s／P95<30s"那句 SLA 找读数时，为了跑 `iterations=20` 的
+  基准而先读了一遍代码，发现 `app/routers/streaming.py` 这两个端点只挂 `CurrentUser`。
+  **三条一手读数**（RED 档，改之前跑出来的）：普通用户 `GET …/warmpool/benchmark?iterations=1`
+  回 **200** 并真的建了一个 workspace；普通用户 `GET …/warmpool/metrics` 回 **200**，body 里是
+  **全部 5 个模板**的池水位；一次 `iterations=2` 的调用之后库里留着 **4 个活体**无主 workspace
+  （`user_id=None`、不计费、还占着 GPU）。而 `iterations` 在服务侧只有下限（`max(1, iterations)`）。
+- **改的三件事**：两端加 admin 检查（沿用仓内既有惯例 `gpus.py:13`，不另造一套依赖）；
+  上限 `BENCHMARK_MAX_ITERATIONS = 20` **只定义一份**，路由拿它算 `Query(ge=1, le=…)`、服务拿它夹紧
+  （两个面各写一个数迟早漂移）；每轮测完在 `finally` 里 destroy，回收失败只记日志不吃读数，
+  返回体加 `iterations`——小样本下 p95 就是 `max()`，读数不自带样本数就会被当成百分位。
+- **顺手改掉一条把缺陷钉成基线的旧断言**：`tests/test_warmpool.py:322` 原来断言
+  `len(statuses) == 2` 且状态属于 {RUNNING, FAILED}，等于把"跑完留下两个活体"写成期望。
+  现在钉的是更强的形状：两行仍在（tombstone 语义留给审计），但状态必须是 `DELETED` 且
+  `deleted_at` 非空。**这条是本轮最该记的一笔**：常驻用例不只没拦住这个泄漏，它替泄漏作了证。
+- **claim 的墙钟从此可观测**：新增 `warm_pool_claim_seconds{template_id}`（buckets 含 15/30，
+  与 SLA 目标同值），只给成功交付的 claim 记时——池空／竞争失败／轮换失败都返回 None，
+  把它们计进来会让"池越差、P95 越好看"。两头各一支控制（成功必须 +1、None 必须不 +1）。
+- **端到端读数**（真 HTTP 路径，不是单测里的替身）：补池到 8 个 READY → 普通用户
+  `POST /api/workspaces` → **201**、交付行 `name=warm-cartpole status=running`（证明确实走 claim
+  而不是新建），客户端 **15.3 ms**、服务端 `count=1.0 / sum=0.00719`（7.2 ms），池 8 → 7；
+  admin `iterations=20` → p50 **3.79 ms**／p95 **4.48 ms**／max 4.99 ms，由另一把尺独立重算同值；
+  `iterations=21` → **422**；非 admin 两端 → **403／403**。
+- **这些数不等于 SLA 达标**（写清楚免得被复用）：mock provider 的 `wait_ready` 直接 `return True`、
+  `provision` 只 `mkdir`，所以量到的是**控制面自身那一段**。绝对值那一格仍在
+  PHYSICAL_VALIDATION_PENDING 里等 G1–G4 的真机，本轮关掉的是"这一格今天能不能测"。
+- **顺带量出一条开放项（N-29）**：`maintain()` 的补位是**按模板逐个**算
+  `missing = warm_pool_size − (ready + prewarming + legacy)`，整池需求 = `size × enabled 模板数`，
+  没有一处跟舰队卡数对账。取证时 `WARM_POOL_SIZE=2` × 5 模板 = 10 个占位 > mock 的 8 张卡，
+  日志当场出现两条 `No GPU available with >= 16 GB VRAM` 并进 1s backoff。生产默认 `enabled=False`
+  且 `size=1`，今天没有活体受害者；要不要设舰队级封顶是产品裁决（全局显存预算？模板优先级抢占？
+  k8s 与 docker 的容量口径不同），所以只开行留读数，不顺手改语义。
+- 门禁目录里此前没有这一格，新开 **G0.39**；`docs/SECURITY.md` §5 补一条规则
+  （有副作用的观测端点一律 admin、参数必须有上限、跑完必须自己收）。
+- **我自己写的第一版反证有两处毛病，都是全套跑出来的**：
+  ① 那条"不留占卡"的断言最初写成**全库** `ALLOCATED == 0`——隔离跑绿、进全套立刻红
+  （`基准留下了 1 张仍被占用的卡`），因为别的模块合法地留着自己的 running workspace。
+  判据的作用面搞错不是"多测了一点"，是**替别人记账**：别人一留东西就轮到我红。改成只数
+  "仍绑在 `bench-%` 那些行上的卡"。② 补上第二条反证之后才发现第一条反证打不到它：
+  把清理整体跳过，红的是"留下 2 个活体"那一支，GPU 那一支**从来没被证过**——
+  于是加了 `test_the_allocated_gpu_clause_can_actually_fire`：只把 `scheduler.release`
+  换成空操作（tombstone 照做），断言此时**必须**读得到卡被占着，读不到就说明探针恒真；
+  夹具在 `finally` 里把释放补做回去，不留残骸。
+- 计数：新增常驻用例 6 支（HTTP 面 5 ＋ claim 延迟 1），全套 545 → 551（passed 550 / skipped 1 /
+  failed 0，两份计数面由 `make validate` 的 `docs_test_counts` 现算核对）。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 

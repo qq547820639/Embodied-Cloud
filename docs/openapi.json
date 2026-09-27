@@ -983,7 +983,7 @@
           "streaming"
         ],
         "summary": "Warmpool Metrics",
-        "description": "warm pool \u89c2\u6d4b\uff1a\u6309 template \u00d7 state \u7684 COUNT(*) \u771f\u5b9e\u8ba1\u6570\u3002",
+        "description": "warm pool \u89c2\u6d4b\uff1a\u6309 template \u00d7 state \u7684 COUNT(*) \u771f\u5b9e\u8ba1\u6570\uff08admin\uff09\u3002",
         "operationId": "warmpool_metrics_api_streaming_warmpool_metrics_get",
         "responses": {
           "200": {
@@ -1003,6 +1003,7 @@
           "streaming"
         ],
         "summary": "Warmpool Benchmark",
+        "description": "\u51b7\u542f\u52a8\u57fa\u51c6\uff08admin\uff09\uff1a\u5efa\u4e86\u5c31\u8981\u6536\uff0c\u6240\u4ee5\u8fed\u4ee3\u6570\u5c01\u9876\u5728 warmpool \u91cc\u90a3\u4e00\u4efd\u5b9a\u4e49\u4e0a\u3002",
         "operationId": "warmpool_benchmark_api_streaming_warmpool_benchmark_get",
         "parameters": [
           {
@@ -1020,6 +1021,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 20,
+              "minimum": 1,
               "default": 3,
               "title": "Iterations"
             }

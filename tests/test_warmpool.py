@@ -319,16 +319,23 @@ def test_benchmark_launch_returns_p50_p95(db_factory):
         _seed_gpu(db)
         manager = _make_manager(db_factory)
         result = manager.benchmark_launch(db, "cartpole", iterations=2)
-        assert set(result) == {"p50_s", "p95_s", "samples"}
+        assert set(result) == {"p50_s", "p95_s", "samples", "iterations"}
         assert len(result["samples"]) == 2
+        assert result["iterations"] == 2
         assert all(s > 0 for s in result["samples"])
         assert result["p50_s"] > 0
         assert result["p95_s"] >= result["p50_s"]
-        # 真实完成了两次启动（终态为 RUNNING/FAILED 任一，耗时均被记录）
+        # 真实完成了两次启动，且**每一轮测完就回收**：下面这两行以前是
+        # `len(statuses) == 2` + 断言状态在 {RUNNING, FAILED} —— 那等于把"基准留下 2 个无主
+        # 活体 workspace"钉成了基线（本轮把它当缺陷修掉，见 tests/test_warmpool_http_surface.py）。
+        # 现在钉的是更强的形状：行还在（tombstone 语义要留给审计），但状态必须是 DELETED。
         with db_factory() as check_db:
-            statuses = check_db.scalars(select(Workspace.status)).all()
-        assert len(statuses) == 2
-        assert all(s in {WorkspaceStatus.RUNNING.value, WorkspaceStatus.FAILED.value} for s in statuses)
+            rows = check_db.scalars(select(Workspace)).all()
+        assert len(rows) == 2, f"基准的行数不是 2：{len(rows)}"
+        assert {r.status for r in rows} == {WorkspaceStatus.DELETED.value}, [
+            (r.status, r.deleted_at) for r in rows
+        ]
+        assert all(r.deleted_at is not None for r in rows), "回收没置 tombstone"
 
 
 def test_benchmark_launch_missing_template_raises(db_factory):

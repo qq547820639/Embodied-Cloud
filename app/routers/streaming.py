@@ -3,10 +3,14 @@
 越权按 SECURITY.md T1 返回 404 (不泄露资源存在性); 服务校验失败返回 400 + 中文信息。
 """
 
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Query
 
 from ..deps import DB, CurrentUser, streaming_service, warm_pool
+from ..models import Role
 from ..schemas import StreamingOut
+from ..services.warmpool import BENCHMARK_DEFAULT_ITERATIONS, BENCHMARK_MAX_ITERATIONS
 
 router = APIRouter(prefix="/streaming", tags=["streaming"])
 
@@ -66,17 +70,37 @@ def list_streaming_sessions(workspace_id: str, db: DB, user: CurrentUser):
 
 # ---------------------------------------------------------------------------
 # Warm pool 观测 / 基准
+#
+# 两端都是 admin-only：metrics 是**跨全部模板**的池水位（普通用户不该看见别人的容量），
+# benchmark 更直接——它每轮真的 create+start 一个 workspace。改造前两端只有 CurrentUser
+# （实测普通用户拿到 200，body 里是 5 个模板的水位），且 iterations 没有上限。
+# 角色检查沿用仓内既有惯例（app/routers/gpus.py:13、usage.py:18），不另造一套依赖。
 # ---------------------------------------------------------------------------
+
+
+def _admin(user) -> None:
+    if user.role != Role.ADMIN.value:
+        raise HTTPException(403, "admin role required")
 
 
 @router.get("/warmpool/metrics")
 def warmpool_metrics(db: DB, user: CurrentUser):
-    """warm pool 观测：按 template × state 的 COUNT(*) 真实计数。"""
+    """warm pool 观测：按 template × state 的 COUNT(*) 真实计数（admin）。"""
+    _admin(user)
     return warm_pool.pool_metrics(db)
 
 
 @router.get("/warmpool/benchmark")
-def warmpool_benchmark(template_id: str, db: DB, user: CurrentUser, iterations: int = 3):
+def warmpool_benchmark(
+    template_id: str,
+    db: DB,
+    user: CurrentUser,
+    iterations: Annotated[int, Query(ge=1, le=BENCHMARK_MAX_ITERATIONS)] = (
+        BENCHMARK_DEFAULT_ITERATIONS
+    ),
+):
+    """冷启动基准（admin）：建了就要收，所以迭代数封顶在 warmpool 里那一份定义上。"""
+    _admin(user)
     try:
         return warm_pool.benchmark_launch(db, template_id, iterations)
     except ValueError as exc:

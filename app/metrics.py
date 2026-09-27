@@ -68,6 +68,15 @@ WARM_POOL_CLAIM_FAILED = Counter(
     "warm_pool_claim_failed",
     "Total failed warm pool claims (race/empty)",
 )
+# claim 路径自己的耗时。workspace_launch_seconds 只在 provision 路径上 observe，而 warm pool
+# 的全部意义是不走 provision —— 没有这一条，"P50<15s／P95<30s" 在产品最快的那条路径上无法回答。
+# bucket 上界仍留 15/30 两个刻度，与 PRODUCT_SPEC 的 SLA 目标同值，便于直接查分位。
+WARM_POOL_CLAIM_SECONDS = Histogram(
+    "warm_pool_claim_seconds",
+    "Warm pool claim duration in seconds (successful claims only)",
+    ["template_id"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 15, 30, 60),
+)
 
 
 def record_workspace_launch_start(template_id: str, provider: str) -> None:
@@ -82,6 +91,10 @@ def record_workspace_launch_failure(template_id: str, provider: str) -> None:
 
 def record_workspace_launch_duration(template_id: str, seconds: float) -> None:
     WORKSPACE_LAUNCH_SECONDS.labels(template_id=template_id).observe(seconds)
+
+
+def record_warm_pool_claim_duration(template_id: str, seconds: float) -> None:
+    WARM_POOL_CLAIM_SECONDS.labels(template_id=template_id).observe(seconds)
 
 
 def record_gpu_seconds(seconds: int) -> None:

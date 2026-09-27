@@ -84,8 +84,8 @@
 | POST | `/api/streaming/sessions/{id}/connect` | connected |
 | POST | `/api/streaming/sessions/{id}/disconnect` | disconnected |
 | POST | `/api/streaming/sessions/{id}/reconnect` | ready（等待重连） |
-| GET | `/api/streaming/warmpool/metrics` | warm pool 观测 |
-| GET | `/api/streaming/warmpool/benchmark?template_id=` | launch 基准（P50/P95） |
+| GET | `/api/streaming/warmpool/metrics` | warm pool 观测（**admin**；普通用户 403） |
+| GET | `/api/streaming/warmpool/benchmark?template_id=&iterations=` | launch 基准（**admin**；`iterations` 1–20，越界 422；每轮测完即回收，返回体带真实 `iterations`） |
 
 ## 部署 · Sim2Real
 

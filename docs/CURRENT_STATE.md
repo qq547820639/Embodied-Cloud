@@ -7,7 +7,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 545 / passed 544 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
+| Test | **PASS（collected 551 / passed 550 / skipped 1 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账） |
 | Lint / Type | PASS（ruff 0 / mypy 45 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS 21/21**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -51,6 +51,9 @@
 | N-24 | **两处「闭合之后仍然是错」的陈述，是独立评审量出来的**：① `docs/OPERATIONS.md` 还写着「`EMBODIEDCLOUD_ARTIFACT_BACKEND=s3` 时先 `pip install ".[s3]"`」——那是旧配方时代的动作。新配方把依赖层搬进 `/app/.venv` 之后，容器里的 `pip` 仍属基础镜像（实测 `readlink -f $(command -v pip)` → `/usr/local/bin/pip…`，而 `python` 是 `/app/.venv/bin/python`），照那句做等于把 SDK 装进应用 import 不到的地方；而同一个晚上 `pyproject.toml` 的注释已经改成「构建时加 `--extra s3`」——**同一件事在两个面上互斥**。② 生产清单 `deploy/kubernetes/control-plane-production.yaml:55,65` 两处 `image: embodiedcloud/control-plane:0.4.0` 停在三个版本之前，而版本一致性判据只读 `deploy/kubernetes/control-plane.yaml` 那一份——「版本一致性已把守」对生产那份是假的：走它部署，连今晚新构建的镜像都拿不到 | 同轮闭合：OPERATIONS 那条改成「构建时 `--extra s3`；事后在容器里 pip install 无效」并写明为什么无效；生产清单两处升到当前版本，`test_k8s_manifest_version_matches` 扩成扫 `deploy/kubernetes/*.yaml` 全部清单＋钉「至少扫到 3 处引用」＋就地注入一支旧号必须被点名。另外把「镜像运行时形状」（venv 的 python／基础镜像的 pip／`alembic heads` 跑得通／本项目两个入口脚本有意缺席）钉成 docker 档一条常驻用例，任何一条翻转就红并逼人回来核对运维说明。评审交回 6 项，逐项重开原行后落地 5 项；第 6 项（`BASE_IMAGE_WHEELS` 可被无声加宽）不补判据，理由与另两处自我修正（删掉不起作用的 lookaround、折行控制改钉「不许误红」方向）记在 CHANGELOG 同一节 |
 | N-25 | **生产架构那一步的验收读数几乎不证明任何事**：`make amd64-probe` 第 5 步回答"装的是 x86_64 轮子吗"的手法是 `ls site-packages \| grep -oE "x86_64\|aarch64\|arm64" \| uniq -c`，实测打出的是 **`1`**；而改成逐个二进制读 ELF 头之后，场上实际有 **22** 个 `.so`。成因：wheel 装完 `.dist-info` 目录名被归一化掉平台标签，所以那条扫法既数不清数量也从不看二进制。第二个洞更贵：**整支脚本无论打印什么都退 0**，于是"打印了 FAIL"与"这一步根本没跑"在 `make`/CI 那一层完全同形 | 判据换成逐个 `.so` 读 ELF `e_machine`（偏移 18 的小端 16 位；62＝x86-64、183＝AArch64），三条判决：**分母为 0 直接 FAIL**（什么都没扫到＝这条判据与恒真同形，不许读成"干净"）、混进 AArch64 即 FAIL、只有 x86-64 且非空才 PASS；第 6 步汇总 `sync_rc` 与 `arch_verdict`，任一不成立 `exit 1` 并点名是哪一半。退出码管道按四档验：`(0,PASS)→0`、`(0,FAIL)→1`、`(1,"")→1 且两半都点名`、`(127,MISSING)→1`。真读数（qemu amd64，连跑两遍为复现）：`.so 文件数= 22`、分布 `{'x86-64': 22}`、`machine= x86_64`、`sqlalchemy= 2.1.0 psycopg= 3.3.6`、`alembic 1.20.0`、`make_rc=0`；容器自起自删 |
 | N-26 | **一条被推翻的前提只推平了 2 个面，而替换它的那句自己又写宽了一次**：`NGC 凭据挡住 workspace 镜像构建` 这条登记被推翻后，我只改了 SUPPLY_CHAIN §8 与 CURRENT_STATE 的 BLOCKED 行，另有 **7 处**还在复读它——其中 `docs/SUPPLY_CHAIN.md` §8 末尾那行闭合注记**原样留着被推翻的那句**（"凭据只在拉层字节时才需要"）。而我补进去的替代句"取字节不需要凭据"同样过强：复测显示免掉的是 **API key／登录**，完全不带 `Authorization` 的同一请求仍退 `401` | 按**事实关键词**（`NGC\|nvcr.io`）跨全文普查并逐面改齐：`docs/SUPPLY_CHAIN.md` §2＋§8、`docs/GPU_HOST.md`、`docs/ACCEPTANCE.md`、`docs/MASTER_PLAN.md`、`docs/RUNBOOK.md`、`DELIVERY.md`、`scripts/release.sh` 的 BLOCKED 明细表。读数升级到"整份"口径：匿名令牌取 config blob **不带 Range**，`307 → layers.nvcr.io` 签名地址 → `200`／9910 字节／`sha256` 与清单里的 `config.digest` 逐位相等；层 blob `Range: bytes=0-1048575` → `206`／实拿 1,048,576 字节；无 `Authorization` → `401`。再按一手页面自核（本机 `curl` 取回 145,133 字节、逐行读）：Isaac Sim 6.0.1 容器安装页**没有**登录前置，那句 "run docker login first" 讲的是 Docker Hub 的 429 限速，许可在运行时以 `ACCEPT_EULA=Y` 接受——据此删掉三处 `docker login nvcr.io`（删前 `grep login scripts/` 零命中 ⇒ 纯 prose 步骤）。本轮自家两条既有门各真开火一次（release.sh 的 heredoc 反引号、消费侧引用逐字相等），两处修的都是**措辞而不是判据** |
+| N-27 | **warm pool 的两个观测端点是普通用户可写的**：`GET /api/streaming/warmpool/benchmark` 与 `/warmpool/metrics` 只挂 `CurrentUser`（没有角色检查，而 `gpus.py:13`、`usage.py:18` 都有），且 `benchmark_launch` 的 `iterations` 只有下限（改造前是 `max(1, iterations)`）。三条各自有一手读数：普通用户调 benchmark 实测回 **200** 并真的建了 workspace；普通用户调 metrics 实测回 **200**、body 里是**全部 5 个模板**的池水位；一次 `iterations=2` 的调用之后库里留着 **4 个活体无主 workspace**（同批其他用例的残留一起数出来的），它们 `user_id=None`、不付费、还占着 GPU | 两端加 admin 检查（沿用仓内既有惯例，不另造依赖）；上限 `BENCHMARK_MAX_ITERATIONS = 20` **只定义一份**，路由用它算 `Query(ge=1, le=…)`、服务用它夹紧（两处各写一个数迟早漂移）；每轮测完 `finally` 里 destroy，回收失败只记日志不吃读数；返回体加 `iterations`，小样本下 p95 就是 max，读数必须自带样本数。**顺手改掉一条把缺陷钉成基线的旧断言**：`test_warmpool.py:322` 原来断言 `len(statuses) == 2` 且状态属于 {RUNNING, FAILED}——那是把「跑完留下两个活体」当成了期望；现在钉的是更强的形状（两行仍在，但状态必须是 DELETED 且 `deleted_at` 非空）。常驻反证四支：非 admin 两个端点各 403、`iterations=21` → 422、跑完活体数必须为 0 且无 ALLOCATED 卡、服务侧夹紧用计数替身证明「请求 10000 → 实际建 20」。端到端复跑：403／403／422／20 样本全部符合 |
+| N-28 | **产品最快的那条路径此前没有任何耗时读数**：`warm_pool_claim_seconds` 不存在，唯一的直方图 `workspace_launch_seconds` 只在 provision 路径 observe（`orchestrator.py:263`），而 warm pool 的全部意义就是**不走** provision —— 于是 PRODUCT_SPEC 那句 `P50<15s／P95<30s` 在最该满足它的路径上无法回答；`test_warmpool.py` 的 p50/p95 断言也只有形状（`> 0`、`p95 >= p50`），没有任何一条断言过墙钟时间 | 加 `warm_pool_claim_seconds{template_id}`（buckets 含 15/30 两个刻度，与 SLA 目标同值），**只给成功交付的 claim 记时**：池空／竞争失败／轮换失败都返回 None，把它们计进来会让池越差、P95 越好看。常驻用例两头（成功必须 +1、池空的 None 必须不 +1）。真读数：补池到 8 个 READY 后，普通用户 `POST /api/workspaces` → 201、交付行 `name=warm-cartpole status=running`（证明确实走的是 claim 而不是新建），客户端 **15.3 ms**、服务端直方图 `count=1.0 / sum=0.00719`（7.2 ms），池内 READY 8 → 7；冷启动侧 `iterations=20` 实测 p50 3.79 ms／p95 4.48 ms／max 4.99 ms，并由独立重算核对同值。**这些数不等于 SLA 达标**：mock 的 `wait_ready` 直接 `return True`，量的只是控制面自身那一段，真机那一格仍归 G1–G4（见 PHYSICAL_VALIDATION_PENDING 一节） |
+| N-29 | **（开放）warm pool 的补位量与舰队容量没有对账**：`maintain()` 的补位公式是 `missing = warm_pool_size − (ready + prewarming + legacy)`，**按模板逐个算**，所以整池需求是 `size × enabled 模板数`，没有任何一处把它跟舰队实际卡数对一下。本轮取证时撞见形状：`EMBODIEDCLOUD_WARM_POOL_SIZE=2` × 5 个 enabled 模板 = 10 个占位，而 mock 宿主只有 8 张卡 ⇒ 日志出现两条 `No GPU available with >= 16 GB VRAM` 并进入 1s backoff 重试，最终池停在 8 READY（被容量截住，不是被 size 截住） | **本轮不改语义，只把口子标出来并留下读数**：生产上 `warm_pool_enabled` 默认 False 且 `size=1`，5 模板 × 1 仍在 8 卡内，所以今天没有活体受害者；改成舰队级封顶要先定策略（按剩余显存做全局预算？按模板优先级抢占？k8s 与 docker 的容量口径不同，一处公式两种真相），这是产品裁决不是缺陷修复，故开新行而不是顺手改。判据侧已经备好：N-27 的「跑完不留活体」与 `conftest._gpu_pool_not_starved` 会把抽干池子的行为立刻暴露成红 |
 
 
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
@@ -109,7 +112,12 @@ lint/type/migration/build/smoke/release/供应链全链路。
 ### PHYSICAL_VALIDATION_PENDING / NOT_RUN（不假装 PASS）
 GPU 真机（G1–G4 脚本就绪，本机无 NVIDIA 设备）· K8s 上 `nvidia.com/gpu` 的真实分配
 （需节点带 Device Plugin；控制面路径本身已由 G0.26 覆盖）·
-Streaming 媒体面（Isaac Sim WebRTC）· Robot 真机 · Warm pool SLA。
+Streaming 媒体面（Isaac Sim WebRTC）· Robot 真机 ·
+Warm pool 的**绝对** SLA（`P50<15s／P95<30s` 只有真 runtime 的启动时间才算得出数）——
+本轮关掉的是"这一格今天能不能测"：claim 路径以前没有任何耗时读数（唯一直方图只在 provision
+路径上 observe），现在有 `warm_pool_claim_seconds` 了，实测一次真交付的 claim 服务端 7.2 ms／
+客户端 15.3 ms；但 mock 的 `wait_ready` 直接返回 True，所以这些读数只证明"量得到、且量的确实是
+控制面自身那一段"，**不能**读成"真机达标"（读数与判据见 N-28）。
 
 ### BLOCKED_EXTERNAL_DEPENDENCY
 workspace 镜像的构建与 digest 回填（**原因本轮重测纠正**：挡路的不是 NGC 凭据——一枚匿名 pull 令牌

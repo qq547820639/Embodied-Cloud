@@ -10,10 +10,12 @@
   单写者语义），并发下至多一个用户 claim 成功
 - 没有 READY runtime 时 claim 返回 None → 调用方 fallback 正常 provision
 - 指标：warm_pool_ready / warm_pool_claim_total / warm_pool_claim_failed /
-  workspace_launch_seconds（orchestrator 已接入）
+  warm_pool_claim_seconds（只给成功交付的 claim 记时；orchestrator 的
+  workspace_launch_seconds 覆盖的是**冷启动**那条路，两条路各有一把尺）
 """
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
@@ -24,6 +26,7 @@ from ..metrics import (
     WARM_POOL_CLAIM_FAILED,
     WARM_POOL_CLAIM_TOTAL,
     WARM_POOL_READY,
+    record_warm_pool_claim_duration,
 )
 from ..models import OperationType, Template, User, WarmPoolState, Workspace, WorkspaceStatus
 from ..utils import utcnow
@@ -34,6 +37,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger("embodiedcloud.warmpool")
 
 _WARM_STATES = {state.value for state in WarmPoolState}
+
+# 基准端点的迭代上限：**只有一份定义**（路由用它算 Query 的 le，服务用它夹紧），
+# 否则"路由挡 21、服务却照跑 10000"这种两数各写一遍的漂移迟早出现。
+BENCHMARK_MAX_ITERATIONS = 20
+BENCHMARK_DEFAULT_ITERATIONS = 3
 
 # PREWARMING 占位在「收割」阶段被收敛为 FAILED 的终态/错误态集合：
 # 这些状态的 workspace 既不可能再被 claim，也不应继续占用池位。
@@ -186,6 +194,7 @@ class WarmPoolManager:
         """
         if not self.settings.warm_pool_enabled:
             return None
+        claim_started = time.monotonic()
         # 原子抢占：UPDATE 后检查受影响行数；并发下至多一个事务成功
         claimed_id = db.scalar(
             select(Workspace.id)
@@ -293,6 +302,9 @@ class WarmPoolManager:
         db.commit()
         db.refresh(workspace)
         self._refresh_gauge(db)
+        # 只给**成功交付**的 claim 记时：池空/竞争失败/轮换失败都不是一次"快的 claim"，
+        # 把它们计进来会让 P95 越差越好看。
+        record_warm_pool_claim_duration(template_id, time.monotonic() - claim_started)
         logger.info("warm pool claim: workspace %s → user %s", claimed_id[:8], user.id)
         return workspace
 
@@ -319,17 +331,30 @@ class WarmPoolManager:
             result[template.id] = counts
         return result
 
-    def benchmark_launch(self, db: Session, template_id: str, iterations: int = 3) -> dict:
-        """依次 create+start workspace，轮询到 RUNNING/FAILED，统计 p50/p95。"""
+    def benchmark_launch(
+        self,
+        db: Session,
+        template_id: str,
+        iterations: int = BENCHMARK_DEFAULT_ITERATIONS,
+    ) -> dict:
+        """依次 create+start（测完即 destroy），统计 p50/p95。
+
+        三处是被自己的反例逼出来的，不是装饰：
+        - **夹紧 iterations**：路由那侧有 422，但这一句是给直接调用者（CLI/脚本）兜底的；
+          改造前这里只有 `max(1, iterations)`，一个 `?iterations=10000` 就会真建一万个 workspace。
+        - **每轮测完立刻 destroy**：这些行 `user_id=None`（无主），不清理就是"用 GET 泄漏活体
+          并占住 GPU"——实测改造前一次 iterations=2 的调用留下 4 个活体（含同批其他用例）。
+        - **返回 iterations**：小样本下 p95 就是 `max()`，读数必须自带样本数才不会被当成百分位。
+        """
         import math
         import statistics
-        import time
 
         template = db.get(Template, template_id)
         if template is None:
             raise ValueError("模板不存在")
+        n = min(max(1, int(iterations)), BENCHMARK_MAX_ITERATIONS)
         samples: list[float] = []
-        for _ in range(max(1, iterations)):
+        for _ in range(n):
             workspace = self.orchestrator.create(
                 db,
                 template,
@@ -338,21 +363,31 @@ class WarmPoolManager:
                 organization_id=None,
             )
             started = time.monotonic()
-            self.orchestrator._start(workspace.id)
-            samples.append(self._wait_launch(workspace.id, started))
+            try:
+                self.orchestrator._start(workspace.id)
+                samples.append(self._wait_launch(workspace.id, started))
+            finally:
+                self._destroy_quietly(db, workspace)
         sorted_samples = sorted(samples)
         idx95 = max(0, min(math.ceil(0.95 * len(sorted_samples)) - 1, len(sorted_samples) - 1))
         return {
             "p50_s": statistics.median(sorted_samples),
             "p95_s": sorted_samples[idx95] if sorted_samples else 0.0,
             "samples": samples,
+            "iterations": n,
         }
+
+    def _destroy_quietly(self, db: Session, workspace: Workspace) -> None:
+        """基准用量的 workspace 测完就回收；回收失败不得吃掉读数。"""
+        try:
+            self.orchestrator.destroy(db, workspace)
+        except Exception as exc:  # provider 清理失败等：留下痕迹，不抛出
+            db.rollback()
+            logger.error("benchmark cleanup failed for %s: %s", str(getattr(workspace, "id", "?"))[:8], exc)
 
     def _wait_launch(
         self, workspace_id: str, start_time: float, timeout: float = 30.0
     ) -> float:
-        import time
-
         deadline = start_time + timeout
         while time.monotonic() < deadline:
             with self.session_factory() as poll_db:

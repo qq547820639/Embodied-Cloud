@@ -457,3 +457,35 @@ def test_docker_provider_reports_no_rotation_support():
     provider = DockerProvider(S(workspace_root=Path("/tmp/test-docker-rot")))  # noqa: S108
     assert provider.supports_credential_rotation is False
     assert provider.rotate_credentials(None, {"password": "x"}) is False
+
+
+def test_successful_claim_records_claim_latency():
+    """claim 的耗时必须先可观测，"P50<15s／P95<30s" 那句 SLA 才谈得上被回答。
+
+    今天唯一的直方图 `workspace_launch_seconds` 只在 provision 路径上 observe
+    （`app/services/orchestrator.py:263`），而 warm pool 的全部意义就是**不走** provision
+    ——所以最快的那条路径反而没有任何耗时读数。反向对照同在一支里：池空（claim 返回 None）
+    不得记一次样本，否则"什么都没抢到"会被统计成"claim 很快"。
+    """
+    from prometheus_client import REGISTRY
+
+    def samples() -> float:
+        return (
+            REGISTRY.get_sample_value(
+                "warm_pool_claim_seconds_count", {"template_id": "cartpole"}
+            )
+            or 0.0
+        )
+
+    with Factory() as db:
+        _make_template(db)
+        _seed_gpu(db)
+        manager = _make_manager(Factory)
+        _warm_pool(db, manager)
+        user = _make_user(db, "user-lat")
+        before = samples()
+        assert manager.claim(db, "cartpole", user, credential_cipher=CIPHER) is not None
+        assert samples() == before + 1, "成功的 claim 没记耗时：SLA 无从测量"
+        # 池已空 → None，且读数不动（"没抢到"不是一次快 claim）
+        assert manager.claim(db, "cartpole", user, credential_cipher=CIPHER) is None
+        assert samples() == before + 1, "池空的 None 返回被记成了一次 claim 样本"
