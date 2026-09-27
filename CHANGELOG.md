@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 603 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 607 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -182,6 +182,22 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `git diff app/main.py` 为空。
 - 本轮另有两处自伤被抓：`allowed_series(declared) | set(declared)`（dict 不能 | set，`rc=1` 当场报）、
   注册表把 Counter 的**基名**也算进已注册名字，`allowed` 必须含基名（用 `declared_series()` 一份实现包办）。
+
+
+### 取证台的读数可以被另一条查法复算（N-45）
+- N-37 给两张台子配了读者，但读者只证明"台子会跑、rc 会翻"，没证明"表里的数换条路查还是它"。
+  现在每行读数带一份 `recount_offenders`：`gpu_side_counts()` 从 Gpu 侧独立数
+  （`status` 计数、`Gpu.workspace_id` 联结 `Workspace.warm_pool_state` 的去重持卡数、
+  以及"AVAILABLE 却还挂着 workspace"这种释放不干净），`recount_discrepancies()` 纯比较器
+  在分母 ≤0 时拒绝判干净、积压形状关掉 READY 那条不误开火；两种输出模式下偏离都退 1。
+- 三层判据：比较器两极（改一个数就点名）、真台子两形状复算为空、**传感器自检**
+  （造一张 AVAILABLE 却挂 workspace 的卡，`available_but_bound` 必须 =1）——
+  只验比较器证明不了它读的是另一张表。
+- N-44 那条"未证实"顺手关掉：注册表结构变更时的报错现在打印被测对象的非 dunder 属性与
+  `prometheus-client` 版本，并用假注册表把这条路径本身测了一遍。
+- 一次自家事故被读者还债：给 `main()` 加退出码时把 `if __name__ == "__main__"` 整块吃掉
+  （脚本静默退 0、什么都不打印）——N-37 那支"stdout 必须有表头"的读者判据当场抓住。
+  记账脚本改仓库代码后必须立刻编译/真跑一次，这条纪律今天第四次生效。
 
 
 ### 本轮新增的待收口项

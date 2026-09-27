@@ -9,6 +9,8 @@ prometheus_client 自己就拒绝未声明的标签键，所以那条只能在**
 
 from __future__ import annotations
 
+import types
+
 import prometheus_client as pc
 
 from tests.metrics_spec import allowed_series, expected_labels, parse_exposition
@@ -94,3 +96,17 @@ def test_every_metric_object_the_app_registered_is_declared() -> None:
     assert builtin and all(n.startswith(("python_", "process_", "bridge_")) for n in builtin), (
         f"库自带族的识别方式变了（会被误判成本仓指标）：{sorted(builtin)}"
     )
+
+
+def test_registry_change_fails_loudly_with_diagnostics() -> None:
+    """注册表结构一旦改名，判据要"红 + 说清该看哪"，不是静默少一半划界。"""
+    import pytest
+
+    from tests.metrics_spec import registered_names
+
+    fake = types.SimpleNamespace(some_new_internals=(), collect=lambda: [])
+
+    with pytest.raises(AssertionError) as caught:
+        registered_names(fake)
+    message = str(caught.value)
+    assert "_collector_to_names" in message and "some_new_internals" in message, message

@@ -111,3 +111,89 @@ def test_sla_lab_exit_code_carries_every_reading_it_prints() -> None:
         + starved.stdout[-900:]
     )
     assert "overall=FAIL" in starved.stdout, starved.stdout[-600:]
+
+
+def _load_lab():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import importlib
+
+    return importlib.import_module("warm_pool_capacity_lab")
+
+
+def test_recount_comparator_fires_on_every_polarity() -> None:
+    """独立复算的比较器必须两头都会开火，否则"复算过了"只是又一句主张。"""
+    lab = _load_lab()
+    fn = lab.recount_discrepancies
+    reading = {"ready": 3, "warm_rows_created": 3, "fleet_cards": 5, "free_cards_after": 2}
+    gpu = {"allocated": 3, "free": 2, "ready_with_card": 3, "available_but_bound": 0}
+    assert fn(reading, gpu, enforce_ready=True) == []
+    # 池里说 3 格 READY，卡那边只认 2 张卡属于 READY 格 ⇒ 有一格没拿到卡/或拿到了两张
+    assert any("ready" in line for line in fn({**reading}, {**gpu, "ready_with_card": 2}, enforce_ready=True))
+    # AVAILABLE 的卡却还挂着 workspace ⇒ 释放没做干净
+    assert any("AVAILABLE" in line for line in fn({**reading}, {**gpu, "available_but_bound": 1}, enforce_ready=True))
+    # 空闲卡数对不上
+    assert any("free_cards_after" in line for line in fn({**reading}, {**gpu, "free": 1}, enforce_ready=True))
+    # 分母为 0 不算"干净"
+    assert fn({**reading, "fleet_cards": 0}, gpu, enforce_ready=True)
+    # backlog 形状里 READY 还没成形，不该误开火
+    assert fn({"ready": 0, "warm_rows_created": 3, "fleet_cards": 3, "free_cards_after": 3},
+              {"allocated": 0, "free": 3, "ready_with_card": 0, "available_but_bound": 0},
+              enforce_ready=False) == []
+
+
+def test_capacity_lab_reports_a_clean_independent_recount() -> None:
+    """台子每行读数都带一份"换一条查法"的复算结果，且必须为空。
+
+    读数来自 workspace 侧计数，复算走 Gpu 侧（`Gpu.status` + `Gpu.workspace_id` 联结），
+    两条路必须给出同一个数——否则这张表（以及引用它的登记表 N-29／N-35）在说没法验证的话。
+    """
+    lab = _load_lab()
+    drained = lab.run_size(2, rounds=2, reserve=0)
+    assert drained["recount_offenders"] == [], drained["recount_offenders"]
+    assert drained["ready"] > 0, f"drained 形状没填满任何格，复算就成了空对空：{drained}"
+    backlog = lab.run_size(2, rounds=1, reserve=0, drain_between=False)
+    assert backlog["recount_offenders"] == [], backlog["recount_offenders"]
+    assert backlog["ready"] == 0, "积压形状里 worker 没跑，READY 不该有数（有的话说明形状名不副实）"
+
+
+def test_gpu_side_counts_actually_reads_the_gpu_side(tmp_path) -> None:
+    """复算的**传感器**也要单独验：造一张"AVAILABLE 却还挂着 workspace"的卡，它必须报出来。
+
+    只验比较器（纯字典）证明不了 `gpu_side_counts` 读的是另一张表 —— 传感器坏了，
+    复算就会永远"干净"。
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import Base
+    from app.models import Gpu, GpuHost, GpuStatus, Template, Workspace, WorkspaceStatus
+
+    lab = _load_lab()
+    engine = create_engine(f"sqlite:///{tmp_path / 'recount-sensor.db'}")
+    Base.metadata.create_all(engine)
+    Factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with Factory() as db:
+        db.add(GpuHost(id="s-host", name="s-h", address="127.0.0.1", provider="mock"))
+        db.add(Template(
+            id="s-t", slug="s-t", name="s", version="0.1.0", description="d", category="c",
+            runtime="mock", launch_command="", enabled=True,
+            gpu_requirement_gb=8, recommended_vram_gb=8,
+        ))
+        db.add(Workspace(
+            id="s-ws", name="ghost-holder", template_id="s-t", provider="mock",
+            status=WorkspaceStatus.CREATED.value, warm_pool_state="ready",
+        ))
+        db.add(Gpu(
+            id="s-gpu", gpu_uuid="s-uuid", host_id="s-host", model="m",
+            memory_total=8 * 1024, gpu_index=0,
+            status=GpuStatus.AVAILABLE.value, workspace_id="s-ws",
+        ))
+        db.commit()
+        gpu = lab.gpu_side_counts(db)
+        assert gpu["available_but_bound"] == 1, gpu
+        assert gpu["ready_with_card"] == 1, gpu
+        offenders = lab.recount_discrepancies(
+            {"ready": 1, "free_cards_after": 1, "fleet_cards": 1}, gpu, enforce_ready=True
+        )
+        assert any("AVAILABLE" in line for line in offenders), offenders
+    engine.dispose()

@@ -87,7 +87,7 @@ def app_prefixes(declared: dict[str, dict[str, object]]) -> tuple[str, ...]:
     return tuple(sorted({name.split("_")[0] for name in declared}))
 
 
-def registered_names() -> dict[str, bool]:
+def registered_names(registry: object | None = None) -> dict[str, bool]:
     """默认注册表里每个序列名 → "是不是由本仓的指标对象注册的"。
 
     区分方式实测过：`prometheus_client.metrics.MetricWrapperBase` 的实例就是我们
@@ -95,14 +95,19 @@ def registered_names() -> dict[str, bool]:
     （`python_gc_*`、`python_info`…）不是。注册表内部结构一旦改名，这里**显式失败**，
     绝不退回"按前缀猜"——那正是 N-43 留下的边界洞。
     """
+    from importlib.metadata import version
+
     import prometheus_client as pc
     from prometheus_client.metrics import MetricWrapperBase
 
-    mapping = getattr(pc.REGISTRY, "_collector_to_names", None)
+    target = pc.REGISTRY if registry is None else registry
+    mapping = getattr(target, "_collector_to_names", None)
     if mapping is None:
         raise AssertionError(
             "prometheus_client 的注册表结构变了（读不到 _collector_to_names）："
-            "本判据失去划界能力，必须显式红，不能退回前缀猜测"
+            "本判据失去划界能力，必须显式红，不能退回前缀猜测。"
+            f" 版本={version('prometheus-client')}，"
+            f" 注册表上现有的非 dunder 属性={sorted(a for a in dir(target) if not a.startswith('__'))}"
         )
     out: dict[str, bool] = {}
     for collector, names in mapping.items():

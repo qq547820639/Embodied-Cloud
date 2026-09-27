@@ -91,6 +91,67 @@ def _drain(worker: OperationWorker, ticks: int = 40) -> int:
     return ticks
 
 
+def gpu_side_counts(db) -> dict:
+    """换一条查法：从 Gpu 侧数，专门用来复核读数（读数走 workspace 侧）。
+
+    两条路必须给出同一个数，否则这张表——以及引用它的登记表 N-29／N-35——就是在说
+    一句没法验证的话。`available_but_bound` 抓的是"卡已经放回 AVAILABLE 但还挂着
+    workspace_id"这种没释放干净的状态。
+    """
+    allocated = int(
+        db.scalar(select(func.count(Gpu.id)).where(Gpu.status == GpuStatus.ALLOCATED.value)) or 0
+    )
+    free = int(db.scalar(select(func.count(Gpu.id)).where(Gpu.status == GpuStatus.AVAILABLE.value)) or 0)
+    ghost = int(
+        db.scalar(
+            select(func.count(Gpu.id)).where(
+                Gpu.status == GpuStatus.AVAILABLE.value, Gpu.workspace_id.is_not(None)
+            )
+        )
+        or 0
+    )
+    holders = (
+        select(Gpu.workspace_id)
+        .join(Workspace, Workspace.id == Gpu.workspace_id)
+        .where(Workspace.warm_pool_state == WarmPoolState.READY.value, Workspace.deleted_at.is_(None))
+        .distinct()
+        .subquery()
+    )
+    ready_with_card = int(db.scalar(select(func.count()).select_from(holders)) or 0)
+    return {
+        "allocated": allocated,
+        "free": free,
+        "available_but_bound": ghost,
+        "ready_with_card": ready_with_card,
+    }
+
+
+def recount_discrepancies(reading: dict, gpu: dict, enforce_ready: bool = True) -> list[str]:
+    """纯比较器：读数 vs 独立复算。分母不成立时**不当作干净**。
+
+    `enforce_ready=False` 给积压形状用——那时 worker 没跑，READY 本来就该是 0，
+    拿"READY 格数 == 持卡数"去核会误开火。
+    """
+    out: list[str] = []
+    if reading.get("fleet_cards", 0) <= 0:
+        return ["fleet_cards<=0：复算的分母不成立，不能按「没有偏离」放行"]
+    if gpu["allocated"] + gpu["free"] > reading["fleet_cards"]:
+        out.append(
+            f"卡数对不上：Gpu 侧 allocated {gpu['allocated']} + free {gpu['free']} "
+            f"> 舰队 {reading['fleet_cards']}"
+        )
+    if reading.get("free_cards_after") != gpu["free"]:
+        out.append(f"free_cards_after={reading.get('free_cards_after')} 与 Gpu 侧复算 {gpu['free']} 不一致")
+    if gpu["available_but_bound"]:
+        out.append(f"{gpu['available_but_bound']} 张 AVAILABLE 的卡还挂着 workspace_id：释放没做干净")
+    if enforce_ready and reading.get("ready") != gpu["ready_with_card"]:
+        out.append(
+            f"ready={reading.get('ready')} 但 Gpu 侧只有 {gpu['ready_with_card']} 张卡属于 READY 格"
+            "（有一格没拿到卡，或一格拿到了两张）"
+        )
+    return out
+
+
 def run_size(
     size: int,
     rounds: int = 4,
@@ -249,6 +310,15 @@ def run_size(
                 "interactive_total": len(interactive),
                 "interactive": interactive,
                 "per_template": per_template,
+                "recount_offenders": recount_discrepancies(
+                    {
+                        "ready": ready,
+                        "free_cards_after": free_cards,
+                        "fleet_cards": total_cards,
+                    },
+                    gpu_side_counts(db),
+                    enforce_ready=drain_between,
+                ),
             }
     finally:
         engine.dispose()
@@ -274,8 +344,16 @@ def main() -> int:
         run_size(s, rounds=1, reserve=r, drain_between=False)
         for s, r in zip(sizes, reserves, strict=True)
     ]
+    offenders = [
+        f"{r['shape']}#{r['warm_pool_size']}: {msg}"
+        for r in rows + backlog
+        for msg in r["recount_offenders"]
+    ]
     if args.json:
         print(json.dumps(rows + backlog, ensure_ascii=False, indent=2))
+        if offenders:
+            print("[capacity] 复算不通过（读数与 Gpu 侧不一致）：", *offenders, sep="\n  - ", file=sys.stderr)
+            return 1
         return 0
     header = (
         f"{'形状':>8} {'size':>4} {'预留':>4} {'需求位':>6} {'卡数':>4} {'READY':>6} {'建过的行':>8} "
@@ -301,6 +379,9 @@ def main() -> int:
             f"{i['template']}→{i['why']}" for i in worst["interactive"] if not i["ok"]
         )
     )
+    if offenders:
+        print("[capacity] 复算不通过（读数与 Gpu 侧不一致）：", *offenders, sep="\n  - ")
+        return 1
     return 0
 
 
