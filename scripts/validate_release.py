@@ -398,8 +398,11 @@ def main() -> int:
     code, _ = run([PYTHON, "-m", "ruff", "check", "app", "tests", "edge_agent", "scripts"])
     checks["lint"] = {"status": "PASS" if code == 0 else "FAIL"}
 
-    code, _ = run([PYTHON, "-m", "mypy", "app", "edge_agent"])
+    code, mypy_out = run([PYTHON, "-m", "mypy", "app", "edge_agent"])
     checks["typecheck"] = {"status": "PASS" if code == 0 else "FAIL"}
+    files = mypy_source_files(mypy_out)
+    if files is not None:
+        checks["typecheck"]["files"] = files
 
     import tempfile
 
@@ -411,6 +414,7 @@ def main() -> int:
             cwd=ROOT, text=True, capture_output=True, env=env, timeout=300,
         )
         checks["migration"] = {"status": "PASS" if result.returncode == 0 else "FAIL"}
+        checks["migration"]["chain"] = alembic_chain_length()
 
     # 构建后端来自锁（--no-isolation），产物时间来自 HEAD 提交（SOURCE_DATE_EPOCH），
     # 两条判据见 tests/test_validation_matrix.py
@@ -442,6 +446,21 @@ def main() -> int:
     checks["report_split"] = {
         "status": "FAIL" if split_offenders else "PASS",
         "note": "; ".join(split_offenders) if split_offenders else "环境读数清单与报告字段对得上",
+    }
+    # 状态页 §1：可复现的数对上、随环境抖的数不许手抄。事实源缺位时不猜 0，直接判红。
+    missing_facts = [
+        f"{key} 没给出 {field}：状态页对账失去事实源"
+        for key, field in (("typecheck", "files"), ("migration", "chain"))
+        if field not in checks[key]
+    ]
+    state_offenders = missing_facts or state_row_offenders(
+        (ROOT / "docs" / "CURRENT_STATE.md").read_text(encoding="utf-8"),
+        typecheck_files=int(checks["typecheck"].get("files", 0)),
+        migration_chain=int(checks["migration"].get("chain", 0)),
+    )
+    checks["docs_state_rows"] = {
+        "status": "FAIL" if state_offenders else "PASS",
+        "note": "; ".join(state_offenders) if state_offenders else "状态页的可复现数与本报告一致，且未手抄环境读数",
     }
 
     # 6) 汇总：退出码看全量（环境读数红也一样挡发布），提交面的 overall 只看可复现项。
@@ -544,6 +563,67 @@ def row_order_offenders(named_texts: list[tuple[str, str, str]]) -> list[str]:
     return out
 
 
+def mypy_source_files(summary: str) -> int | None:
+    """从 mypy 的收口行取"检查了多少个源文件"。两种形状：成功行与错误行。
+
+    读不到返回 None（调用方按"事实源缺位"处理，而不是悄悄当 0 —— 0 会让
+    "文档写 45 / 实测 0"这种比较退化成永远对不上或永远对上）。
+    """
+    found = re.search(r"no issues found in (\d+) source files", summary)
+    if not found:
+        found = re.search(r"checked (\d+) source files", summary)
+    return int(found.group(1)) if found else None
+
+
+def alembic_chain_length() -> int:
+    """迁移链的文件数（状态页 `**N 文件链**` 那一行的事实源）。"""
+    versions = ROOT / "alembic" / "versions"
+    return len([p for p in versions.glob("*.py") if p.name not in {"__init__.py", "README"}])
+
+
+STATE_GATED_ROWS = {
+    "Lint / Type": ("mypy", r"mypy\s+(\d+)\s+files", "typecheck_files", "mypy 源文件数"),
+    "Migration": ("文件链", r"\*\*(\d+)\s*文件链\*\*", "migration_chain", "迁移链长"),
+}
+INTEGRATION_ROW_RE = re.compile(r"^\|\s*(Integration[^|]*)\|")
+ENV_FRACTION_RE = re.compile(r"\d+\s*/\s*\d+")
+
+
+def state_row_offenders(text: str, *, typecheck_files: int, migration_chain: int) -> list[str]:
+    """状态页 §1：代码决定的数要对上，随环境抖的数不许手抄。纯函数，可喂夹具。
+
+    两类数走两条路，是因为 N-31 已经证明"把环境读数钉进文档"会随机红：
+    `Integration Docker 执行了几支` 由守护进程/外网通道决定，而 mypy 检查了几个文件、
+    迁移链有几段只由仓库内容决定 —— 前者逐出，后者纳入对账。
+    """
+    out: list[str] = []
+    lines = text.splitlines()
+    facts = {"typecheck_files": typecheck_files, "migration_chain": migration_chain}
+    seen = 0
+    for label, (_needle, pattern, fact, what) in STATE_GATED_ROWS.items():
+        rows = [ln for ln in lines if ln.startswith(f"| {label} |")]
+        if not rows:
+            out.append(f"{label} 行不在状态页里（这条对账失去了覆盖面）")
+            continue
+        seen += 1
+        match = re.search(pattern, rows[0])
+        if not match:
+            out.append(f"{label} 行读不到 {what}（应当写成 {pattern.replace(chr(92), '')} 的形状）")
+        elif int(match.group(1)) != facts[fact]:
+            out.append(f"{label}: 状态页写 {what} {match.group(1)}，实测 {facts[fact]}")
+    for line in lines:
+        row = INTEGRATION_ROW_RE.match(line)
+        if row and ENV_FRACTION_RE.search(line):
+            out.append(
+                f"Integration {row.group(1).strip()} 行手抄了随环境抖的环境读数"
+                f"（{ENV_FRACTION_RE.search(line).group(0)}）——各档执行了几支属本次跑读数，"
+                "请看 dist/VALIDATION_RUN.md"
+            )
+    if not seen and not any(INTEGRATION_ROW_RE.match(ln) for ln in lines):
+        out.append("状态页里一行被盯的表行都没有：本判据与恒真同形")
+    return out
+
+
 def doc_row_order_discrepancies() -> list[str]:
     named = [
         (rel, (ROOT / rel).read_text(encoding="utf-8"), pat) for rel, pat in ORDERED_ROWS
@@ -625,7 +705,7 @@ def _render_md(report: dict, title_suffix: str = "") -> str:
     for key in sorted(k[len("integration_"):] for k in c if k.startswith("integration_")):
         item = c[f"integration_{key}"]
         lines.append(f"| Integration {key} | {item['status']} | {item.get('note', '')} |")
-    for key in ("unexpected_skips", "docs_test_counts", "docs_row_order", "report_split"):
+    for key in ("unexpected_skips", "docs_test_counts", "docs_row_order", "report_split", "docs_state_rows"):
         if key in c:
             lines.append(f"| {key} | {c[key]['status']} | {c[key].get('note', '')} |")
     for key in ("gpu", "streaming", "robot"):

@@ -6,20 +6,23 @@
 
 ## 1. 本次真实验证（实测，非复制旧文档）
 
-> 本节整张表是**本次认证跑**的读数（含各档在真后端上执行了几支、跳过哪几支），属环境面：
+> 本节整张表是**本次认证跑**的读数（各档在真后端上跑没跑通、跳过哪几支），属环境面：
+> 换一台机器（有无 daemon / 外网通道通不通）读数会不同。**每档执行了几支这类数不许抄进本节**——
+> 常驻判据 `docs_state_rows` 会点名，逐支明细看 `dist/VALIDATION_RUN.md`；
+> 留在本节面上的只有代码决定的数（mypy 源文件数、迁移链长），它们与 `docs/VALIDATION.json` 对账。
 > 换一台机器（有无 daemon / 外网通道通不通）读数会不同，写在下面的 `Test` 行里的除外。
 > 跨机器必须逐字相同的那份在 `docs/VALIDATION.json`（常驻判据 `docs_test_counts` 只对账它）。
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 586 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
-| Lint / Type | PASS（ruff 0 / mypy 45 files：`app` + 本轮入册的 `edge_agent`） |
+| Test | **PASS（collected 590 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
-| Integration PostgreSQL | **PASS 21/21**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
-| Integration Docker | **PASS 25/25**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册；本轮 +3 例＝镜像层清单的接线与分流判据） |
-| Integration Browser | **PASS 11/11**（Playwright 驱动系统 Chrome 真 DOM） |
-| Integration Object store | **PASS 20/20**（一次性 VersityGW 容器 + 真实 boto3；MinIO 交叉核对读数一致） |
-| Integration K8s control plane | **PASS 7/7**（kind 真集群：真 kubelet/调度器/endpoints，无需 GPU） |
+| Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
+| Integration Docker | **PASS**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册；本轮 +3 例＝镜像层清单的接线与分流判据） |
+| Integration Browser | **PASS**（Playwright 驱动系统 Chrome 真 DOM） |
+| Integration Object store | **PASS**（一次性 VersityGW 容器 + 真实 boto3；MinIO 交叉核对读数一致） |
+| Integration K8s control plane | **PASS**（kind 真集群：真 kubelet/调度器/endpoints，无需 GPU） |
 | Edge agent 真进程通路 | **PASS**（真 uvicorn 子进程 + 真 `python -m edge_agent` 子进程 + mock 驱动：一轮到 VERIFIED、落盘摘要核对、第二轮不重复上机；服务端另有 10 例鉴权/防线 + 设备侧 12 例坏响应形状） |
 | Integration K8s（GPU 全流程） | PENDING（原因登记：需要节点带 `nvidia.com/gpu` 容量 = Device Plugin；控制面路径已由上一行覆盖。**本轮把这条原因查到根**：假 device plugin 既没检索到成熟实现、也不是绑定约束——Pod 镜像取自 `app/services/providers/k8s.py:190` 的 `settings.workspace_image`，那是 amd64 + NGC 基座、本机没构建也没推送的镜像，容量造假只会停在 ImagePullBackOff。源头逐条见 ACCEPTANCE_GATES 附注） |
 | 供应链 | PASS（`uv.lock` 一致性 + SBOM + `uv audit --locked` + 镜像配方下载/克隆钉死机检 + **外部基础镜像钉 digest 且消费侧逐字同源** + **workspace 镜像 digest 有写入入口与读者**） |
@@ -67,6 +70,7 @@
 | N-35 | **预热池的容量闸门只算「这一遍」，跨遍会把同一张卡许诺两次**：`maintain()` 先把 AVAILABLE 卡的显存收成一份共享多重集（N-29 补的），再按 best_fit 逐格扣——但补位是**异步入队**的：格开了，`Workspace.gpu_id` 要等 worker 真跑完 PROVISION 才写上，那张卡也才会从 AVAILABLE 变成 ALLOCATED。于是在「开了格 → worker 还没跑」这段窗口里，第二遍 maintain 看到的空闲多重集与第一遍**逐位相同**，1 张卡 / 2 个模板 / size=1 的形状下第二遍又开了一格（常驻用例的原文读数：2 格 / 1 张卡）。`missing` 那一侧没漏（PREWARMING 计入 ready+prewarming+legacy），漏的是**容量**那一侧——同一条不变量的两根轴只钉了一根 | 补上对称的半边：闸门进补位循环之前，先为每个「还会去占卡、但卡还没占上」的池位（与 `missing` 同一批池位谓词 ∧ `gpu_id IS NULL`）按 best_fit 从多重集里扣掉一张，扣完仍有余量才开新格。两头都钉：`test_in_flight_slot_holds_its_card_across_passes`（改前红）与 `test_a_card_released_between_passes_still_gets_filled`（两遍之间真多出一张空闲卡时第二遍必须照开，防「只要有 PREWARMING 就永远不开格」那种假合规）。一条如实的边界（N-37 更正）：这台子原先两遍之间都 drain，等于替被测者关上了这段窗口，读不出这个形状；现已补 `drain_between=False` 的第二形状，摘掉跨遍预留实测 **建过 14 行 / 舰队 8 张卡**，装上 8 行 / 8 卡 |
 | N-36 | **`dist/checksums.txt` 是装饰：没有任何东西核过"那行 sha 能不能被复算"**（N-34 留下的那一半真正闭上的是主张，不是字节）：探针第一版还暴露了一个键空间 bug——清单按文件名索引、探针按类别（wheel/sdist）聚合，直接对账就每轮报"主张缺席 + 清单里有、本轮没测" | 新增 `scripts/artifact_reproducibility.py`（`make verify-artifacts`）：每类产物**各建两次**（每次一份新目录，避免读到上一次的残留），sha 全等才写 `recomputable=yes`；`check()` 把"清单声明 ↔ 本轮实测"双向对账（把不可复算的说成可复算＝假承诺；上游修好后清单还写着 no＝过期悲观，两个方向都红），主张缺席、清单里有却没测、一个都没测三种偏离各自点名。时间口径从两处重复抽成 `scripts/build_env.py::epoch_env`（常驻判据钉 `%ct` 在 scripts/ 下只出现一次，并要求 Makefile 那条 shell 与它逐字相同）。**一手实测（同棵树立两次）**：`wheel 4259babd17 == 4259babd17`、`sdist 41dda386f2 != 174db2b484` ⇒ 清单写 `wheel=yes / sdist=no`，探针退出码 0。换后端的对照（同一份探针脚本口径）：`uv build --no-build-isolation` 与 hatchling 的 sdist 同样漂；只有 flit_core 两者都定，但它只认"与 project.name 同名的单个模块/包"，本仓发行 `app*` + `edge_agent*` 两个顶层包 ⇒ **不换后端，改成让主张可被推翻**。判据 8 支、门禁 G0.46 |
 | N-37 | **两张取证台没有常驻读者，于是它们"能对账"是自说自话**：`make warm-sla`（N-28 的读数出处）与 `make warm-capacity`（N-29 的读数出处）被文档反复引用，但全仓没有任何常驻用例跑过它们。两个具体缺陷是本轮补读者时当场撞出来的：① `python scripts/warm_pool_capacity_lab.py` 直接跑就 `ModuleNotFoundError: No module named 'tests'`（只有 `make warm-capacity` 的 `-m scripts.…` 形状活着）；② SLA 台把"这次交付走的是 claim 而不是新建""服务端直方图有没有留下样本""池子少了一格没有"三条读数**只 print 不记 rc**，量的根本不是 claim 也照样退 0 | ① 取证台自己把仓库根挂上 `sys.path`（`pyproject.toml` 给它一条写明理由的 `E402` 豁免），常驻判据**两种调用形状都跑**；② `claim_ok = 走 claim ∧ 直方图样本 ≥ 1 ∧ READY 少 1` 折进 rc，并加一支必开对照：`WARM_SLA_POOL_SIZE=0` 时台子必须 `overall=FAIL` 且退出码非 0（同批 `--sizes/--reserve` 数量不匹配那条 assert 也测了，证明退出码是承重墙不是装饰）；③ 补第二种形状 `drain_between=False`：两遍 maintain 之间**不**排空 worker，于是"补位在队列里、卡还没离开 AVAILABLE"这段跨遍窗口第一次在取证台上可见 —— N-35 那半边修复从此有了第二处读数。真实读数（size=4／舰队 8 卡）：摘掉跨遍预留 ⇒ **建过 14 行 / 8 张卡**；装上 ⇒ 8 行 / 8 卡。`provision_failed` 与 `warm_tombstones` 在两种形状下都必须是 0（闸门不许造注定失败的行），生产默认 size=1 在 drained 形状必须 `ready == requested_slots == 5`（不许误伤）。常驻判据 4 支，门禁目录 G0.47 |
+| N-38 | **状态页 §1 还在手抄随环境抖的读数，而且已经抄过期了**（N-31 只把环境读数从**报告**里逐出去，没管这张表）：本轮量到两处 —— `Integration Docker **PASS 25/25**` 对报告 `26/26`（docker 档中途加过一支用例，没人回去改那行），`mypy 45 files` 对实测 `46 source files`。这类行没有读者，所以"本节是实测非复制旧文档"这句话正在悄悄变假 | 两类数分两条路：**代码决定的**纳入对账 —— 提交面新增 `checks.typecheck.files`（从 mypy 收口行解析，成功形与错误形都读，读不到返回 None 并按"事实源缺位"判红而不是当 0）与 `checks.migration.chain`（`alembic/versions` 的迁移文件数），新门禁 `docs_state_rows` 用 `state_row_offenders()` 把 `Lint / Type`、`Migration` 两行与它们逐位对上；**环境决定的**逐出 —— §1 五行 `Integration …` 里的 `n/m` 全部删掉，明细指向 `dist/VALIDATION_RUN.md`，判据同时禁止该行再出现 `n/m` 形状（抄回来就红）。§1 抬头写明这条分工。常驻判据 4 支（含五种偏离各点名：数过期、数读不到、被盯的行整行消失、一行都没有、手抄环境数），门禁目录 G0.48。**一条次序上的实话**：其中"状态页 ↔ 提交面"那支读的是上一次写出的报告，所以给提交面新增字段后的第一次 `make validate` 必然红在它身上（字段还没进文件），重跑即收敛 —— 本轮实测就是这个形状（第一跑 `failed=1` 且 `docs_test_counts` 如实报"文档写 (590,0)，实测 (590,1)"，第二跑全绿）。这与"值对账只能放在 validate 里、不能放进 pytest"是同一条道理的两面 |
 
 
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）

@@ -4,7 +4,7 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 586
+      "count": 590
     },
     "test_run": {
       "status": "PASS",
@@ -15,10 +15,12 @@
       "status": "PASS"
     },
     "typecheck": {
-      "status": "PASS"
+      "status": "PASS",
+      "files": 46
     },
     "migration": {
-      "status": "PASS"
+      "status": "PASS",
+      "chain": 14
     },
     "build": {
       "status": "PASS"
@@ -46,6 +48,10 @@
     "report_split": {
       "status": "PASS",
       "note": "环境读数清单与报告字段对得上"
+    },
+    "docs_state_rows": {
+      "status": "PASS",
+      "note": "状态页的可复现数与本报告一致，且未手抄环境读数"
     }
   },
   "environment_readings": "dist/VALIDATION_RUN.md（本次跑读数，不进版本库）"

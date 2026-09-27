@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 586 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 590 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -99,6 +99,25 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   必须 `ready == requested_slots`（闸门不许误伤）。这条把 N-35 行里"取证台读不出这个形状"那句更正掉了。
 - 常驻判据 4 支（`tests/test_warm_pool_labs.py`），门禁目录 G0.47；
   `pyproject.toml` 给容量台加了一条写明理由的 `E402` 豁免（它的 sys.path 引导必须早于 import）。
+
+### 状态页只留能对上账的数（N-38）
+- **N-31 少做了一半**：它把环境读数从**报告**逐出去，但 `docs/CURRENT_STATE.md` §1 那张表
+  还在手抄各档"执行了几支"。本轮量到两处已经抄过期：`Integration Docker **PASS 25/25**`
+  对报告 `26/26`（docker 档中途加过用例，没人回头改那行），`mypy 45 files` 对实测 46。
+  这张表抬头写着"本次真实验证（实测，非复制旧文档）"，没有读者的时候这句话会悄悄变假。
+- **两类数两条路**：
+  - *代码决定的*纳入对账 —— 提交面新增 `checks.typecheck.files`（mypy 收口行解析，
+    `Success: no issues found in N source files` 与 `Found X errors ... (checked N source files)`
+    两种形状都读，读不到返回 `None` 并按"事实源缺位"判红 —— 不许拿 0 当兜底，0 会让比较退化成永远对不上）
+    与 `checks.migration.chain`（`alembic/versions` 的迁移文件数，本轮实测 14）；
+    新门禁 `docs_state_rows` 用 `state_row_offenders()` 把 `Lint / Type`、`Migration` 两行逐位对上。
+  - *环境决定的*逐出 —— §1 五行 `Integration …` 的 `n/m` 全删，明细指向 `dist/VALIDATION_RUN.md`；
+    判据同时禁止这些行再出现 `n/m` 形状，抄回来就红。
+- **五种偏离各有一支点名**：数过期、形状读不到、被盯的行整行消失（覆盖面缩小）、一行都没有（恒真）、
+  手抄环境数。常驻判据 4 支，门禁目录 G0.48。
+- 顺带修掉一处自己造成的语法断裂：给 `validate_release.py` 插函数时把
+  `def doc_row_order_discrepancies()` 的换行吃掉，`py_compile` 当场拒绝 —— 记账脚本改仓库代码时
+  "改完立刻编译/加载一次"这一步不能省（本轮第三次被自家工具抓到，前两数是 lint 与探针）。
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到

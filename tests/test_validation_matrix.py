@@ -16,6 +16,7 @@
 """
 
 import importlib.util
+import json
 import os
 import re
 from pathlib import Path
@@ -350,4 +351,83 @@ def test_build_call_sites_pin_the_epoch_in_makefile_and_the_gate() -> None:
     )
     # 反证：摘掉 export，判据必须翻红
     assert not re.search(r"^export SOURCE_DATE_EPOCH$", make.replace("export SOURCE_DATE_EPOCH\n", ""), re.MULTILINE)
+
+
+STATE_FIXTURE = """| Gate | 结果 |
+|---|---|
+| Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + `edge_agent`） |
+| Migration | PASS（clean DB empty→head **14 文件链** + 模型↔迁移对账） |
+| Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义） |
+| Integration K8s（GPU 全流程） | PENDING（原因：需要节点带 nvidia.com/gpu 容量） |
+"""
+
+
+def test_state_page_gate_keeps_reproducible_numbers_and_bans_jittering_ones() -> None:
+    """状态页那一节：可复现的数要**对上**，随环境抖的数要**不许手抄**。
+
+    起因是实测：N-31 把环境读数从报告里逐出去了，但 `docs/CURRENT_STATE.md` 的 §1
+    还在手抄 `Integration Docker **PASS 25/25**`，而本轮真实档位是 26/26（docker 档
+    加过一次用例，没人去改那行）；`mypy 45 files` 同样过期（实测 46）。
+    两类数要走两条路：代码决定的（mypy 文件数、迁移链长）纳进对账，
+    环境决定的（各档执行了几支）根本不该出现在面上。
+    """
+    validator = _load_validator()
+    fn = validator.state_row_offenders
+    assert fn(STATE_FIXTURE, typecheck_files=46, migration_chain=14) == []
+    # 反例 1：mypy 文件数过期
+    bad = fn(STATE_FIXTURE.replace("mypy 46 files", "mypy 45 files"), typecheck_files=46, migration_chain=14)
+    assert len(bad) == 1 and "mypy" in bad[0], bad
+    # 反例 2：迁移链长过期
+    bad = fn(STATE_FIXTURE.replace("**14 文件链**", "**13 文件链**"), typecheck_files=46, migration_chain=14)
+    assert len(bad) == 1 and "Migration" in bad[0] and "13" in bad[0] and "14" in bad[0], bad
+    # 反例 3：手抄环境读数
+    bad = fn(
+        STATE_FIXTURE.replace("**PASS**（自建一次性容器", "**PASS 21/21**（自建一次性容器"),
+        typecheck_files=46, migration_chain=14,
+    )
+    assert bad and "环境读数" in bad[0] and "PostgreSQL" in bad[0], bad
+    # 反例 4：被盯的行整行消失（覆盖面缩小）
+    trimmed = "\n".join(ln for ln in STATE_FIXTURE.splitlines() if not ln.startswith("| Migration"))
+    bad = fn(trimmed, typecheck_files=46, migration_chain=14)
+    assert bad and "Migration" in bad[0], bad
+    # 反例 5：一行都没有 ⇒ 判据与恒真同形
+    assert fn("没有表\n", typecheck_files=46, migration_chain=14)
+
+
+def test_the_status_page_agrees_with_the_committed_report() -> None:
+    """真面对账：CURRENT_STATE 的 §1 必须与**提交面**里那两个可复现数一致。
+
+    提交面只放代码决定的数，所以这条不会随环境抖（与 docs_test_counts 同一口径）；
+    它防的是"报告改了、状态页没跟着改"。
+    注意一条次序：pytest 看到的是**上一次**写出的报告，所以给提交面新增字段之后，
+    第一次 `make validate` 必然红在这条上（字段还没进文件），重跑一次即收敛 —— 与
+    `docs_test_counts` 把值对账放进 validate 而不是 pytest 是同一个道理。
+    """
+    validator = _load_validator()
+    report = json.loads((ROOT / "docs" / "VALIDATION.json").read_text(encoding="utf-8"))
+    checks = report["checks"]
+    assert "files" in checks["typecheck"], "提交面没有 mypy 文件数：这条对账没有事实源"
+    assert "chain" in checks["migration"], "提交面没有迁移链长：这条对账没有事实源"
+    text = (ROOT / "docs" / "CURRENT_STATE.md").read_text(encoding="utf-8")
+    offenders = validator.state_row_offenders(
+        text, typecheck_files=checks["typecheck"]["files"], migration_chain=checks["migration"]["chain"]
+    )
+    assert offenders == [], offenders
+
+
+def test_mypy_summary_parser_handles_both_forms() -> None:
+    """从 mypy 的收口行取文件数：成功形与失败形都要能读，读不到要返回 None 而不是 0。"""
+    validator = _load_validator()
+    assert validator.mypy_source_files("Success: no issues found in 46 source files") == 46
+    assert validator.mypy_source_files("Found 3 errors in 2 files (checked 46 source files)") == 46
+    assert validator.mypy_source_files("everything else") is None
+
+
+def test_validate_registers_the_state_gate_before_the_summary() -> None:
+    """接线：`docs_state_rows` 必须在组装提交面之前算出来，否则它的 FAIL 进不了 overall。"""
+    src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
+    assert "state_row_offenders(" in src and '"docs_state_rows"' in src
+    assert src.index("state_row_offenders(") < src.index('"checks": reproducible_checks(checks)'), (
+        "对账发生在组装提交面之后 → 它的红进不了这一轮的面"
+    )
 
