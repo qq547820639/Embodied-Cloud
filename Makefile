@@ -3,7 +3,8 @@ UV ?= uv
 VERSION ?= 0.7.0
 # 构建产物的时间基准：zip/tar 条目默认带"打包那一刻"，于是 dist/checksums.txt 里的
 # sha256 只是某一次构建的记录，第三方重建对不上。取 HEAD 提交时间 ⇒ 同一个 commit
-# 构建出的 wheel 逐字节相同（实测；sdist 仍不完全可复算，见 CURRENT_STATE N-34）。
+# 构建出的 wheel 逐字节相同（实测）；sdist 由 build 目标末尾那道头部归一钉住（N-60，
+# 见 scripts/sdist_normalize.py 与 CURRENT_STATE N-34/N-60：两建同为 35e21305d9…）。
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
 export SOURCE_DATE_EPOCH
 
@@ -73,6 +74,9 @@ typecheck:
 
 build:
 	$(PYTHON) -m build --no-isolation
+	@# setuptools 84 不把 sdist 的 tar 头夹到 SOURCE_DATE_EPOCH（N-60）：
+	@# 这一步把头部归一掉，dist/checksums.txt 那行 sha 才是可被第三方复算的主张。
+	$(PYTHON) scripts/sdist_normalize.py dist/*.tar.gz
 
 smoke:
 	./scripts/smoke_api.sh

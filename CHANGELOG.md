@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 653 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 659 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -455,10 +455,37 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   自己踩的——按 `process.kill()` 这种**词**查旧形状被自己注释命中；`ENV_FIELDS` 添字段后
   既有遮罩判据立刻红，那是夹具没跟上声明，补字段而不是放松判据。
 
+### sdist 那行 sha 现在可以被第三方复算了（N-60）
+- 上游先查过，不是猜的：本机装的与 PyPI 最新的 setuptools 都是 84.0.0（2026-08-08 上传）
+  ⇒ 等不到"上游把 sdist 的 tar 头夹住"。三个候选里择一：换后端（前一轮已实测 uv_build 与
+  hatchling 同样漂，flit_core 定但不支持本仓两个顶层包）、后处理归一、只改口径。
+  选了后处理：借 Debian `strip-nondeterminism` 的分类思路（核到它在 salsa
+  `reproducible-builds/strip-nondeterminism` 的 master 分支，`COPYING` 是 GNU GPL-3.0，
+  是 Debian 打包链里的 Perl 工具；它具体归一哪些字段本轮没取到源文件，未亲验），
+  不引它——这件事只需标准库。
+- `scripts/sdist_normalize.py`：成员按名排序、mtime 钉 `SOURCE_DATE_EPOCH`、`mode & 0o755`、
+  uid/gid 归零并清 uname/gname、丢 pax 扩展（格式钉 GNU_FORMAT）、gzip 显式 `filename=""`。
+- 取径两头的读数：改前两建 `6b6d115a25` 对 `ad66f49101`（wheel 两次都是 `374ea4b59f`）；
+  改后 `make verify-artifacts` 打 `sdist=yes wheel=yes`（`sdist: 35e21305d9` 两次逐字节相同），
+  `dist/checksums.manifest` 的 sdist 行从 `recomputable=no` 翻成 `yes`。
+- 两处消费同一份实现：`make build` 末尾多一行归一，探针在自己那步也调它——
+  否则"探针量的形状"与"发出去的字节"会分叉，那正是 N-57/N-59 反复拆的东西。
+- 判据 6 支（两建合一 / 内容不许被动 / gzip 头部两头核 / 拿不到 epoch 必须失败 / 消费位恰好两处），
+  门禁 G0.70。变异电池 4 支开火 3 支；"去掉 `filename=""`"那支不开火——本实现写进
+  `BytesIO` 没有 `.name` 可推断，所以那句显式参数是**防未来改动的保险**，
+  本轮按这个措辞写，没写成"已证必要"。
+- 口径变化写进运维面：`dist/checksums.txt` 里 sdist 那行是**归一后**产物的 sha，
+  第三方复算要走同一条 `make build` + 同一个 epoch + **同一个 Python/zlib**（gzip 那一层的字节随 zlib 参数与版本变，tar 的 GNU 头部布局随 stdlib 实现变）——这条限定是本轮查 `setuptools-reproducible` 时顺带挖出来的：那包只 patch `tarfile.tarinfo`（0.1 版、2024-05 唯一一次发布），从不碰 `GzipFile` 的 mtime，它的自测两建间隔在同一秒内，读码即知不抗跨秒（未实测，标未亲验）。口径已写进 `docs/OPERATIONS.md`、`docs/RELEASE_PROCESS.md`。
+- 顺手清上一轮留的账：N-59 的"1500s≈2.4× 实测分布"当时只有 632.3s 一个读数，
+  本轮同机另一跑 `make validate` 自报 `elapsed_seconds=331.6`（load [4.26,8.97,19.27]）
+  ⇒ 分布本身跨 2 倍，1500s 是**较大那个读数**的 2.4 倍。
+- 计数面 653→659；N-34 与 G0.44/G0.46 里"sdist 不可复算"的陈述本轮按事实标注/更正。
+
 ### 本轮新增的待收口项
-- `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
+- `N-61`：**要不要把构建后端从 setuptools 换成 hatchling**（本轮量出来的选项，不是猜的）。换过去的收益是 sdist 原生可复算——本仓自研的 `scripts/sdist_normalize.py` 与它的两处消费位可以整体删掉；代价是 `[build-system]` 与 `uv.lock`、`dev` extra 三处对齐（常驻判据 G0.44 正管着这件事）、wheel 侧 `recomputable=yes` 那条 sha 要重钉基线，以及 `[tool.hatch.build.targets.*]` 要显式声明两个顶层包。一手依据：hatchling 1.32.4 的 sdist 在 `SOURCE_DATE_EPOCH` 固定下两建（间隔 3s）逐字节相同（`15a58edaa443`），且它的 sdist builder 自己钉了成员 mtime/uid/gid 与 gzip mtime。本轮不换：口径已定、判据已在；换后端单独一轮做，并留两建对照。
+~~`N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
   `SOURCE_DATE_EPOCH`，逐字节定位见上一节）。wheel 已可复算；sdist 那一半要么给 `dist/checksums.txt`
-  加"这是构建记录、不是复算承诺"的口径说明，要么换 `uv build`/后处理再验一次。
+  加"这是构建记录、不是复算承诺"的口径说明，要么换 `uv build`/后处理再验一次。（**已由 N-60 走"后处理"这一支闭合**：`scripts/sdist_normalize.py`，实测两建同 sha；口径改为"那行 sha 是归一后产物的 sha"）~~
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
 - ~~`N-33`：`tests/test_gpu_pool_guard.py` 那两支带哨兵（缺余量时算合法跳过）~~ —— 已由 **N-41 闭合**：

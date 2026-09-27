@@ -110,13 +110,47 @@
 `dist/checksums.txt` 记 wheel / sdist / sbom 的 SHA-256。第三方拿到那行 sha 能不能自己重建出同样的字节？
 `make verify-artifacts` 每类产物各建两次（每次一份新目录，避免读到上一次的残留）比 sha，全等才写
 `recomputable=yes` 进 `dist/checksums.manifest`；发布链里它排在 checksums **之前**，主张与实测不一致
-（说反了、清单缺项、有项没测）退出码非 0。本轮读数：`wheel=yes`（时间基准取 HEAD 提交时间，
-`SOURCE_DATE_EPOCH=1790482819` 下两建同为 `4259babd17…`）、`sdist=no`（`41dda386f2…` vs `174db2b484…`）。
-两个方向的偏离都要人来翻：上游哪天把 sdist 的时间夹住了，清单还写着 `no` 同样会红——那不是故障，
-是在催你把主张改成实测。
-跨环境的读法（HEAD `c9de532` 实测）：干净 worktree + 独立锁造 venv 里跑 `make verify-artifacts` 退 0，
-且两处构建出的 wheel 逐字节相同（`40f27dde80…`），sdist 不同（`7f27c86553…` vs `68f5170dff…`）——
-`yes`/`no` 两行各自被独立环境证实了一次。
+（说反了、清单缺项、有项没测）退出码非 0。2026-09-27 实测：`[artifacts] sdist=yes wheel=yes`
+（`SOURCE_DATE_EPOCH=1790533457`，两建 sdist 同为 `35e21305d9…`、wheel 同为 `374ea4b59f…`），
+`dist/checksums.manifest` 里 `embodiedcloud-0.7.0.tar.gz` 那行已从 `recomputable=no` 写成 `yes`。
+把 sdist 钉住的不是上游：本机装的 setuptools 是 84.0.0，PyPI 上 `setuptools` 的最新也是 84.0.0
+（2026-08-08 上传），"等一个把 sdist 时间夹住的版本"今天不存在。是一条自己加的工序——`make build`
+末尾用 `scripts/sdist_normalize.py`（只用标准库 `tarfile` + `gzip`）把 tar 的**头部**归一：成员按名字排序、
+mtime 钉到 `SOURCE_DATE_EPOCH`、mode &= 0o755、uid/gid 归零、uname/gname 清空、不落 pax 记录
+（格式钉成 GNU_FORMAT），gzip 写 `filename=""` 且 mtime 同样钉到 epoch；**内容一个字节都不动**。
+探针在自己的构建步里调同一份实现，所以它量到的是发出去的那个形状。归一之前，同一棵树立两次是漂的
+（`6b6d115a25…` 对 `ad66f49101…`，epoch 相同；那两次的 wheel 都是 `374ea4b59f…`）——这句是这道工序的来处。
+
+口径要说窄：sdist 那行 sha 是**归一后**产物的 sha。第三方复算走的是同一条 `make build`（含这一步）
+加同一个 `SOURCE_DATE_EPOCH`，**而且是同一个 Python/zlib**：gzip 那一层的字节随 zlib 的压缩参数与版本变，
+tar 的 GNU 头部布局随标准库实现变——换解释器或小版本号都可能改 sha 而没有任何东西坏掉（这一条是本轮
+查 `setuptools-reproducible` 时顺带挖出来的：那包 0.1 版、MIT、2024-05-15 唯一一次发布，只 patch
+`tarfile` 的 TarInfo、从不给 `GzipFile` 传 mtime，标准库在没传时取 `time.time()`（本机亲读 `gzip.py`），
+于是它的"确定性"要求两次构建落在同一秒内——读码即知，未实测）。这一步公开、确定性、只依赖标准库，
+所以"可复算"仍然是一句可被推翻的话，而不是"setuptools 自己的输出稳定"。判据常驻在 `tests/test_artifact_reproducibility.py`：两支不同的构建
+归一到同一个形状、成员清单与每个成员的内容 sha 逐个不变（不许靠改内容换确定性）、gzip 头部两头各一臂
+（我们的输出里 FNAME 位必须为 0；用有名字的文件句柄且不传 `filename` 时这一位必须能复现出来）、
+`SOURCE_DATE_EPOCH` 取不到就失败而不许退回打包那一刻、以及这一步只有两个消费方（`Makefile` 与探针）。
+
+**探针打印回 `sdist=no` 时怎么办**：`no` 本身不红——清单由探针现写、写完再读回来对账，实测 `no` 与清单
+`no` 一致就照退 0（手改那一行既不成立也没用），所以这一行得由人在收尾时读，别等门禁敲门。按顺序翻：
+① `make build` 里那一行归一还在不在、`scripts/sdist_normalize.py` 会不会因为 `SOURCE_DATE_EPOCH` 取不到而
+非零退出（按 make 的语义那一行会把 `make build` 停住——这条是语义推得，本轮没实测）；② 漂的是头部还是
+内容：多出一个没被钉住的头部字段就把它补进这一步（判据那句"归一后仍不同：还有没被钉住的头部字段"就是
+为这一格写的），成员内容自己漂了则不是这道工序的事，那是构建不确定性的新缺陷，要另立案；③ 在实测翻回
+`yes` 之前，`dist/checksums.txt` 里那一行只是本次构建的记录，对外别当可复算主张发出去。
+
+一处诚实的坑：`GzipFile` 不传 `filename` 时会从 `fileobj.name` 推断 gzip 的 FNAME 字段（单变量实测：
+有名字的文件句柄不传参 ⇒ FLG=0x08；传 `filename=""` ⇒ FLG=0x00），本机第一版就栽在这里——137 个成员
+逐字节相同、两份 `.tar.gz` 的 sha 仍不同，差的只有那一个字段。但本实现写进 `BytesIO`（没有 `.name`），
+变异台上"删掉 `filename=""`"那一臂**没开火**（四臂开了三支：不排序、改内容、不钉 mtime），所以它是
+钉给将来改写方式的保证，不是今天承重的墙。
+
+历史读数留着当证据、不当现状：上一轮（`SOURCE_DATE_EPOCH=1790482819`）记的是 `wheel=yes`
+（两建同为 `4259babd17…`）、`sdist=no`（`41dda386f2…` vs `174db2b484…`）；跨环境那次（HEAD `c9de532`，
+干净 worktree + 独立锁造 venv）里跑 `make verify-artifacts` 退 0，两处构建出的 wheel 逐字节相同
+（`40f27dde80…`），sdist 不同（`7f27c86553…` vs `68f5170dff…`）——当时 `yes`/`no` 两行各自被独立环境
+证实了一次。今天的 `yes` 不覆盖那两笔，那两笔也不否定今天这行；差异点正好是上面那道归一。
 
 | 档位 | 命令 | 前置（本机实测） |
 |---|---|---|

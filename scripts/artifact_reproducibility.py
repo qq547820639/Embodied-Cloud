@@ -22,6 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import sdist_normalize
 from build_env import epoch_env
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,13 +47,18 @@ def artifacts_in(outdir: Path) -> dict[str, Path]:
 def build_once(outdir: Path) -> dict[str, Path]:
     outdir.mkdir(parents=True, exist_ok=True)
     env = epoch_env(dict(__import__("os").environ))
+    sdist_epoch = int(env["SOURCE_DATE_EPOCH"])  # 归一与构建必须钉同一个基准，不另读一次环境
     res = subprocess.run(  # noqa: S603 受控常量参数：本机 venv 的 build 模块
         [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(outdir)],
         cwd=ROOT, text=True, capture_output=True, env=env, timeout=900,
     )
     if res.returncode != 0:
         raise RuntimeError(res.stdout[-500:] + res.stderr[-500:])
-    return artifacts_in(outdir)
+    built = artifacts_in(outdir)
+    # 与 `make build` 走同一份实现：探针量的必须是发出去的那个形状，
+    # 否则"实测 no / 清单 no"可以一直绿着，而真实产物早就变了。
+    sdist_normalize.normalize(built["sdist"], sdist_epoch)
+    return built
 
 
 def probe(
