@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 628 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 632 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -258,6 +258,23 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 写判据过程中被 ruff 抓两处、被自己的测试抓两处：`pending_reason_offenders` 返回的是字符串而我把
   它当元组解包（`ValueError: too many values to unpack`）、`.PHONY` 多行续行的扫描写成了
   `(a and b) in line` 的胡话（`TypeError`），两处都由判据自己报出来后才修。
+
+
+### 操作指针核到"引用的东西真的存在"（N-50）
+- N-48 让原因必须"可行动"，但核的是关键词表：一句写着 `export …K8S_TESTS=1` 的话只要含"需要"就过关。
+  而这个名字**全仓零命中**——它是我在写上一条判据前"记得"的假指针（这里刻意不写全名：被扫文件里出现假名字，就会被这条判据自己抓住）。人会记错这类名字，文档就需要一道不依赖记性的核对。
+- 新增 `reference_catalog()`：env 目录 = `env_prefix` + `app/config.py` 的 Settings 字段名、`os.environ`/`getenv`
+  的字面量读点名、以及 `app`+`edge_agent` 源码里出现的 `EMBODIEDCLOUD_*` 字符串常量（覆盖
+  `ENV_SERVER = "…"` 这种间接读法）；make 目录 = `Makefile` 目标；extra 目录 = `pyproject` 的 optional extras。
+  被扫文本 = 23 份文档 + 6 个档位前置模块；新门禁 `reason_references` 进提交面（目录全来自仓内事实，不依赖环境）。
+- 两类恒真形状也算偏离：目录某侧为空、一处指针都没扫到。判据 3 支；当前真面复扫 **0 条越界**
+  （目录规模：51 个候选变量名、40 个 make 目标、extras 含 `postgres/s3/dev/app`）。
+  它上线后抓到的第一条就是我自己写的占位符（门禁行里 `make` 后接 xxx、点方括号里写 extra 那种占位写法，被点名成失效指针）——
+  处理是改写占位符为 `make <目标>` 这类写法，不给判据开豁免。
+  第二次抓到的是它自己：`docs/VALIDATION.md` 会把上一轮的 FAIL 原因抄回来，同一批假指针被反复「发现」——生成物从扫描集里剔除（`GENERATED_DOCS`），并有 `test_generated_reports_are_not_scanned_for_pointers` 钉住。
+- 记账时又踩自己写的坑两次：拼接脚本把 `# PENDING 的说明…` 那行注释切成半句（`SyntaxError: invalid character '：'`）、
+  以及 `root/"app".rglob(...)` 的优先级把 `rglob` 挂到了字符串上（`AttributeError`）——两处都由"改完立刻编译/真跑"抓到。
+- 登记表 N-50、门禁 G0.60，计数面 628→631。
 
 
 ### 本轮新增的待收口项

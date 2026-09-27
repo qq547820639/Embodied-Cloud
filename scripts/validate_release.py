@@ -336,6 +336,104 @@ def pending_reason_offenders(statuses: dict[str, object]) -> list[str]:
     return out
 
 
+# 操作指针核到"引用的东西真的存在"：档位原因与文档里写的 `EMBODIEDCLOUD_*`、`make xxx`、
+# `.[extra]` 是人照着补环境的入口，记错一个字母（我这轮就"记得"过 `EMBODIEDCLOUD_K8S_TESTS`，
+# 全仓零命中）就会让人白折腾。目录来自仓内事实，所以这条判据不依赖环境。
+POINTER_DOCS = ("docs",)
+POINTER_EXTRA_DOCS = ("DELIVERY.md", "README.md", "CHANGELOG.md")
+POINTER_MODULES = (
+    "tests/pg_server.py", "tests/s3_server.py", "tests/k8s_server.py",
+    "tests/test_docker_provider_integration.py", "tests/test_browser_console.py",
+    "tests/test_k8s_integration.py",
+)
+# 生成物：它们是这条判据的输出，不能反过来当输入
+GENERATED_DOCS = frozenset({"docs/VALIDATION.md"})
+ENV_RE = re.compile(r"EMBODIEDCLOUD_[A-Z0-9_]+")
+MAKE_RE = re.compile(r"\bmake ([a-z][a-z0-9-]*)")
+EXTRA_RE = re.compile(r"\.\[([a-z0-9]+)")
+
+
+def reference_catalog() -> dict[str, set[str]]:
+    """{env, make, extra} 三个目录，全部从仓内来源现取。"""
+    shipped = "\n".join(
+        f.read_text(encoding="utf-8", errors="replace")
+        for d in ("app", "edge_agent")
+        for f in sorted((ROOT / d).rglob("*.py"))
+    )
+    everywhere = "\n".join(
+        f.read_text(encoding="utf-8", errors="replace")
+        for d in ("app", "edge_agent", "tests", "scripts")
+        for f in sorted((ROOT / d).rglob("*.py"))
+    )
+    config = (ROOT / "app/config.py").read_text(encoding="utf-8")
+    prefix_match = re.search(r'env_prefix="([^"]+)"', config)
+    prefix = prefix_match.group(1) if prefix_match else "EMBODIEDCLOUD_"
+    fields = re.findall(r"^    ([a-z0-9_]+)\s*[:=]", config, re.M)
+    env = (
+        set(ENV_RE.findall(shipped))
+        | {prefix + f.upper() for f in fields}
+        | set(re.findall(r'os\.environ(?:\.get)?\(?\[?"([A-Z0-9_]+)"', everywhere))
+        | set(re.findall(r'getenv\(\s*"([A-Z0-9_]+)"', everywhere))
+    )
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    targets = set(re.findall(r"^([a-z][a-z0-9-]*):", makefile, re.M))
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    section = pyproject.split("[project.optional-dependencies]")[-1]
+    extras = set(re.findall(r"^([a-z0-9]+)\s*=\s*\[", section, re.M))
+    return {"env": env, "make": targets, "extra": extras}
+
+
+def pointer_bearing_texts() -> dict[str, str]:
+    """被扫的文本：面向人的文档 + 档位前置模块（原因文案就在那儿）。
+
+    跳过生成物：`docs/VALIDATION.md` 是这份报告自己的输出，它会把上一轮的 FAIL 原因
+    （里面就有被点名的指针）原样抄回来 —— 扫它就等于让报告自己喂自己红一轮。
+    """
+    out: dict[str, str] = {}
+    for doc in sorted((ROOT / "docs").glob("*.md")):
+        rel = doc.relative_to(ROOT).as_posix()
+        if rel in GENERATED_DOCS:
+            continue
+        out[rel] = doc.read_text(encoding="utf-8", errors="replace")
+    for rel in POINTER_EXTRA_DOCS:
+        path = ROOT / rel
+        if path.exists():
+            out[rel] = path.read_text(encoding="utf-8", errors="replace")
+    for rel in POINTER_MODULES:
+        path = ROOT / rel
+        if path.exists():
+            out[rel] = path.read_text(encoding="utf-8", errors="replace")
+    return out
+
+
+def dangling_reference_offenders(texts: dict[str, str], catalog: dict[str, set[str]]) -> list[str]:
+    """三种失效指针各自点名；目录空或一处引用都没扫到 ⇒ 判据恒真，也算偏离。"""
+    out: list[str] = []
+    for kind in ("env", "make", "extra"):
+        if not catalog.get(kind):
+            out.append(f"目录的 {kind} 一侧为空：这条判据无法判任何东西（恒真）")
+    if not texts:
+        out.append("没有一份文本被扫：这条判据无事可做")
+        return out
+    found = 0
+    for name, text in sorted(texts.items()):
+        for env in sorted(set(ENV_RE.findall(text))):
+            found += 1
+            if env not in catalog["env"]:
+                out.append(f"{name}: 引用了没人读的变量 {env}")
+        for target in sorted(set(MAKE_RE.findall(text))):
+            found += 1
+            if target not in catalog["make"]:
+                out.append(f"{name}: 引用了不存在的目标 make {target}")
+        for extra in sorted(set(EXTRA_RE.findall(text))):
+            found += 1
+            if extra not in catalog["extra"]:
+                out.append(f"{name}: 引用了不存在的 extra .[{extra}]")
+    if not found:
+        out.append("一处操作指针都没扫到：覆盖面可疑，不按\'通过\'处理")
+    return out
+
+
 def reproducible_checks(checks: dict) -> dict:
     """提交面：剥掉环境读数后的报告。换机器重跑必须逐字节相同。"""
     view: dict[str, dict] = {}
@@ -472,6 +570,13 @@ def main() -> int:
     checks["report_split"] = {
         "status": "FAIL" if split_offenders else "PASS",
         "note": "; ".join(split_offenders) if split_offenders else "环境读数清单与报告字段对得上",
+    }
+    # 操作指针（变量名 / make 目标 / extra）必须能在仓内找到出处：文档与档位原因一起扫。
+    ref_offenders = dangling_reference_offenders(pointer_bearing_texts(), reference_catalog())
+    ref_note = "文档与档位原因里的 env / make 目标 / extra 引用都有出处"
+    checks["reason_references"] = {
+        "status": "FAIL" if ref_offenders else "PASS",
+        "note": "; ".join(ref_offenders) if ref_offenders else ref_note,
     }
     # PENDING 的说明要能指着补：健康时没有 PENDING 档 = 无可核 = PASS。
     tier_statuses = {k: v for k, v in checks.items() if k.startswith("integration_")}
@@ -741,7 +846,7 @@ def _render_md(report: dict, title_suffix: str = "") -> str:
         lines.append(f"| Integration {key} | {item['status']} | {item.get('note', '')} |")
     for key in (
         "unexpected_skips", "docs_test_counts", "docs_row_order",
-        "report_split", "docs_state_rows", "pending_reasons",
+        "report_split", "docs_state_rows", "pending_reasons", "reason_references",
     ):
         if key in c:
             lines.append(f"| {key} | {c[key]['status']} | {c[key].get('note', '')} |")

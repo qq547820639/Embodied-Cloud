@@ -509,3 +509,69 @@ def test_pending_reason_gate_is_wired_into_the_summary() -> None:
     assert src.index("pending_reason_offenders(") < src.index('"checks": reproducible_checks(checks)'), (
         "对账发生在组装提交面之后 → 它的 FAIL 改不了 overall"
     )
+
+
+def test_dangling_reference_check_catches_all_three_kinds() -> None:
+    """纯函数层：三种失效引用都要点名，且"没引用任何东西"不能算通过。
+
+    动因是一条元事实：我在写这条判据之前"记得" k8s 档让人 `export EMBODIEDCLOUD_K8S_TESTS=1`，
+    而全仓根本没有这个名字（`grep` 零命中）——人（和我）就是会记错这类指针，
+    所以"可行动的原因"要核到引用的东西真的存在，而不只是含一个"缺"字。
+    """
+    validator = _load_validator()
+    catalog = {
+        "env": {"EMBODIEDCLOUD_PG_IMAGE", "EMBODIEDCLOUD_KIND_BIN"},
+        "make": {"test-pg", "control-image"},
+        "extra": {"postgres", "s3"},
+    }
+    texts = {
+        "tests/pg_server.py": 'return "缺驱动：pip install -e \".[postgres]\"；或镜像未缓存 EMBODIEDCLOUD_PG_IMAGE"',
+        "docs/OPERATIONS.md": "先 `make test-pg`；kind 二进制用 EMBODIEDCLOUD_KIND_BIN 指",
+    }
+    assert validator.dangling_reference_offenders(texts, catalog) == []
+    bad = dict(texts)
+    bad["docs/OPERATIONS.md"] = "先 `make test-pgg`；export EMBODIEDCLOUD_K8S_TESTS=1；pip install -e .[postgre]"
+    offenders = validator.dangling_reference_offenders(bad, catalog)
+    kinds = " ".join(offenders)
+    assert len(offenders) == 3, offenders
+    assert "make test-pgg" in kinds and "EMBODIEDCLOUD_K8S_TESTS" in kinds and ".[postgre]" in kinds, offenders
+    # 空目录 / 零引用都不能被读成"通过"
+    assert validator.dangling_reference_offenders(texts, {"env": set(), "make": set(), "extra": set()})
+    assert validator.dangling_reference_offenders({"x.md": "这里什么指针都没写"}, catalog)
+
+
+def test_the_repo_has_no_dangling_operational_pointers() -> None:
+    """真面：文档与档位前置文案里的 env / make 目标 / extra，全部要能在仓内找到出处。
+
+    目录来自代码本身（Settings 字段 + `env_prefix`、`os.environ` 读点名、app/edge_agent 里的字面量、
+    Makefile 目标、pyproject 的 optional extras），所以这条不依赖环境。
+    """
+    validator = _load_validator()
+    catalog = validator.reference_catalog()
+    for kind in ("env", "make", "extra"):
+        assert catalog[kind], f"目录的 {kind} 一侧为空：判据会恒真"
+    offenders = validator.dangling_reference_offenders(validator.pointer_bearing_texts(), catalog)
+    assert offenders == [], offenders
+    scanned = validator.pointer_bearing_texts()
+    cited = sum(1 for text in scanned.values() if "EMBODIEDCLOUD_" in text or "make " in text)
+    assert cited >= 5, f"只扫到 {cited} 份含操作指针的文本，覆盖面可疑"
+
+
+def test_reference_gate_is_wired_into_the_summary() -> None:
+    src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
+    assert "dangling_reference_offenders(" in src and '"reason_references"' in src
+    assert src.index("dangling_reference_offenders(") < src.index('"checks": reproducible_checks(checks)'), (
+        "对账发生在组装提交面之后 → 它的 FAIL 改不了 overall"
+    )
+
+def test_generated_reports_are_not_scanned_for_pointers() -> None:
+    """生成物不能当输入：报告会把上一轮的 FAIL 原因原样抄回，扫它就是让判据自我喂养、收敛不了。
+
+    这条真实发生过：门禁行里的占位写法被点名后，失效原因被写进 `docs/VALIDATION.md`，
+    下一次扫描又在报告里「发现」同一批假指针 —— 红一次不算错，但这样收敛不了。
+    """
+    validator = _load_validator()
+    scanned = validator.pointer_bearing_texts()
+    assert "docs/VALIDATION.md" not in scanned, "生成报告被扫了 ⇒ 上一条偏离会被自我复述喂养"
+    assert validator.GENERATED_DOCS, "排除表为空：排除逻辑没有事实依据"
+    assert "docs/OPERATIONS.md" in scanned and any(k.startswith("tests/") for k in scanned), scanned.keys()
