@@ -181,7 +181,14 @@ def test_destroy_terminates_streaming_and_releases_everything():
 
 
 def test_failed_stop_cleanup_is_retryable():
-    """runtime.stop 失败 → FAILED；再次 stop 可完成全部 cleanup（幂等 retry）。"""
+    """runtime.stop 失败 → 留在 STOPPING（不是 FAILED）；再次 stop 完成全部 cleanup。
+
+    N-63 改判：这条原先断"第一次尝试失败就写 FAILED"，钉的是 as-is 而不是应然。
+    ADR 0002 的修订（可重试的失败不得写成终态）同样适用于 STOP，而且终态还会自己漏卡：
+    `recover_stuck_gpu_allocations` 把"终态 workspace 的分配"当孤儿回收，写成 FAILED 等于
+    让那条回收路绕过 `_release_admitted` 把还有人吃的卡放掉。现在没达成目标就留在
+    STOPPING，由 operation 重试与 reconcile 收敛。
+    """
     provider = TrackingMockProvider()
     provider.fail_stop_times = 1
     orchestrator, wid, _ = _running_workspace_with_stream(provider=provider)
@@ -192,10 +199,13 @@ def test_failed_stop_cleanup_is_retryable():
 
     with Factory() as db:
         ws = db.get(Workspace, wid)
-        assert ws.status == WorkspaceStatus.FAILED.value
+        assert ws.status == WorkspaceStatus.STOPPING.value
         assert ws.error_message  # error persisted
+        # 关键：这一轮没把 GPU 放掉（改前它会被重试路径直接放掉）
+        assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == wid)) is not None
+        assert db.scalar(select(Gpu)).status != GpuStatus.AVAILABLE.value
 
-    # retry：第二次 stop 完成 cleanup
+    # retry：第二次 stop 先真把 runtime 停下，再完成 cleanup
     with Factory() as db:
         ws = db.get(Workspace, wid)
         orchestrator.stop(db, ws)

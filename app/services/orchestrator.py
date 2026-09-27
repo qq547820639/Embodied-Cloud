@@ -136,6 +136,14 @@ class WorkspaceOrchestrator:
         elif op.operation_type == OperationType.STOP.value:
             # §12：durable STOP —— 幂等（重复 stop 不重复结算/释放）
             self.stop(db, workspace)
+            if workspace.status != WorkspaceStatus.STOPPED.value:
+                # 这一轮没把 runtime 停下就抛给 worker，按 attempts 决定重试/失败（ADR 0002）。
+                # 不抛的话 STOP operation 记 SUCCEEDED，而卡还被那个活着的容器吃着 ——
+                # 退码与"目标达成"是两件事，这里只认后者。
+                raise RuntimeError(
+                    f"STOP attempt did not retire the runtime: "
+                    f"{workspace.error_message or workspace.status}"
+                )
         elif op.operation_type == OperationType.DESTROY.value:
             # §12：durable DESTROY —— 幂等 tombstone；控制面重启不丢清理
             self.destroy(db, workspace)
@@ -313,31 +321,86 @@ class WorkspaceOrchestrator:
     # stop / destroy（同步 API 语义）
     # ------------------------------------------------------------------
     def stop(self, db: Session, workspace: Workspace) -> Workspace:
-        """STOP 生命周期：streaming.stop → runtime.stop → billing settle → GPU release。
+        """STOP 生命周期：streaming.stop → runtime.stop →（确认 runtime 已不在）→ settle → release。
 
-        全部步骤幂等；中途失败置 FAILED，重试（再次 stop）可继续完成 cleanup。
+        全部步骤幂等；重试（再次 stop）会**重新尝试**停止 runtime，而不是只做结算与释放
+        （改前形状：FAILED 直接进 `_finalize_stop`，容器还在吃卡却被判 STOPPED 且 GPU 已释放
+        —— 与 `destroy()` 里"provider 清理失败不得释放 GPU / 置 DELETED"守的是同一条不变量）。
+
+        没达成目标时状态**留在 STOPPING**，不写 FAILED：ADR 0002 的修订（"可重试的失败不得
+        写成终态"）同样适用于 STOP，而且 `recover_stuck_gpu_allocations` 只保护非终态
+        {PROVISIONING, RUNNING, STOPPING}——写成 FAILED 会被它按"终态孤儿"把卡放掉，
+        等于绕开本函数的全部准入判据。收敛交给 operation 重试与 reconcile 那条 level-triggered 路。
         """
-        if workspace.status in {WorkspaceStatus.STOPPED.value, WorkspaceStatus.FAILED.value}:
-            # 幂等收尾：若上次 stop 失败残留未完成清理（流会话/端口/GPU），补做
+        if workspace.status == WorkspaceStatus.STOPPED.value:
+            # 幂等补做：STOPPED 只可能来自一次成功的 release（release 失败会留在 STOPPING），
+            # 所以这一档不需要再叫 provider，只把结算/释放按幂等补做一遍。
             self._finalize_stop(db, workspace)
             db.commit()
             db.refresh(workspace)
             return workspace
-        workspace.status = WorkspaceStatus.STOPPING.value
-        db.commit()
-        try:
-            # 1) 先终结流媒体会话并释放流端口
-            self.streaming.terminate_for_workspace(db, workspace.id)
-            # 2) runtime stop
-            self.provider.stop(workspace)
-            # 3) 结算 + 释放 GPU
-            self._finalize_stop(db, workspace)
-        except Exception as exc:
-            workspace.status = WorkspaceStatus.FAILED.value
-            workspace.error_message = str(exc)
+        if workspace.status != WorkspaceStatus.STOPPING.value:
+            workspace.status = WorkspaceStatus.STOPPING.value
+            db.commit()
+        error = self._stop_cleanup(db, workspace)
+        if error is not None:
+            workspace.error_message = error
         db.commit()
         db.refresh(workspace)
         return workspace
+
+    def _stop_cleanup(self, db: Session, workspace: Workspace) -> str | None:
+        """跑完 STOP 的清理序列。返回 None = 目标达成；返回字符串 = 没达成的原因。
+
+        ADR 0002：provider/scheduler 边界的任意异常都转成"原因字符串"，不得泄漏给调用方
+        （`stop()` 的调用面是 durable worker 与配额 monitor，不是 HTTP 请求处理器）。
+        释放 GPU 只发生在 `_release_admitted` 认账之后 —— 命令的成败不替 runtime 事实背书。
+        """
+        stop_error: str | None = None
+        try:
+            # 1) 先终结流媒体会话并释放流端口
+            self.streaming.terminate_for_workspace(db, workspace.id)
+            # 2) runtime stop（重试也真叫一次：引擎对已停/已无容器回 304/204，不是错误）
+            self.provider.stop(workspace)
+            # 3) 释放 GPU 的准入：以 provider 观测到的 runtime 事实为准
+            admitted = self._release_admitted(workspace, command_succeeded=True)
+        except Exception as exc:
+            stop_error = str(exc)
+            # 命令报错也不等于 runtime 还在：provider 亲口说没了就照样收尾
+            admitted = self._release_admitted(workspace, command_succeeded=False)
+        if not admitted:
+            return stop_error or "runtime still reported ALIVE after stop"
+        if stop_error is not None:
+            logger.warning(
+                "workspace %s stop command errored (%s) but runtime is confirmed gone",
+                workspace.id[:8], stop_error,
+            )
+        # 4) 结算 + 释放 GPU + STOPPED
+        try:
+            self._finalize_stop(db, workspace)
+        except Exception as exc:  # scheduler.release 失败：留在 STOPPING，由 reconcile/重试补做
+            return f"stop finalize failed: {exc}"
+        return None
+
+    def _release_admitted(self, workspace: Workspace, *, command_succeeded: bool) -> bool:
+        """释放 GPU 的唯一准入判据：以 provider 观测到的 runtime 事实为准，而不是调用返回码。
+
+        - 清理命令成功：只要 provider 不再自述 ALIVE 就放行。UNKNOWN 是"没有可观测
+          runtime"那一档（mock，见 providers/base.py:12-15 与 providers/mock.py:72-74），
+          演示路径必须停得下来。
+        - 清理命令失败：只认 MISSING —— provider 亲口说 runtime 不在了（K8s 对已删
+          Deployment 的 404 走这一极，providers/k8s.py:328-329 会抛错），此时不放行就是
+          把 GPU 永久钉死在一张已经没有使用者的卡上。
+        其余一律不释放：把 GPU 从还在吃卡的容器手里放掉就是「一卡双跑」。
+
+        取径见本轮登记行（Kubernetes finalizer 的"在用资源不得判为已删除"＋
+        moby Engine API 把 304/404 都算停止成功，即"停没停"由引擎自述）。
+        `command_succeeded` 语义对 destroy 同样成立，供 provision 失败那一路复用。
+        """
+        state = self.provider.reconcile(workspace)
+        if command_succeeded:
+            return state != RuntimeState.ALIVE
+        return state == RuntimeState.MISSING
 
     def _settle_run(self, db: Session, workspace: Workspace) -> int:
         """结算当前运行段并累计秒数（幂等）；返回结算的 GPU 秒数。
@@ -442,6 +505,8 @@ class WorkspaceOrchestrator:
         - DB RUNNING + runtime MISSING → 结算确认的 usage → 释放 GPU → FAILED
         - DB PROVISIONING + runtime ALIVE → RUNNING（adopt）
         - DB PROVISIONING + runtime MISSING → 无 active operation 则重新入队（retry）
+        - DB STOPPING + runtime ALIVE → 再试停止；确认不在才结算 → 释放 → STOPPED，
+          仍未确认则保持 STOPPING 等下一轮（不释放 GPU）
         - DB STOPPING + runtime 停止/缺失 → 结算 → 释放 → STOPPED
         - QUEUED/CREATED + runtime MISSING → 重新入队 PROVISION
         - UNKNOWN（mock 无真实 runtime）→ 不动，避免误杀
@@ -514,14 +579,21 @@ class WorkspaceOrchestrator:
                             stats["requeued"] += 1
                 elif w.status == WorkspaceStatus.STOPPING.value:
                     if state == RuntimeState.ALIVE:
-                        # runtime 仍存活：再次尝试停止
-                        with contextlib.suppress(Exception):
-                            self.provider.stop(w)
-                        self._finalize_stop(db, w)
+                        # runtime 仍存活：再走一轮完整清理（含 provider.stop）。改前是
+                        # `contextlib.suppress` 吞掉停止失败后无条件 `_finalize_stop` ——
+                        # 与 stop() 的重试路径是同一个缺陷的第二处；两路现在共用
+                        # `_stop_cleanup`，准入判据只有 `_release_admitted` 一份。
+                        error = self._stop_cleanup(db, w)
+                        if error is None:
+                            stats["stopped"] += 1
+                        else:
+                            # 仍未确认：保持 STOPPING（recover_stuck_gpu_allocations 因此
+                            # 不会把这张还有人吃的卡放掉），下一轮接着试
+                            logger.warning("reconcile: stop incomplete for %s: %s", w.id[:8], error)
                     elif state == RuntimeState.MISSING:
                         # runtime 已停（或从未起来）：结算 + 释放
                         self._finalize_stop(db, w)
-                    stats["stopped"] += 1
+                        stats["stopped"] += 1
                 elif w.status in {
                     WorkspaceStatus.QUEUED.value,
                     WorkspaceStatus.CREATED.value,
@@ -607,13 +679,24 @@ class WorkspaceOrchestrator:
                     for lab in labs
                 )
                 if projected < 0 or quota_exceeded:
-                    self.stop(db, w)  # 幂等：streaming→runtime→settle→release→STOPPED
-                    w.error_message = (
+                    reason = (
                         "quota monitor: credits exhausted" if projected < 0
                         else "quota monitor: course quota reached"
                     )
-                    db.commit()
-                    stats["stopped"] += 1
+                    self.stop(db, w)  # 幂等：streaming→runtime→确认不在→settle→release→STOPPED
+                    if w.status == WorkspaceStatus.STOPPED.value:
+                        w.error_message = reason
+                        db.commit()
+                        stats["stopped"] += 1
+                    else:
+                        # 没达成就别报"已停"：这一轮释放准入没放行（runtime 仍被 provider
+                        # 自述存活，或 release 失败）。error_message 留 stop() 写下的原因——
+                        # 它比配额原因更该被读到；计数不 +1，workspace 仍在Running集合里
+                        # 说明它还会被下一轮 monitor 再试。
+                        logger.warning(
+                            "quota monitor: stop not admitted for %s (%s): %s",
+                            w.id[:8], reason, w.error_message,
+                        )
         return stats
 
     def crash_recovery(self) -> dict[str, int]:

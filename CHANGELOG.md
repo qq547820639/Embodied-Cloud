@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 665 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 678 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -501,7 +501,147 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 同轮把 N-61（要不要换成 hatchling 后端）用实测结案，不 parked。
 - 计数面 659→665，门禁 G0.71。
 
+### 释放 GPU 之前先问一句"runtime 真的没了"（N-63）
+- 缺陷：`orchestrator.stop()` 把 FAILED 也当作"幂等收尾"入口（改前 :320 那个
+  `{STOPPED, FAILED}` 集合），直接进 `_finalize_stop` —— 结算 + `scheduler.release` +
+  置 STOPPED，**一次都不叫 `provider.stop`**。于是 `provider.stop` 失败留下的那个还在吃
+  `--gpus device=N` 的容器，重试之后被判已停、卡被放回池子给下一次分配；而
+  `reconcile_all` 按 status 跳过 STOPPED/FAILED（现 :519），这孤儿此后再没人看一眼。
+  同一条不变量其实早就写在 `destroy()` 里（"provider 清理失败 → 不得释放 GPU / 置
+  DELETED：否则一卡双跑"）；`reconcile_all` 的 STOPPING+ALIVE 分支是第二处漏点
+  （`contextlib.suppress` 吞掉停止失败后照样 finalize）。配额 monitor 走 `self.stop()`
+  （现 :682），一并被这道闸门管住。
+- 现成用例为什么没抓到：`tests/test_streaming_lifecycle.py::test_failed_stop_cleanup_is_retryable`
+  断的是 retry 后 `STOPPED` ＋ 卡 `AVAILABLE`，**从没问过 provider 侧那个 runtime 还在不在**——
+  观测缺口正好盖住缺陷。它 docstring 里"完成全部 cleanup"才是本轮落地的语义。
+- 新增 `_release_admitted(workspace, *, command_succeeded)`（:385，一条判决只留一份实现）：
+  命令成功 ⇒ 只要 provider 不再自述 ALIVE 就放行；命令失败 ⇒ 只认 MISSING。整条清理序列收在
+  `_stop_cleanup`（:352），`stop()`（:323）与 `reconcile_all`（:586）两个入口都走它——判据在
+  清理函数里被问两次（成功档／失败档），不是两份实现。
+- 没达成目标时对外说什么（第二处设计修正）：状态**留在 STOPPING** 而不是写 FAILED，
+  `error_message` 记原因；`execute_operation` 的 STOP 档（:136-146）在结果不是 STOPPED 时
+  抛错，交给 worker 的 attempts 重试。理由是 `recover_stuck_gpu_allocations`
+  （`app/services/scheduler.py:257-267`）只保护非终态 {PROVISIONING, RUNNING, STOPPING}：
+  把“这一轮没停下来”写成 FAILED，会被它当终态孤儿把卡放掉，等于绕过本判据重演一卡双跑；
+  而 STOP operation 若不抛错就记 SUCCEEDED，台账在替没做的事背书（ADR 0002 的“可重试的
+  失败不得写成终态”由此从 provision 扩到 stop）。连带改判一条常驻用例：
+  `tests/test_streaming_lifecycle.py::test_failed_stop_cleanup_is_retryable` 原先断第一次
+  尝试失败就写 FAILED（钉 as-is），现断 STOPPING ＋ error_message ＋ 分配行仍在、卡未
+  AVAILABLE，改判理由写进它自己的 docstring。
+- 配额 monitor 同一条链上受益：它经 `self.stop()`（:682）触发停止，原先无条件
+  `stats["stopped"] += 1` 并把原因覆盖成“credits exhausted”——放行没达成时报的是“我停下了”。
+  现在只有真到 STOPPED 才计数与写配额原因，否则留 stop() 写下的阻塞原因并记 warning。
+- 两处自我更正（都在本轮内、提交前发现）：① 第一版把 `_finalize_stop` 挪出了 try，于是
+  `scheduler.release` 的异常会穿出 `stop()` 抛给调用方——ADR 0002 明确禁止 provider/scheduler
+  边界异常外泄；现在 release 失败被收成原因字符串、状态留 STOPPING，并有常驻判据钉住
+  “这一句不许抛 ＋ 钱已入账而卡仍占着 ＋ 换回可用 scheduler 后重试收敛”。② 第一版把没达成
+  目标写成 FAILED，正落进上面那条回收器的盲区；改成 STOPPING 是读了 `scheduler.py:257-267`
+  之后翻的。
+- 择引（本轮调研真的改了设计）：Kubernetes finalizer 语义 —— `kubernetes.io/pv-protection`
+  原文"in use ⇒ enters a Terminating status, but the controller can't delete it because the
+  finalizer exists. When the Pod stops using the PersistentVolume, Kubernetes clears the
+  finalizer, and the controller deletes the volume"，且删除请求只回 `202 Accepted`
+  （k/website `content/en/docs/concepts/overview/working-with-objects/finalizers.md`，
+  本机 curl 取到 5165 字节后亲读；kubernetes.io 页面本身在本机 fetch 失败两次，未引页面）。
+  moby `api/swagger.yaml:8984-8995` 把 `POST /containers/{id}/stop` 的 `204 no error`／
+  `304 container already stopped`／`404 no such container` 都不算失败（475309 字节，本机取回后读到位）。
+  **moby 那一手改了我第一版设计**：只按"命令成功"放行的话，K8s 对已删 Deployment 抛的 404
+  （`providers/k8s.py:328-329`）会把一张没人用的卡永久钉住 ⇒ 补上"命令失败但 provider 亲口
+  说没了 ⇒ 仍放行"这一极。两者都是借语义，不引依赖。
+- 判据：`tests/test_stop_release_admission.py`（13 支）。provider 侧的 runtime 事实由替身
+  自己声明（mock 只有 UNKNOWN，证不了“还活着”）：重试必须真的再叫一次停止；命令成功但
+  仍在 ⇒ 不结算、不释放、不判 STOPPED；命令失败但 provider 报缺 ⇒ 必须释放（另一极，防把
+  没人用的卡永久钉死）；reconcile 的谎报停止；`scheduler.release` 失败不外泄且可恢复；
+  runtime 还活着时 STOP operation 必须 RETRYING 而不是 SUCCEEDED；透支触发的 monitor 不得
+  把没放行的停止计成已停；三档行为的共同不变量（“卡 AVAILABLE”与“provider 说活着”不得
+  同时成立）；判据恰好一份实现且两个入口都经它（按 AST 读链：`_release_admitted` 定义 1、
+  `_stop_cleanup` 定义 1、判据被消费 2 次、`stop`／`reconcile_all` 各消费 `_stop_cleanup` 1 次；
+  注释里提名字不算），反向对照按锚点唯一性逐条落地（把 reconcile 的收尾换回直接 finalize
+  ⇒ `reconcile_consumers` 归 0）。
+- 改前复算（拿 HEAD 那份 `orchestrator.py` 就地换面跑同一批尺子，cp＋`git show`，跑完按
+  sha 还原，两端 `d79baefa…` 一致）：`FFFF.FFFFF.F...F...` —— 19 支里 11 支开火、8 支照绿；
+  照绿的正是合规档（reconcile 正常收敛、参数化 `stops`／`error_then_gone`、streaming 的正常
+  stop／destroy／幂等三支），开火的含被改判的那条 as-is 用例、monitor 计数那支与“判据没接线”
+  两支。本轮内另两次同形状复算：`FFFF.FFF.F...F...`（10 开火，sha `62998cdd…`）与最早的
+  `FFFF.FF.F.`（7 开火，sha `9bfdd83e…`）——尺子加长时开火集合单调变大，缺陷读数一致。
+  邻面回归全绿
+  （streaming_lifecycle／durable_ops／worker／gpu_single_authority／billing_policy／credit_holds），
+  `make lint` 与 `make typecheck` rc=0。
+- 诚实的边界三条：① "命令成功"那一档 UNKNOWN 是**放行**的——mock/演示路径没有可观测
+  runtime，不放行就没人能停得下来；残留风险是"停止命令成功之后 docker 二进制才消失"这种
+  罕见形状，此时按 UNKNOWN 放行。② 只修了 stop/reconcile 两路；provision 失败那一路是
+  同一形状的第二实例（`_execute_provision` 在 :249 用 `contextlib.suppress` 吞掉补偿
+  `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
+  "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
+  本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
+- 计数面 665→678，门禁 G0.72。
+
 ### 本轮新增的待收口项
+- `N-64`：**`accumulated_seconds` 的累加在账本的幂等保护之外**。`orchestrator.py:418`
+  无条件 `+=`，而 `ledger.record` 靠 `idempotency_key`（`ledger.py:42-44`、键在 :110）对同一
+  运行段去重 —— 重复结算只入账一次，计数器却每次都加。可达形状已读出：`_finalize_stop`
+  里 `scheduler.release`（:417）无 try 包裹，抛错则 `STOPPED` 置位不成、`started_at` 也没清，
+  下一路重试再进 `_settle_run` ⇒ 账本留第一次金额、累计值变两次之和。读者
+  `app/routers/usage.py:36,40`（展示＋估价）、`app/services/billing.py:358`
+  （`course_usage_seconds` 是配额门禁！）、`app/static/app.js:425,703`。⇒ 扣一次、
+  展示与配额算两次。
+- `N-65`：**`available_credits` 把个人与组织余额直接相加，而账本行同时带两个归属**。
+  `ledger.py:104-105`（usage）与 `app/routers/usage.py:72-73`（recharge）在同一行写
+  `user_id` 与 `organization_id`；`balance()` 只按 user_id 过滤（:68-74）、
+  `organization_balance()` 只按 org 过滤（:76-82），`billing.py:185-188` 直接相加 ⇒ 两集合
+  按构造相交：正数（充值）算两遍 ⇒ 可用额虚高、预授权门禁被放宽；负数（usage）扣两遍 ⇒
+  虚低。同一段加法还有两份副本（`billing.py:220-223`、`orchestrator.py:667-672` 的 monitor
+  投影余额），且 `models.py:397-417` 的 `BillingAccount(subject_type, subject_id)` 本来就是
+  "谁付钱"的单一入口 —— 账本行没有 account_id，所以这道闸门没用上它。
+- `N-66`：**hold 的幂等键按 workspace 全局唯一 ⇒ 二次启动永远拿不到 pending hold**。
+  `billing.py:232` 用 `f"hold:{workspace_id}"`，落在 `models.py:447` 的全局 unique 列上；
+  :208-215 的去重只看 `status == PENDING`，而 :246-253 的 IntegrityError 兜底**只按 key 查、
+  不带状态过滤** ⇒ capture 之后的再次启动 INSERT 撞键、兜底返回那条已 CAPTURED 的旧行，
+  本轮没有任何 pending hold 圈住额度，而 `orchestrator.py:190` 把返回值丢掉、provision 照跑。
+  部分唯一索引 `uq_holds_pending_per_workspace`（`models.py:459-465`）本是为"同 workspace 只圈
+  一次"设计的，全局键把"轮内去重"与"跨轮复用"压成了同一张面。
+- `N-67`：**provision 失败那一路是“释放先于确认”的第二实例**（N-63 只修了 stop/reconcile）。
+  `_execute_provision` 在 :249 用 `contextlib.suppress(Exception)` 吞掉补偿
+  `provider.destroy(workspace)` 的异常并继续 raise，随后 `_fail` 在 :304 无条件
+  `scheduler.release` 并在 :315-317 清掉 GPU 字段 ⇒ 容器若没被销毁成功，卡照样回池。
+  与 N-63 同一条判据可复用（`_release_admitted` 的 `command_succeeded` 参数就是为此留出），
+  但要先量清“destroy 失败该由谁认账、`_fail` 的三个调用点各自的 runtime 形状”，
+  不当顺手改。注意它会把 `tests/test_stop_release_admission.py` 里 `admitted_uses == 2`
+  那一格顶到 3——接同一条判据时必须同步改判那条常驻断言，不能让它悄悄变宽。
+- `N-68`：**reconcile 的节点不一致分支把卡放了，却没停那个 pod**（第三实例）。
+  `orchestrator.py:547-557`：`node_mismatch` 为真时 `_settle_running_segment` ＋
+  `self.scheduler.release(db, w.id)`（:550）＋ 写 FAILED（:551）＋ `started_at=None`，
+  全程没叫 `provider.stop`；而 `actual_node` 恰恰来自 :534 的 `provider.inspect(w)`——
+  观测本身说明那个 pod 活着。之后 :519 按 status 跳过 STOPPED/FAILED，再没人管它。
+  严重度我按事实分两档写：如果那个 pod 用的不是本机预留的那张卡，这里主要是“弃养一个
+  活着的 runtime”；如果它落在别的 workspace 预留的节点上，那张卡此刻就在双跑，而这段代码
+  对此毫无动作。常驻对照 :558 的 `elif state == RuntimeState.ALIVE: kept` 说明 ALIVE 是被
+  区分得出来的，不是读不到。**现有一条用例在反向钉它**：
+  `tests/test_k8s_node_truth.py:204-231`（夹具 :200-201 的 `reconcile` 明写
+  `return RuntimeState.ALIVE`，而 :230-231 断分配行为 None 且卡 AVAILABLE）——  它今天绿，正是因为“pod 还活着”被当成了“可以放卡”。修它必须连这条一起改判。
+- `N-69`：**warm pool 认领失败那一路把销毁失败只记日志，然后照样放卡并写成终态**（第四实例，
+  且三重不可见）。`app/services/warmpool.py:346-351`：`provider.destroy` 抛错被 :348-349
+  收成 `logger.error` 后**继续往下**执行 `scheduler.release`；:352-353 对 release 的失败同样
+  只 rollback 继续；随后 :354 写 `warm_pool_state = DRAINING`、:359 清 `container_name`、
+  :363 写 FAILED。三重不可见：① `_cleanup_failed` 只挑 `warm_pool_state == FAILED`
+  （`warmpool.py:231-236`，条件在 :234），DRAINING 这一行永远不会被补发 DESTROY；② `reconcile_all` :519 跳过 FAILED；
+  ③ `recover_stuck_gpu_allocations`（`scheduler.py:274-280`）只保护非终态。加上 :359 清了
+  名字，`DockerProvider.stop`（`providers/docker.py:277`）此后对它彻底空转。生产入口：
+  `app/routers/workspaces.py:55` `warm_pool.claim(...)`。常驻侧
+  `tests/test_warmpool_claim.py:403` 只断 `provider.destroy_calls >= 1`（数调用不断结果），
+  夹具的 `destroy` 根本不会失败，也报不出 runtime 状态。
+- `N-70`：**`DockerProvider.reconcile` 用 DB 列推断“容器不存在”，而同一个 provider 的
+  destroy 会按命名约定把名字推出来** ⇒ 假缺席。`providers/docker.py:435-436`
+  `if not workspace.container_name: return RuntimeState.MISSING`，而 `docker.py:285`
+  `container_name = workspace.container_name or f"ec-{workspace.id[:12]}"`（注释自己写了
+  “保证补偿清理可达”），`stop`（:277）却只在有名字时才动作。后果直接压在本轮的判据上：
+  `_release_admitted` 消费 `reconcile`，遇到“容器已创建但名字还没落库”（provision 在
+  `orchestrator.py:264` 才写 `container_name`，晚于 readiness 闸门）会读成 MISSING 并放行
+  释放。同档还有 :437-440 的 `except Exception: return UNKNOWN`——“问不到”在成功档被
+  当成“说没了”（`orchestrator.py:401-402`），k8s 侧 `providers/k8s.py:539-542` 对任意非 404
+  API 错误同样回 UNKNOWN。修法要先定“名字的唯一推导位”（stop/destroy/reconcile 三处
+  现在两套逻辑），再谈把 UNKNOWN 从放行档里摘出去——后者会让 mock/演示档全停不下来
+  （`providers/mock.py:72-74` 只会回 UNKNOWN），需要新的档位区分，不能顺手改。
 - `N-61`：~~要不要把构建后端从 setuptools 换成 hatchling`**【N-62 结案：不换】** 本机在 `git worktree` 副本上真跑过：hatchling 1.32.4 两建 wheel 同为 `629d6ff7e24f`（它自己就钉 tar 成员 mtime/uid/gid 与 gzip mtime，读安装到本机 venv 的源文件核对过）；与 setuptools 的 wheel 差异只有三处——成员 55 对 56（少 `dist-info/top_level.txt`，全仓 grep 零读者）、`Requires-Dist` 只差 PEP 508 的引号风格（22 条语义同集）、`WHEEL` 的 Generator 行。净收益只是删掉 `scripts/sdist_normalize.py`（约 100 行，6 支判据与两处消费位都已落门禁），代价是 `uv.lock` 重解析、`dev` extra 对齐、wheel 侧 `recomputable` 基线重钉与所有引用产物 sha 的文档面重扫⇒ 不抵。再议的触发条件：自研归一哪天失效，或后端侧出现**别的**产品收益。
 ~~`N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
   `SOURCE_DATE_EPOCH`，逐字节定位见上一节）。wheel 已可复算；sdist 那一半要么给 `dist/checksums.txt`
