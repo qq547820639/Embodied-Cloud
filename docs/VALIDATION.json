@@ -1,15 +1,17 @@
 {
   "version": "0.7.0",
-  "overall": "PASS_WITH_PHYSICAL_PENDING",
+  "overall": "FAIL",
   "checks": {
     "test_collected": {
       "status": "PASS",
       "count": 641
     },
     "test_run": {
-      "status": "PASS",
-      "failed": 0,
-      "failed_names": []
+      "status": "FAIL",
+      "failed": 1,
+      "failed_names": [
+        "tests.test_hang_probe::test_hang_later_mode_measures_a_finite_cost_per_tier"
+      ]
     },
     "lint": {
       "status": "PASS"
@@ -38,8 +40,8 @@
       "note": "需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行"
     },
     "docs_test_counts": {
-      "status": "PASS",
-      "note": "CHANGELOG/CURRENT_STATE 计数面与本报告一致"
+      "status": "FAIL",
+      "note": "CHANGELOG 当前版本节: 文档写 (641, 0)，实测 (641, 1); docs/CURRENT_STATE.md: 文档写 (641, 0)，实测 (641, 1)"
     },
     "docs_row_order": {
       "status": "PASS",

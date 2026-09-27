@@ -112,6 +112,22 @@ def _fake_docker_dir(tmp: Path, mode: str) -> tuple[Path, list[str]]:
     return bin_dir, ["image", "pull", "build", "inspect", "ls"]
 
 
+def _fake_round_trip(fake_dir: Path, env: dict[str, str]) -> float:
+    """量一次"替身自己答一句话要多久"（取三次里的最大值）。
+
+    为什么需要：上一轮的超时上限是写死的秒数，高负载机器上替身自己都来不及在 2s 内答话，
+    于是"挂起取证"测到了机器负载而不是代码。上限必须由这个数算出来。
+    """
+    worst = 0.0
+    for _ in range(3):
+        started = time.monotonic()
+        subprocess.run(  # noqa: S603 受控常量参数（替身脚本本身）
+            [str(fake_dir / "docker"), "version"], env=env, text=True, capture_output=True, timeout=30
+        )
+        worst = max(worst, time.monotonic() - started)
+    return round(worst, 3)
+
+
 def measure(mode: str, cap_seconds: float) -> dict:
     """逐档在子进程里跑一次 gate_reason()，记录原因与耗时（互不污染环境与进程）。"""
     rows: dict[str, dict] = {}
@@ -140,8 +156,18 @@ def measure(mode: str, cap_seconds: float) -> dict:
                     f"PATH 替身未生效（解析到 {found!r}，期望在 {fake_dir} 下）："
                     "这台子必须在自己的替签下运行，否则读数描述的是环境而不是代码"
                 )
+        latency = 0.0
+        if fake_dir is not None:
+            latency = _fake_round_trip(fake_dir, env)
+            # 6 倍往返：一次 gate_reason() 通常要跑 2–5 次探测，留够余量又不无限放大
+            effective = min(25.0, max(cap_seconds, round(6 * latency, 2)))
+        else:
+            effective = cap_seconds
+        injected["fake_round_trip_seconds"] = latency
+        injected["effective_timeout_seconds"] = effective
+        injected["bound_seconds"] = round(3 * effective + 5, 2)
         for tier, (module, sentinel) in TIERS.items():
-            code = CHILD.format(cap=cap_seconds, module=module)
+            code = CHILD.format(cap=effective, module=module)
             started = time.monotonic()
             proc = subprocess.run(  # noqa: S603 受控常量参数（本机解释器 + 模板代码）
                 [sys.executable, "-c", code], cwd=ROOT, env=env, text=True, capture_output=True,
@@ -156,6 +182,7 @@ def measure(mode: str, cap_seconds: float) -> dict:
                 except ValueError:
                     reason = None
             rows[tier] = {
+                "bound_s": injected["bound_seconds"],
                 "offenders": [],
                 "reason": reason or "",
                 "stderr": proc.stderr[-200:] if reason is None else "",
@@ -227,9 +254,18 @@ def main() -> int:
         print(json.dumps({"reports": reports, "offenders": offenders}, ensure_ascii=False, indent=2))
     else:
         for mode, report in reports.items():
-            print(f"== {mode}（单次探测超时上限 {args.timeout:g}s）")
+            head = reports[mode]["injected"]
+            print(
+                f"== {mode}（请求上限 {args.timeout:g}s；替身往返 "
+                f"{head.get('fake_round_trip_seconds', 0):g}s ⇒ 有效上限 "
+                f"{head.get('effective_timeout_seconds', args.timeout):g}s）"
+            )
             for tier, row in report["tiers"].items():
-                print(f"   {tier:18s} {row['elapsed_s']:6.2f}s  {row['reason'] or '(没有原因)'}")
+                bound = row.get("bound_s", "?")
+                print(
+                    f"   {tier:18s} {row['elapsed_s']:6.2f}s（上限 {bound}s）  "
+                    f"{row['reason'] or '(没有原因)'}"
+                )
             if offenders[mode]:
                 print("   判据未过：", *offenders[mode], sep="\n     - ")
     total = [o for lst in offenders.values() for o in lst]

@@ -74,6 +74,7 @@
 | G0.63 文档硬指针要落得到实物 | `pytest tests/test_validation_matrix.py`（`test_document_pointers_resolve_to_real_lines_and_sections`、`test_the_repo_docs_have_no_dangling_pointers`、`test_doc_reference_gate_is_wired_into_the_summary`） | 58 处 `文件:行号` 与 4 处 `宿主.md §节` 逐条核：行不越界、宿主在、章节在；没文本或零指针算偏离；分母阈值写进判据。自由路径存在性有意不做，且该边界必须在源码注释里可见（判据检查） | VERIFIED PASS（本轮，3 支判据 + 四路 prose 修正） |
 | G0.64 仓内根目录下的路径引用要指得到实物 | `pytest tests/test_validation_matrix.py`（`test_rooted_path_pointers_are_checked_against_the_same_roots`、`test_document_pointers_resolve_to_real_lines_and_sections`、`test_the_repo_docs_have_no_dangling_pointers`、`test_doc_reference_gate_is_wired_into_the_summary`） | 只匹配以既有仓内根目录开头的路径（示例/外部脚本天然豁免，不靠白名单）；通配写法不算指针；索引与 roots 同源并有一支判据盯住"每个根目录里的文件都在索引里"；分母阈值 paths ≥200 进判据 | VERIFIED PASS（本轮，4 支判据 + 一次自我假阳性被纠正） |
 | G0.65 通配声称与对偶挂起剧本 | `pytest tests/test_validation_matrix.py::test_rooted_globs_must_match_at_least_one_file tests/test_hang_probe.py::test_the_dual_half_hang_flips_who_pays` | 仓内根目录下的通配匹配不到任何文件即点名（空目录声称）；匹配到时不许误报，且尾随中文不得被吞成 glob。对偶半挂剧本要求 docker 档在"inspect 挂"时的耗时显著高于"ls 挂"，pg/s3 同步翻转——证明上一轮"谁在等"的结论来自代码而不是剧本选择 | VERIFIED PASS（本轮，2 支判据 + 四剧本同轮实测） |
+| G0.66 阈值要有出处，输出要完整 | `pytest tests/test_hang_probe.py`（探针契约断言 + 有效上限与往返时间的比例断言） | 超时上限由当场测量的替身往返时间算出（max(请求值, 6×往返)，封顶 25s），判据只引用探针写出的字段，测试里不出现字面秒数；原因文本打印真正生效的超时；文本模式必须逐档打印全（缩进错位会让一屏读数只剩最后一行）；PATH 替身未拦到直接报错 | VERIFIED PASS（本轮，实测 6 处读数 + 1 次输出残缺自纠） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

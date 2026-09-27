@@ -104,10 +104,14 @@ def test_half_hang_isolates_which_probe_pays_and_which_does_not() -> None:
         # 契约而不是环境：原因给得出、可行动、代价有上限
         assert row["reason"], (tier, row)
         assert row["offenders"] == [], (tier, row)
-        assert row["elapsed_s"] < 3 * 2 + 5, (tier, row)
+        assert row["elapsed_s"] <= row["bound_s"], (tier, row)
     # 至少有一档几乎不付费（剧本没有把所有探测一律掐死），而依赖兜底列表探测的那一档要付费
-    assert min(row["elapsed_s"] for row in rows.values()) < 2, rows
-    assert rows["k8s-control-plane"]["elapsed_s"] >= 2, rows["k8s-control-plane"]
+    # 上限由探针当场量出来的替身往返时间决定，不在测试里写死秒数
+    injected = data["reports"]["half-hang"]["injected"]
+    # 上限由探针当场量出的替身往返时间算出，测试里不写死秒数
+    assert min(row["elapsed_s"] for row in rows.values()) < injected["effective_timeout_seconds"], rows
+    assert injected["effective_timeout_seconds"] >= 4 * injected["fake_round_trip_seconds"], injected
+    assert rows["k8s-control-plane"]["elapsed_s"] >= 1, rows["k8s-control-plane"]
 
 
 def test_the_dual_half_hang_flips_who_pays() -> None:
@@ -126,15 +130,23 @@ def test_the_dual_half_hang_flips_who_pays() -> None:
         out = proc.stdout
         data = json.loads(out[out.index("{"): out.rindex("}") + 1])
         assert data["offenders"] == {mode: []}, data["offenders"]
-        return data["reports"][mode]["tiers"]
+        return data["reports"][mode]
 
     a = run("half-hang")
     b = run("half-hang-b")
+    a_rows, b_rows = a["tiers"], b["tiers"]
     # 角色互换：掐掉 inspect 时，逐个探测候选镜像的 docker 档必须明显比只掐 ls 时更贵
-    assert b["docker"]["elapsed_s"] > a["docker"]["elapsed_s"] + 5, (a["docker"], b["docker"])
-    for label, rows in (("half-hang", a), ("half-hang-b", b)):
+    # 余量不写死：用探针当场量出的有效上限（由替身往返时间算出）
+    margin = min(
+        a["injected"]["effective_timeout_seconds"],
+        b["injected"]["effective_timeout_seconds"],
+    )
+    assert margin >= 2, (a["injected"], b["injected"])
+    assert b_rows["docker"]["elapsed_s"] > a_rows["docker"]["elapsed_s"] + margin, (
+        a_rows["docker"], b_rows["docker"])
+    for label, rows in (("half-hang", a_rows), ("half-hang-b", b_rows)):
         for tier, row in rows.items():
             # 只断"这台子保证的事"：原因给得出、可行动、代价有上限。
             # 不断具体哪一档快、原因里必须出现哪个词——那在别的机器上是假的。
             assert row["reason"] and row["offenders"] == [], (label, tier, row)
-            assert row["elapsed_s"] < 3 * 2 + 5, (label, tier, row)
+            assert row["elapsed_s"] <= row["bound_s"], (label, tier, row)

@@ -21,9 +21,12 @@ def docker_probe(
 ) -> subprocess.CompletedProcess[str]:
     try:
         return runner(*args, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        # 说"实际生效的超时"（exc.timeout），不是说调用方写下的默认值：
+        # 取证台会在子进程里把超时夹小，打印默认值会让原因文本与真实等待时间不一致
+        real = getattr(exc, "timeout", None) or timeout
         return subprocess.CompletedProcess(
-            ["docker", *args], returncode=124, stdout="", stderr=f"命令超时（{timeout}s）"
+            ["docker", *args], returncode=124, stdout="", stderr=f"命令超时（{real:g}s）"
         )
     except OSError as exc:  # 含 FileNotFoundError：CLI 在 PATH 上却起不来
         return subprocess.CompletedProcess(
