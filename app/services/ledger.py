@@ -4,6 +4,9 @@
 - 永不 UPDATE/DELETE 已入账 transaction；balance 始终 = SUM(amount)。
 - 每笔交易带唯一 idempotency_key；重放不会产生重复交易。
 - GPU 计费单位：实际运行秒数；同一 workspace 的同一运行段只结算一次。
+- `workspaces.accumulated_seconds` 与 balance 同理，是 SUM(gpu_seconds) 的投影
+  （`settled_gpu_seconds`），不由写侧累加维护：幂等键只保证同一运行段不重复扣款，
+  重复的那次 `+=` 照样会让计数器比账本大。
 """
 
 import uuid
@@ -87,6 +90,20 @@ class CreditLedgerService:
             select(func.coalesce(func.sum(CreditLedger.amount), 0)).where(
                 CreditLedger.organization_id == organization_id,
                 CreditLedger.user_id.is_(None),
+            )
+        )
+        return int(total or 0)
+
+    def settled_gpu_seconds(self, db: Session, workspace_id: str) -> int:
+        """该 workspace 已入账的 GPU 秒数：SUM(gpu_seconds)，只数 USAGE 行。
+
+        `workspaces.accumulated_seconds` 由它派生而不是累加（N-64）。本方法是账本
+        这一侧唯一的读数口径，`settle_workspace_run` 是唯一的 USAGE 写入方。
+        """
+        total = db.scalar(
+            select(func.coalesce(func.sum(CreditLedger.gpu_seconds), 0)).where(
+                CreditLedger.workspace_id == workspace_id,
+                CreditLedger.type == str(LedgerType.USAGE),
             )
         )
         return int(total or 0)

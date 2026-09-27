@@ -83,6 +83,7 @@
 | G0.72 释放 GPU 前有一道以 runtime 事实为准的闸门，停止命令的成败不得替它背书 | `pytest tests/test_stop_release_admission.py`（13 支） | provider 自述 ALIVE 时 GPU 不得回池、不得判 STOPPED、不得结算；命令报错但 provider 报 MISSING 时必须释放；重试路径必须重新叫 `provider.stop`；没达成目标时状态留在 STOPPING 且 STOP operation 不得记 SUCCEEDED，monitor 不得把没放行的停止计成已停；`scheduler.release` 的异常不得穿出 provider/scheduler 边界；判据在源码里恰好一份实现且两个入口都经同一清理函数（AST 面，配反向对照） | PASS（常驻） |
 | G0.73 个人池与组织池不相交，且这份加法全仓只写一遍 | `pytest tests/test_credit_purse_split.py`（8 支） | 成员行（user_id 与 organization_id 同时填）只进个人池：a1 充值后 available(a1)=1000、同组织 b1=0；无主组织行对成员可见（与既有 test_credit_holds 用例同数）；别人的 usage 不扣我；app/ 内把 balance/organization_balance 相加的表达式按 AST 恰好 1 处、`gross_credits` 定义 1 处，available_credits／reserve_launch／monitor 三处都改读它 | PASS（常驻） |
 | G0.74 hold 的幂等键按启动轮次发，兜底只收敛到 pending | `pytest tests/test_hold_round_key.py`（7 支） | capture 一轮后再次启动必须拿到新的 pending 且 available 减少一个 hold 额度；同轮重复调用收敛到同一行；每轮各留一行且键互异；`reserve_launch` 在四种真实序列下都不得返回终态行；键模板按 AST 判必须同时含 workspace 与轮次号（配两档合成对照） | PASS（常驻） |
+| G0.75 累计 GPU 秒是账本投影，写侧不再累加 | `pytest tests/test_settled_projection.py`（8 支） | 同一运行段重放必须只留一行 USAGE 且该列==账本 SUM==`_settle_run` 返回值；release 失败后的重试不得让列翻倍；投影要把先前被吹大的值纠正过来（列上先写 999 → 结算后恰为 30）；连续两段都留在投影里；全 app/ 按 AST 判不许再对该列做增强赋值、且投影读数恰好一份定义（配合成反向对照：旧形状开火、`total += 该列` 与文档字符串复述不开火）；配额门禁 `course_usage_seconds` 读到的数==账本 SUM并钉配额边界两档；零秒段不写行也不改投影 | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

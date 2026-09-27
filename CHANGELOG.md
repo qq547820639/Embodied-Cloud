@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 693 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 701 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693，门禁 G0.72／G0.73／G0.74。
+- 计数面 665→678→686→693→701，门禁 G0.72／G0.73／G0.74／G0.75。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -655,15 +655,63 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `tests/test_postgres_concurrency.py` 的档位里，本轮没新开并发臂。
 - 计数面 686→693，门禁 G0.74。
 
+### 累计 GPU 秒改成账本投影：重放不再让配额门禁读成两倍（N-74，闭登记项 N-64）
+- 缺陷（N-64 登记；本轮由子代理实施、由我在主线独立复算认证）：`_settle_run` 无条件
+  `workspace.accumulated_seconds += run_seconds`，而账本靠 `idempotency_key` 对同一运行段去重
+  ⇒ 重复结算只扣一次钱、计数器却加两次；且 `run_seconds` 是按重放那一刻的流逝时间重算的，
+  只会更大。受害的不是报表而是门禁：`app/routers/usage.py:36,40`（展示＋估价）、
+  `app/services/billing.py:380`（`course_usage_seconds`，判据 `used >= quota_seconds`）、
+  `app/static/app.js:425,703`。
+- 改法取仓里已写着的教义（`ledger.py` 模块 docstring："balance 始终 = SUM(amount)"）：这一列既然
+  与 balance 同性质，就该同样从账本派生，而不是由写侧累加。新增
+  `CreditLedgerService.settled_gpu_seconds()`（`app/services/ledger.py:97-109`）作 USAGE 行唯一
+  读数口径；`_settle_run`（`app/services/orchestrator.py:405-439`）结算后 **SET** 这一列，并把
+  返回值从"本次重算的 elapsed"改成"账本实际认下的秒数"（`booked`），下游 `capture_hold` 与
+  `record_gpu_seconds`（:441-456）据此行动；投影是 SET 而非 patch，所以历史上被 `+=` 吹起来的值
+  会被纠正（C3）。
+- 为什么"从账本派生"是补口径而不是新发明：`settle_workspace_run` 是 USAGE 行的唯一写入方——
+  我自己重扫（不采信子代理读数）：`LedgerType.USAGE` 在 app/ 只出现在 `ledger.py:106`（本轮新增的
+  读数谓词）与 `ledger.py:129`（写入本身），枚举定义在 `app/models.py:50`；`record()` 的另两处
+  生产调用是 `app/routers/usage.py:68`（RECHARGE）与 :101（ADJUSTMENT）；`settle_workspace_run(`
+  的生产调用点只有 `orchestrator.py:423`，其余命中全在 tests/。
+- 判据 `tests/test_settled_projection.py`（8 支）：C1 同段重放留一行 USAGE、列==那一行、返回值
+  也==它；C2 登记项读到的那条路（release 失败→重试）列不翻倍；C3 列上先写 999 被投影纠正成 30；
+  C4 连续两段都留在投影里（改前也绿的护栏，docstring 里如实标）；C5 全 app/ 按 AST 判"不许再有
+  对这一列的增强赋值"＋投影读数恰好一份定义；C5 的合成反向对照（旧形状开火、两种合法写法不开火）；
+  C6 配额门禁读到的数==账本 SUM，并在配额边界两档各钉一次（`used >= quota` 拒、差一秒放行）；
+  C7 零秒段不写行、投影不被空段改动、返回 0（钉 `entry is None` 那一支）。
+- 改前复算（我在主线做，两臂各自单变量）：只把 `app/services/orchestrator.py` 换成 HEAD（留新
+  读数方法，让失败读成"数"而不是"缺方法"）与把两个文件一起换成 HEAD，**两臂都是 `FFF.F.F.`**
+  （8 支里 5 开火），开火理由逐条相同：`累计列（120）与账本唯一一行（30）分叉`／`列=60、账本=30`／
+  `投影没有覆盖旧值：列=1029`／`累计列又回到写侧累加：['app/services/orchestrator.py:418']`／
+  `门禁看到 60`。照绿三支＝C4（护栏）、C5 合成对照、C7（旧代码返回 elapsed 也不崩）。跑完按 sha
+  `b8c48ace…`／`98f79948…` 还原一致。换面前置的合流核验：`git apply` 后两文件 sha 与子代理
+  worktree 读数逐字节相同，所以"它跑的"与"我认证的"是同一份代码。
+- C5 的第二条从句（"定义恰好一份"）没有常驻反证臂，就地变异补一次：给 `settled_gpu_seconds`
+  加一份同名重复定义（sha 先变 `1209733a…` 证落地）→ 恰好只有那一条从句开火
+  （"该恰好一份定义，实际 2"），其余七支照绿；还原后 sha 复验一致。这一趟留下一个坑：第一版我把
+  副本改名成 `..._dup`，那是合法 Python 但"数名字"的从句看不见 ⇒ 白跑一次，注入必须与被数的那个子串同形。
+- 更正一处指针：判据原文写 `app/services/billing.py:367`，那是子代理 worktree（base `75da506`）
+  的行号；N-73 之后 `course_usage_seconds` 实际在 :380，已按盘面重解改掉。本仓指针门禁只核"行号落在
+  该文件行数范围内"，`:367` 当时也在范围内 ⇒ 这类漂移它结构性看不见，只能靠落笔前重开盘面。
+- 邻面（我自己复跑，不引用子代理读数）：`test_ledger`／`test_billing_policy`／
+  `test_streaming_lifecycle`／`test_stop_release_admission`／`test_credit_holds`／
+  `test_credit_purse_split`／`test_hold_round_key` 与新判据合跑 76 支全绿；
+  `ruff check app tests` All checks passed；`mypy app` Success: no issues found in 41 source files。
+- 未证实＝两条**量出来的**残留，已按 N-75／N-76 登记，不在本轮设计范围内动它：
+  ① 指标计数器 `gpu_seconds_total` 在 stop 重放里仍加两次——实测
+  `start=0.0 after_first=+30.0 after_retry=+30.0`（累计 60），而同一世界里 `ledger_sum=30`、
+  `accumulated=30`；本轮只把"记的是账本没认过的 elapsed"换成"记的是账本认下的 booked"，
+  没管"每次进入 `_finalize_stop` 都记一次"。
+  ② `destroy` 的 `provider.destroy` 抛错那一路（`orchestrator.py:464-502`，故意上抛让 DESTROY 重试）
+  会留下"RUNNING 且这一段已结算过、`started_at` 未清"的窗口，`course_usage_seconds` 的 live 项
+  （`billing.py:396` 的状态门）于是把同一段再算一遍——实测
+  `status=running accumulated=30 ledger_sum=30 而配额读到 60`。这条比登记项原措辞更精确：
+  release 失败那一档状态是 STOPPING，live 分支根本不进，真正可达的是 destroy 失败档。
+- 计数面 693→701，门禁 G0.75。
+
 ### 本轮新增的待收口项
-- `N-64`：**`accumulated_seconds` 的累加在账本的幂等保护之外**。`orchestrator.py:418`
-  无条件 `+=`，而 `ledger.record` 靠 `idempotency_key`（`ledger.py:42-44`、键在 :110）对同一
-  运行段去重 —— 重复结算只入账一次，计数器却每次都加。可达形状已读出：`_finalize_stop`
-  里 `scheduler.release`（:417）无 try 包裹，抛错则 `STOPPED` 置位不成、`started_at` 也没清，
-  下一路重试再进 `_settle_run` ⇒ 账本留第一次金额、累计值变两次之和。读者
-  `app/routers/usage.py:36,40`（展示＋估价）、`app/services/billing.py:358`
-  （`course_usage_seconds` 是配额门禁！）、`app/static/app.js:425,703`。⇒ 扣一次、
-  展示与配额算两次。
+- ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
 - ~~`N-66`：hold 幂等键按 workspace 全局唯一，二次启动永远拿不到 pending hold~~ —— **已由 N-73 闭合**：键改按轮次发（`billing.py:272-291`），兜底只按 `workspace_id + status=PENDING` 收敛；实测从 `('hold:ws-A','captured',300)`＋pending 0 变成二启拿到新 pending 且 available 减 300。判据 `tests/test_hold_round_key.py` 7 支。
 
@@ -710,6 +758,20 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   现在两套逻辑），再谈把 UNKNOWN 从放行档里摘出去——后者会让 mock/演示档全停不下来
   （`providers/mock.py:72-74` 只会回 UNKNOWN），需要新的档位区分，不能顺手改。
 - `N-72`：**可用额为 0 时仍允许开机**（出厂默认档）。`billing.check_launch_eligible` 只挡  `available < 0`（`app/services/billing.py:~80`），而 `app/config.py:56` 出厂默认  `billing_enforce_preauthorization=False` ⇒ 零余额成员可以启动，钱在第一次结算时变成负数、  靠配额 monitor 兜。这是应然问题（要不要把 0 也挡掉／出厂是否该开预授权），不是实现 bug，  N-71 的判据已把两档现状钉住：预授权开启时 0 余额必须被拒。
+- `N-75`：**`gpu_seconds_total` 在 stop 重放里加两次**（N-74 量出来的一半）。`_finalize_stop`
+  每次进入都 `record_gpu_seconds(booked)`，而重放时 `booked` 仍是那一条 USAGE 行的秒数（账本幂等
+  ⇒ 同一个数再加一次）⇒ 计数器 60、账本 30。实测 `start=0.0 after_first=+30.0 after_retry=+30.0`。
+  两条修法都要先定口径：要么让 `settle_workspace_run` 告诉调用方"这次是命中已有行还是新入账"，
+  要么把指标从 counter 改成账本 SUM 的投影。本轮没自行改设计（属主可决）。
+- `N-76`：**`destroy` 的 provider 失败窗口让配额门禁把同一段算两次**（N-74 的另一半）。
+  `_settle_running_segment`（`app/services/orchestrator.py:458-462`）在 status==RUNNING 时结算且
+  **不清** `started_at`，而 `destroy` 是"先结算、后 `provider.destroy`（抛错故意上抛让 DESTROY 重试）"
+  ⇒ 库里留下一行"RUNNING＋已结算＋started_at 未清"，`course_usage_seconds` 的 live 项
+  （`app/services/billing.py:396` 只对 RUNNING 相加）把同一段再算一遍。实测
+  `status=running accumulated=30 ledger_sum=30 配额读到 60`。release 失败那一档不在此列（状态已是
+  STOPPING，live 分支不进）。修法候选：把"已结算到的时刻"随结算一起推进、live 从那儿起算；或让
+  live 读"账本 SUM 之外的差额"。都涉及口径，需与 N-64 的读者面一起定。
+
 - `N-61`：~~要不要把构建后端从 setuptools 换成 hatchling`**【N-62 结案：不换】** 本机在 `git worktree` 副本上真跑过：hatchling 1.32.4 两建 wheel 同为 `629d6ff7e24f`（它自己就钉 tar 成员 mtime/uid/gid 与 gzip mtime，读安装到本机 venv 的源文件核对过）；与 setuptools 的 wheel 差异只有三处——成员 55 对 56（少 `dist-info/top_level.txt`，全仓 grep 零读者）、`Requires-Dist` 只差 PEP 508 的引号风格（22 条语义同集）、`WHEEL` 的 Generator 行。净收益只是删掉 `scripts/sdist_normalize.py`（约 100 行，6 支判据与两处消费位都已落门禁），代价是 `uv.lock` 重解析、`dev` extra 对齐、wheel 侧 `recomputable` 基线重钉与所有引用产物 sha 的文档面重扫⇒ 不抵。再议的触发条件：自研归一哪天失效，或后端侧出现**别的**产品收益。
 ~~`N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
   `SOURCE_DATE_EPOCH`，逐字节定位见上一节）。wheel 已可复算；sdist 那一半要么给 `dist/checksums.txt`

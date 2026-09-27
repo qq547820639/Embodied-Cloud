@@ -403,10 +403,14 @@ class WorkspaceOrchestrator:
         return state == RuntimeState.MISSING
 
     def _settle_run(self, db: Session, workspace: Workspace) -> int:
-        """结算当前运行段并累计秒数（幂等）；返回结算的 GPU 秒数。
+        """结算当前运行段，并把累计秒数重算为账本投影（幂等）；返回账本实际入账的秒数。
 
         idempotency_key = usage:{workspace.id}:{started_at.isoformat()}，
         与 settle_workspace_run 内部一致：同一运行段重复结算不会重复扣款。
+        累计列不靠 `+=` 维护（N-64）：幂等键只保证不重复扣款，重放时 `run_seconds`
+        会按已经流逝的时间变得更大，`+=` 会让展示用量与配额门禁比账本多算一截。
+        取自账本的投影既能自愈这类历史膨胀值，也让返回值与扣款同源——下游
+        （`record_gpu_seconds` 指标、hold 转正）据此行动，不再拿账本没认过的数当事实。
         无 started_at（尚未开始运行）时返回 0，且不产生账本/累计副作用。
         """
         if not workspace.started_at:
@@ -415,11 +419,13 @@ class WorkspaceOrchestrator:
         if started.tzinfo is None:
             started = started.replace(tzinfo=UTC)
         run_seconds = max(0, int((utcnow() - started).total_seconds()))
-        workspace.accumulated_seconds += run_seconds
         # 幂等结算该运行段 GPU 秒数（同一运行段重复结算不会重复扣款）
         entry = self.ledger.settle_workspace_run(
             db, workspace, run_seconds, workspace.started_at.isoformat()
         )
+        # record() 内部提交，所以这里读到的 SUM 已含刚写入的那一行
+        workspace.accumulated_seconds = self.ledger.settled_gpu_seconds(db, workspace.id)
+        booked = (entry.gpu_seconds or 0) if entry is not None else 0
         # §18：hold 随结算转正。**无条件**收口：不足 1 秒的运行段不产生 usage 条目
         # （settle_workspace_run 对 0 秒返回 None），若只在有账本条目时 capture，
         # 这种段会把 pending hold 一直留到超时扫描才回收。
@@ -427,21 +433,22 @@ class WorkspaceOrchestrator:
             self.billing.capture_hold(
                 db,
                 workspace.id,
-                usage_seconds=run_seconds,
+                usage_seconds=booked,
                 ledger_usage_key=entry.idempotency_key if entry is not None else None,
             )
-        return run_seconds
+        return booked
 
     def _finalize_stop(self, db: Session, workspace: Workspace) -> None:
         """结算运行段 + 释放 GPU + STOPPED（幂等；reconcile 与 stop 共用）。"""
         now = utcnow()
         had_start = workspace.started_at is not None
-        run_seconds = self._settle_run(db, workspace)
+        booked = self._settle_run(db, workspace)
         if had_start:
-            # §25：实际计费 GPU 秒指标（仅存在运行段时记录，语义与原实现一致）
+            # §25：实际计费 GPU 秒指标（仅存在运行段时记录；记的是账本认下的秒数，
+            # 不是本次重算出来的 elapsed）
             from ..metrics import record_gpu_seconds
 
-            record_gpu_seconds(run_seconds)
+            record_gpu_seconds(booked)
         # 释放 GPU（stop 后释放；幂等）
         self.scheduler.release(db, workspace.id)
         workspace.status = WorkspaceStatus.STOPPED.value
