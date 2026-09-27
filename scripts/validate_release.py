@@ -236,14 +236,10 @@ def _integration_gates() -> dict[str, dict]:
 
 
 # 不是"集成档"、但确实按条件跳过的模块：闭集的第二个来源。
-# test_gpu_pool_guard 的两支前提依赖全套共用的 GPU 池余量（见该文件 docstring），
-# 池被上游用例占光时它跳，属"这一跑没跑到"而不是"代码坏了"。给它哨兵而不是让它
-# 冒红，是为了不把随机红引进门禁；代价是这两支可能静默不跑 —— 所以哨兵必须被
-# 写进本次跑读数的 skip 名单（按用例名可见），并登记为待收口项（N-33：rig 应
-# 自己保证余量，跳过的分支该改成断言）。
-EXTRA_SKIP_UNIVERSE: tuple[tuple[str, str], ...] = (
-    ("tests/test_gpu_pool_guard.py", "GATE_SENTINEL"),
-)
+# 这里是空的——原先唯一的住户 `test_gpu_pool_guard` 在 N-33 收了口：夹具显式回收并**断言**
+# 余量，不再有条件跳过分支。机制留着（将来若再有合法的条件跳过，必须同时在这里登记 +
+# 用例里带哨兵常量，由 _const_str 走 AST 现取，不手抄），否则 unexpected_skips 会把它报成越界。
+EXTRA_SKIP_UNIVERSE: tuple[tuple[str, str], ...] = ()
 
 
 def _dotted(rel_path: str) -> str:

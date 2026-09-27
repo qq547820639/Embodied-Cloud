@@ -41,22 +41,27 @@ from tests.settle import await_workspace_settled
 
 HOSTS = 8  # 抽干池需要的挂点数；mock seed 的卡数小于它时按实际卡数收
 
-# 本文件那两支的前提是"全套共用的 GPU 池还有余量"（见模块 docstring），前提不满足时
-# 它跳。发布门禁按闭集判 skip（scripts/validate_release.py 的 conditional_skip_universe
-# 现取本常量），所以这里必须有哨兵：没有哨兵 = 普通 skip = 判红。
-# 待收口（N-33）：rig 应自己保证余量，跳过的分支该改成断言，届时本哨兵随之删除。
-GATE_SENTINEL = "GPU_POOL_VALIDATION_PENDING"
-
 
 @pytest.fixture
 def rig():
-    """真 app lifespan（建表 + mock 主机 sync）+ 本文件专属的 user/workspace 行。"""
+    """真 app lifespan（建表 + mock 主机 sync）+ 本文件专属的 user/workspace 行 + 达成前置。"""
     with TestClient(app):
         pass
     tag = uuid.uuid4().hex[:8]
     with SessionFactory() as db:
         cards = list(db.scalars(select(Gpu)))
         assert cards, "mock 主机没 seed 出卡：本文件的判据无从谈起"
+        # N-33：前置在这里达成，不再留"看跑序"的跳过分支。
+        # 本文件两支各需要 ≥2 张 ≥8 GiB 的空闲卡（一支要抽干后再回收；另一支要把一张设成
+        # DRAINING 后还得剩一张，守卫才会走"不该回收"那条判断）。全套共用一个库，
+        # 上游残骸可能占着 → 先回收；回收后仍不够就是**有卡停在放不掉的状态**，那是缺陷。
+        if count_big_enough(db, 8) < 2:
+            reclaim_gpus(db, scheduler)
+        free = count_big_enough(db, 8)
+        assert free >= 2, (
+            f"回收之后仍只有 {free} 张 ≥8 GiB 的空闲卡：说明有卡停在无法释放的状态，"
+            "这是被测系统的缺陷，不该被条件跳过掩盖"
+        )
         if db.scalar(select(Template).where(Template.id == "cartpole")) is None:
             db.add(
                 Template(
@@ -131,8 +136,9 @@ def test_starving_the_pool_really_leaves_zero_free(rig):
 def test_reclaim_frees_the_cards_and_clears_the_binding(rig):
     """正例：不点 `reclaim_gpus` 就永远回不到"够用"；点完还得连绑定一起清。"""
     with SessionFactory() as db:
-        if not _starve(db, rig) and count_big_enough(db, 8):
-            pytest.skip(f"{GATE_SENTINEL}: 没有空闲卡可抽干，这一支需要至少一张起步空闲卡")
+        assert _starve(db, rig), (
+            "rig 已经保证 ≥2 张空闲还抽不出一张：前置达成逻辑失效或被谁在中间占了卡"
+        )
         assert count_big_enough(db, 8) == 0
         assert ensure_free_gpus(db, scheduler, need=1) >= 1
         still_bound = list(
@@ -150,8 +156,9 @@ def test_ensure_free_gpus_leaves_draining_cards_alone(rig):
     """不该动的时候不动：UNHEALTHY/DRAINING 可能是别的用例故意设出来的前提。"""
     with SessionFactory() as db:
         free_before = count_big_enough(db, 8)
-        if free_before < 2:
-            pytest.skip(f"{GATE_SENTINEL}: 池里只剩 {free_before} 张空闲，DRAINING 探针没有余量")
+        assert free_before >= 2, (
+            f"rig 承诺的 ≥2 张余量没达成（只剩 {free_before}）：要么前置被中途改动，要么有卡放不掉"
+        )
         victim = db.scalar(select(Gpu).where(Gpu.status == GpuStatus.AVAILABLE.value))
         victim.status = GpuStatus.DRAINING.value
         db.commit()

@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 595 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 596 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -16,7 +16,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   按用例名列出的 skip、闭集判决）改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）。
   CI 的"Docker-backed tiers really ran"与 `scripts/release.sh` 的档位表随之改读后者。
 - **skip 不再是数字**：合法 skip = 所属模块在闭集内 + 文案含该模块哨兵；闭集由
-  `conditional_skip_universe()` 从用例源码 AST 现取（六个集成档模块 + `test_gpu_pool_guard`），
+  `conditional_skip_universe()` 从用例源码 AST 现取（六个集成档模块；第二来源 `EXTRA_SKIP_UNIVERSE` 当时还含 `test_gpu_pool_guard`，现已由 N-41 清空），
   名单外一律 `unexpected_skips=FAIL`。文档面随之只写 `collected N / failed M`，
   并把 `passed\s+\d` / `skipped\s+\d` 判为越界写法（`face_offenders`）——
   环境翻一次不影响面，代码真变才红。遮罩自身也带判据：声明的环境字段必须真在报告里、
@@ -134,14 +134,24 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 自纠两处：AST 判据第一版把函数名写成 `node.func.name`（`ast.Name` 只有 `.id`）当场 `AttributeError`；
   "文件里不许出现这个列名"的文本判据被我自己解释它的注释挡了，改成走 AST 属性集合。
 
+### 闭集的第二个来源清零：条件跳过改成断言（N-41，闭合 N-33）
+- 上一轮我给 `test_gpu_pool_guard` 的两支补哨兵、挂进 skip 闭集，并在注释里写下"代价是这两支可能静默不跑"。
+  这句话本身就是缺陷描述：它们量的是"共享池被占干后回收守卫能不能救回来"，
+  跑不跑取决于跑序 —— 等于给一条夹具卫生的 P0 判据留了免检口。
+- 现在 `rig` 显式达成前置（余量 <2 就先 `reclaim_gpus`，再断言 `>= 2`；真达不成就是有卡放不掉 ⇒ 红），
+  两支用例的 `pytest.skip` 换成断言；哨兵常量删除，`EXTRA_SKIP_UNIVERSE` 归空，机制与登记要求留着。
+- 判据两支（闭集不许再含该模块 + 该文件 AST 里不许再有 `.skip(`／`GATE_SENTINEL`），门禁目录 G0.51；
+  `G0.42` 那行对闭集组成的描述同步更正。
+- 顺手：`rig` 的 `cards` 断言与新增前置一起跑，`tests/test_gpu_pool_guard.py` 现在 4 支全跑、0 跳过。
+
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
   `SOURCE_DATE_EPOCH`，逐字节定位见上一节）。wheel 已可复算；sdist 那一半要么给 `dist/checksums.txt`
   加"这是构建记录、不是复算承诺"的口径说明，要么换 `uv build`/后处理再验一次。
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
-- `N-33`：`tests/test_gpu_pool_guard.py` 那两支现在带哨兵（缺余量时算合法跳过），
-  但更该做的是让 `rig` 自己保证余量、把跳过的分支改成断言 —— 哨兵只是把静默变成记账。
+- ~~`N-33`：`tests/test_gpu_pool_guard.py` 那两支带哨兵（缺余量时算合法跳过）~~ —— 已由 **N-41 闭合**：
+  夹具显式达成前置并断言，哨兵与闭集条目一并删除，条件跳过归零。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
 - **裁决依据是查来的，不是拍的**：读 AWS IoT Jobs 的任务生命周期页

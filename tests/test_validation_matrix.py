@@ -109,8 +109,38 @@ def test_gate_sentinels_are_read_live_and_cover_every_integration_module() -> No
     # 闭集 = 六档 + 非档位但按条件跳过的模块，且哨兵同样由 AST 现取
     universe = validator.conditional_skip_universe()
     assert len(universe) == 6 + len(validator.EXTRA_SKIP_UNIVERSE), sorted(universe)
-    assert universe["tests.test_gpu_pool_guard"] == "GPU_POOL_VALIDATION_PENDING"
     assert all(m.startswith("tests.") for m in universe), universe
+    # N-33 收口：`test_gpu_pool_guard` 不再有条件跳过，因此它必须离开闭集。
+    # 留在闭集里就等于"允许它静默不跑"，而它已经没有任何跳过的分支了。
+    assert "tests.test_gpu_pool_guard" not in universe, (
+        "池守卫模块还在闭集里：它已经不跳了，留着就是给一个不存在的例外发通行证"
+    )
+    assert validator.EXTRA_SKIP_UNIVERSE == (), validator.EXTRA_SKIP_UNIVERSE
+
+
+def test_the_pool_guard_file_has_no_conditional_skip_left() -> None:
+    """N-33 的判据化：`tests/test_gpu_pool_guard.py` 里不许再有 `pytest.skip`。
+
+    那两支原先按"共用池的余量"跳过（缺余量=合法），意味着"回收守卫到底还被验过没有"
+    取决于跑序。现在 rig 显式把前置达成（回收后断言余量），跳过分支改成断言：
+    真达不成就是缺陷，该红，不该被记成"这一跑没跑到"。
+    判据走 AST（文本搜 `pytest.skip` 会被注释里的同名说法挡/骗）。
+    """
+    import ast
+
+    src = (ROOT / "tests" / "test_gpu_pool_guard.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    skips = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "skip"
+    ]
+    assert not skips, f"还剩 {len(skips)} 处条件跳过：{[n.lineno for n in skips]}"
+    assert "GATE_SENTINEL" not in {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}, (
+        "哨兵常量还在：它存在的唯一理由就是那两处 skip"
+    )
 
 
 def _checks(**over) -> dict:

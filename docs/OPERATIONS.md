@@ -94,7 +94,7 @@
 
 **skip 闭集**（为什么"跳了几支"不再需要改文档）：一支用例可以按条件跳，但必须满足
 "所属模块在闭集里 + skip 文案含该模块的哨兵"。闭集由 `conditional_skip_universe()`
-从用例源码现取（`_const_str` 走 AST，不手抄）：六个集成档模块 + `test_gpu_pool_guard`。
+从用例源码现取（`_const_str` 走 AST，不手抄）：六个集成档模块。闭集的第二来源 `EXTRA_SKIP_UNIVERSE` 现在是空的 —— 原先唯一的住户 `test_gpu_pool_guard` 已在 N-41 改成「夹具显式达成前置 + 断言」，不再有合法的条件跳过。
 名单外的 skip → `unexpected_skips=FAIL` → 挡住发布。这样"通道今天通不通"只在读数里出现，
 而"某支新用例开始静默跳过"照样当场翻红。
 
