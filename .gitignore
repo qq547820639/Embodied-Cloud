@@ -15,3 +15,6 @@ smoke-embodiedcloud.db
 
 # WorkBuddy local memory/artifacts
 .workbuddy/memory/
+
+# 宿主工具在此放 linked worktree（子代理隔离区），不得进版本库
+.qoder/

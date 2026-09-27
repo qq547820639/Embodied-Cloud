@@ -238,14 +238,13 @@ class BillingPolicy:
 
         # 记账账户：优先个人（组织额度只是补足可见性），保持与结算口径一致
         account = accounts[0]
-        key = f"hold:{workspace_id}"
         hold = CreditHold(
             id=str(uuid4()),
             account_id=account.id,
             workspace_id=workspace_id,
             amount=required,
             status=HoldStatus.PENDING.value,
-            idempotency_key=key,
+            idempotency_key=self._hold_key(db, workspace_id),
             expires_at=utcnow() + timedelta(minutes=self.hold_ttl_minutes),
             reason="launch preauthorization",
         )
@@ -253,14 +252,43 @@ class BillingPolicy:
         try:
             db.commit()
         except IntegrityError:
-            # 并发重试路径：另一事务已为同一 workspace 圈住额度（uq_credit_holds_idempotency
-            # 或 pending 部分唯一索引挡下）→ 收敛到已有那条，而不是把异常抛给 provision
+            # 并发：另一事务已为本轮圈住额度 → 收敛到那条 pending，而不是把异常抛给 provision。
+            # 兜底查询必须带 pending 过滤：改前只按 key 查、不看状态，撞键时把上一轮已
+            # capture/release 的行当成本轮授权发出去（而键又按 workspace 全局唯一 ⇒ 预授权
+            # 对每个 workspace 一辈子只生效一次）。找不到 pending 就照原样抛——
+            # 宁可 provision 失败重试，也不能把一笔已花掉的额度当成新的授权。
             db.rollback()
-            existing = db.scalar(select(CreditHold).where(CreditHold.idempotency_key == key))
-            if existing is not None:
-                return existing
+            won = db.scalar(
+                select(CreditHold).where(
+                    CreditHold.workspace_id == workspace_id,
+                    CreditHold.status == HoldStatus.PENDING.value,
+                )
+            )
+            if won is not None:
+                return won
             raise
         return hold
+
+    def _hold_key(self, db: Session, workspace_id: str) -> str:
+        """本轮启动的幂等键：`hold:{workspace_id}:{该 workspace 已有 hold 数}`。
+
+        改前用 `hold:{workspace_id}`，而 `CreditHold.idempotency_key` 是全局唯一列
+        （`app/models.py:447`）⇒ 第一次启动那条被 capture/release 之后，同一 workspace
+        再次启动必然撞唯一键。轮次号从既有行数推导而不是外部传入：同一轮内的崩溃重放
+        看到的是同一个数（更早的 pending 查询已经把它接住），新一轮才是新键；键按
+        0,1,2… 递增发出，所以只要行不删（hold 表是 append-only 的），新键必然空闲。
+        "同一 workspace 至多一个 pending"由 `uq_holds_pending_per_workspace`
+        （`app/models.py:459-465`）保证，这里不负责串行化。
+        """
+        prior = int(
+            db.scalar(
+                select(func.count(CreditHold.id)).where(
+                    CreditHold.workspace_id == workspace_id
+                )
+            )
+            or 0
+        )
+        return f"hold:{workspace_id}:{prior}"
 
     def capture_hold(
         self,

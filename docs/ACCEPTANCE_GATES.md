@@ -82,6 +82,7 @@
 | G0.71 物理验收脚本的退码与缺件判决有一把常驻尺 | `pytest tests/test_gpu_gate_scripts.py`（6 支） | 五支 G1–G4 入口脚本在 PATH 替身 + 净 PATH 下逐支核：缺件必须非零、点名工具、且它自己的通过判决不得出现；容器退出码必须原样成为脚本退出码；预检两档（全装 rc0＋逐样 OK／缺一样 rc1＋点名 MISSING＋总结走 stderr）；G1.2 三段各自归位（工作区镜像缺席 rc=2 并提示构建脚本）；判据自身用副本注入自证（两处一起坏才假绿，只坏一处必须仍正确） | VERIFIED PASS（本轮，6 支判据 + 三臂注入） |
 | G0.72 释放 GPU 前有一道以 runtime 事实为准的闸门，停止命令的成败不得替它背书 | `pytest tests/test_stop_release_admission.py`（13 支） | provider 自述 ALIVE 时 GPU 不得回池、不得判 STOPPED、不得结算；命令报错但 provider 报 MISSING 时必须释放；重试路径必须重新叫 `provider.stop`；没达成目标时状态留在 STOPPING 且 STOP operation 不得记 SUCCEEDED，monitor 不得把没放行的停止计成已停；`scheduler.release` 的异常不得穿出 provider/scheduler 边界；判据在源码里恰好一份实现且两个入口都经同一清理函数（AST 面，配反向对照） | PASS（常驻） |
 | G0.73 个人池与组织池不相交，且这份加法全仓只写一遍 | `pytest tests/test_credit_purse_split.py`（8 支） | 成员行（user_id 与 organization_id 同时填）只进个人池：a1 充值后 available(a1)=1000、同组织 b1=0；无主组织行对成员可见（与既有 test_credit_holds 用例同数）；别人的 usage 不扣我；app/ 内把 balance/organization_balance 相加的表达式按 AST 恰好 1 处、`gross_credits` 定义 1 处，available_credits／reserve_launch／monitor 三处都改读它 | PASS（常驻） |
+| G0.74 hold 的幂等键按启动轮次发，兜底只收敛到 pending | `pytest tests/test_hold_round_key.py`（7 支） | capture 一轮后再次启动必须拿到新的 pending 且 available 减少一个 hold 额度；同轮重复调用收敛到同一行；每轮各留一行且键互异；`reserve_launch` 在四种真实序列下都不得返回终态行；键模板按 AST 判必须同时含 workspace 与轮次号（配两档合成对照） | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

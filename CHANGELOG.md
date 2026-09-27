@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 686 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 693 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686，门禁 G0.72／G0.73。
+- 计数面 665→678→686→693，门禁 G0.72／G0.73／G0.74。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -622,6 +622,39 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   也就是说改后可用额几乎只等于个人余额，这是口径正确化的结果，不是新问题。
 - 计数面 678→686，门禁 G0.73。
 
+### hold 的幂等键改成按启动轮次发：第二次启动重新圈住额度（N-73，闭登记项 N-66）
+- 缺陷（/tmp 探针跑真对象实测，改前先量）：`reserve_launch` 用 `f"hold:{workspace_id}"`
+  当键，而 `CreditHold.idempotency_key` 是全局唯一列（`app/models.py:447`）；第一次启动
+  把那条 pending capture 掉之后，同一 workspace 再次启动的 INSERT 必然撞唯一键，而改前
+  的兜底查询只按 key 回查、**不看状态** ⇒ 把上一轮已 capture 的行当成本轮授权返回。
+  读数：首启 `('hold:ws-A','pending',300)`、available 9700；capture 后再启
+  `('hold:ws-A','captured',300)`、磁盘 pending 数 0、available 回到 10000（一分没圈）；
+  对照档全新 ws-B 仍拿到 pending 300。调用方 `orchestrator.py:190` 把返回值丢掉 ⇒ 全程无报错。
+- 改法：`_hold_key`（`billing.py:272-291`）按该 workspace 已有 hold 行数发轮次号
+  （`hold:{ws}:{n}`，n=0,1,2…），hold 表不删行 ⇒ 新键必然空闲；兜底查询（:254-268）改成
+  只按 `workspace_id + status=PENDING` 收敛，找不到 pending 就照原样抛——
+  宁可 provision 失败重试，也不能把一笔已花掉的额度当成新授权。
+- 跳过外部调研的理由（如实记）：改动只落在一个方法的键推导与一条查询谓词上，约束全部来自
+  仓内既成事实（全局唯一列 `models.py:447`、部分唯一索引 `models.py:459-465`、hold 表
+  append-only）；本轮想引的两个外部源都没打开——`docs.stripe.com/connect/separate-charges-transfers`
+  回 404，PostgreSQL `doc/src/sgml/ref/create_index.sgml` 取回超时（0 字节），故不引任何未读到的出处。
+  另我一度加了个"撞键就换重试号再试"的循环，写完发现回滚后行数不变 ⇒ 重试必然撞同一个键，
+  那是走不通的死路，删掉；相应地不测"终态行占住本轮键"这一档（hold 不删行 + 键按行数递增，
+  非并发下构造不出，构造出来的话测的是我自己刚删掉的循环）。
+- 判据 `tests/test_hold_round_key.py`（7 支）：capture 过一轮后再启必须拿到 pending 且
+  available 真的减 300；同轮重复调用幂等（同 id、只圈一次，改前也绿的合规档）；启动失败
+  退回额度后重试能重新圈；三轮启动留三行、键互不相同、状态 captured/captured/pending；
+  跨四种真实序列的公共性质"`reserve_launch` 永不返回终态行"；键模板按 AST 判必须同时含
+  workspace 与轮次号（arity==2）＋合成反向对照（改前形状读成 1、模板消失读成 0，两档都不合格）。
+- 改前复算（`git show HEAD:app/services/billing.py` 就地换面，跑完 sha 还原两端 `7a38b955…`）：
+  `F.FFFF.` —— 7 支里 5 支开火，照绿的正是"同轮幂等"合规档与尺子自己的合成对照。
+  邻面 `tests/test_credit_holds.py` 13 支全绿（含 `test_org_credits_are_visible_but_hold_is_taken_once`
+  那支钉"hold 记在个人账户"的既有用意），`make lint`/`make typecheck` rc=0。
+- 未证实：真并发（两个事务同时 reserve 同一 workspace）下的撞键收敛只在 SQLite 上做了形状
+  验证——SQLite 没有真行锁（`with_for_update` 被方言整条丢弃，见仓库既有说明），那一半仍在
+  `tests/test_postgres_concurrency.py` 的档位里，本轮没新开并发臂。
+- 计数面 686→693，门禁 G0.74。
+
 ### 本轮新增的待收口项
 - `N-64`：**`accumulated_seconds` 的累加在账本的幂等保护之外**。`orchestrator.py:418`
   无条件 `+=`，而 `ledger.record` 靠 `idempotency_key`（`ledger.py:42-44`、键在 :110）对同一
@@ -632,13 +665,8 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   （`course_usage_seconds` 是配额门禁！）、`app/static/app.js:425,703`。⇒ 扣一次、
   展示与配额算两次。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
-- `N-66`：**hold 的幂等键按 workspace 全局唯一 ⇒ 二次启动永远拿不到 pending hold**。
-  `billing.py:232` 用 `f"hold:{workspace_id}"`，落在 `models.py:447` 的全局 unique 列上；
-  :208-215 的去重只看 `status == PENDING`，而 :246-253 的 IntegrityError 兜底**只按 key 查、
-  不带状态过滤** ⇒ capture 之后的再次启动 INSERT 撞键、兜底返回那条已 CAPTURED 的旧行，
-  本轮没有任何 pending hold 圈住额度，而 `orchestrator.py:190` 把返回值丢掉、provision 照跑。
-  部分唯一索引 `uq_holds_pending_per_workspace`（`models.py:459-465`）本是为"同 workspace 只圈
-  一次"设计的，全局键把"轮内去重"与"跨轮复用"压成了同一张面。
+- ~~`N-66`：hold 幂等键按 workspace 全局唯一，二次启动永远拿不到 pending hold~~ —— **已由 N-73 闭合**：键改按轮次发（`billing.py:272-291`），兜底只按 `workspace_id + status=PENDING` 收敛；实测从 `('hold:ws-A','captured',300)`＋pending 0 变成二启拿到新 pending 且 available 减 300。判据 `tests/test_hold_round_key.py` 7 支。
+
 - `N-67`：**provision 失败那一路是“释放先于确认”的第二实例**（N-63 只修了 stop/reconcile）。
   `_execute_provision` 在 :249 用 `contextlib.suppress(Exception)` 吞掉补偿
   `provider.destroy(workspace)` 的异常并继续 raise，随后 `_fail` 在 :304 无条件
