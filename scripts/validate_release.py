@@ -498,17 +498,27 @@ def dangling_reference_offenders(texts: dict[str, str], catalog: dict[str, set[s
 # 为它们开豁免名单会让判据变成一堆例外；路径存在性留给一次性普查，不进常驻门禁。
 DOC_FILELINE_RE = re.compile(r"([\w./-]+\.(?:py|md|sh|sql|toml|json)):(\d+)")
 DOC_ANCHOR_RE = re.compile(r"([\w./-]+\.md)\s*§\s*(\d+(?:\.\d+)?)")
-DOC_SCAN_DIRS = ("app", "edge_agent", "scripts", "tests", "docs", "infra", "alembic")
+# 分母与"仓内根目录"同一来源：早先这里写死一份目录清单，漏了 `deploy/`、`runtime/`
+# 还含了不存在的 `infra/`，结果第一次跑就把 11 条**存在**的路径报成悬空——判据的分母
+# 必须由同一份roots 派生，否则门禁会指向自己造的假阳性。
+DOC_SCAN_DIRS = ("app", "edge_agent", "scripts", "tests", "docs", "deploy", "runtime", "alembic")
 DOC_SCAN_SUFFIXES = {".py", ".md", ".sh", ".sql", ".toml", ".json", ".yaml", ".yml", ".ts"}
 
 
 def doc_reference_offenders(
-    texts: dict[str, str], line_counts: dict[str, int], sections: dict[str, set[str]]
+    texts: dict[str, str],
+    line_counts: dict[str, int],
+    sections: dict[str, set[str]],
+    *,
+    roots: tuple[str, ...] = (),
+    repo_files: frozenset[str] = frozenset(),
 ) -> list[str]:
-    """纯函数：两种指针逐条核；没文本或一条指针都没扫到 ⇒ 恒真，也算偏离。
+    """纯函数：三类指针逐条核；没文本或一条指针都没扫到 ⇒ 恒真，也算偏离。
 
-    自由路径的存在性**不做**：普查显示未解析的那几条全是示例路径或 GPU 主机上的外部脚本，
-    为它们开豁免名单只会让判据变成一堆例外；路径存在性留给一次性普查脚本。
+    路径只在**限定于既有仓内根目录**时核存在性：普查显示这个限定下 445 条引用里
+    未解析的只有"把两个产物名缩写成同一后缀"一种写法（示例路径 `tmp/probe.py`、
+    GPU 主机上的外部脚本都不以仓内根目录开头，因此不会被误伤）。
+    自由路径的存在性**不做**——为示例与外部脚本开豁免，只会把判据磨成例外清单。
     """
     if not texts:
         return ["没有一份文档被扫：这条判据无事可做（与恒真同形）"]
@@ -533,8 +543,21 @@ def doc_reference_offenders(
                 out.append(f"{doc}: 指针 {host} §{sec} 的宿主文档不存在")
             elif sec not in sections[base]:
                 out.append(f"{doc}: 指针 {host} §{sec} 指向的章节不存在")
+    if roots and repo_files:
+        rooted = re.compile(
+            r"(?<![\w/.~-])((?:" + "|".join(re.escape(r) for r in sorted(roots)) + r")/[\w./-]*"
+            r"\.(?:py|md|sh|json|toml|sql|ya?ml|ts|ini))"
+        )
+        for doc, text in sorted(texts.items()):
+            for match in rooted.finditer(text):
+                path = match.group(1).rstrip(".,;:")
+                if "*" in path:  # 通配写法是模式，不是指针
+                    continue
+                hits += 1
+                if path not in repo_files:
+                    out.append(f"{doc}: 引用了仓里不存在的路径 {path}")
     if not hits:
-        out.append("文档里一条 `文件:行号` 或 `宿主 §节` 指针都没扫到：分母可疑，不按通过处理")
+        out.append("文档里一条 `文件:行号`、`宿主 §节` 或仓内路径指针都没扫到：分母可疑，不按通过处理")
     return out
 
 
@@ -574,17 +597,51 @@ def _doc_section_index() -> dict[str, set[str]]:
     return index
 
 
+def _doc_roots() -> tuple[str, ...]:
+    """仓内"既有根目录"：顶层目录去掉产物与缓存类（它们的存在本来就不该被文档保证）。"""
+    skip = {".git", "__pycache__", "dist", "build", "htmlcov", "embodiedcloud.egg-info", ".mypy_cache", ".pytest_cache"}
+    return tuple(
+        sorted(p.name for p in ROOT.iterdir() if p.is_dir() and p.name not in skip and not p.name.startswith("."))
+    )
+
+
+def _repo_file_index() -> frozenset[str]:
+    # 直接按 roots 走：新增顶层目录时不必记得改两处
+    files = {
+        path.relative_to(ROOT).as_posix()
+        for directory in _doc_roots()
+        for path in sorted((ROOT / directory).rglob("*"))
+        if path.is_file() and "__pycache__" not in str(path)
+    }
+    files |= {path.name for path in sorted(ROOT.glob("*.md"))}
+    return frozenset(files)
+
+
 def dangling_doc_reference_offenders() -> list[str]:
-    return doc_reference_offenders(_doc_pointer_texts(), _doc_line_counts(), _doc_section_index())
+    return doc_reference_offenders(
+        _doc_pointer_texts(),
+        _doc_line_counts(),
+        _doc_section_index(),
+        roots=_doc_roots(),
+        repo_files=_repo_file_index(),
+    )
 
 
 def doc_reference_stats() -> dict[str, int]:
     texts, line_counts = _doc_pointer_texts(), _doc_line_counts()
-    paths = anchors = 0
+    fileline = anchors = paths = 0
+    rooted = re.compile(
+        r"(?<![\w/.~-])((?:" + "|".join(re.escape(r) for r in _doc_roots()) + r")/[\w./-]*"
+        r"\.(?:py|md|sh|json|toml|sql|ya?ml|ts|ini))"
+    )
     for text in texts.values():
-        paths += len(DOC_FILELINE_RE.findall(text))
+        fileline += len(DOC_FILELINE_RE.findall(text))
         anchors += len(DOC_ANCHOR_RE.findall(text))
-    return {"docs": len(texts), "fileline": paths, "anchors": anchors, "files": len(line_counts)}
+        paths += len([m.group(1) for m in rooted.finditer(text) if "*" not in m.group(1)])
+    return {
+        "docs": len(texts), "fileline": fileline, "anchors": anchors,
+        "paths": paths, "files": len(line_counts),
+    }
 
 
 def reproducible_checks(checks: dict) -> dict:

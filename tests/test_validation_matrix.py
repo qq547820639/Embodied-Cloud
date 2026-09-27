@@ -651,45 +651,71 @@ def test_env_read_resolution_is_transitive_but_not_fooled_by_cycles() -> None:
     assert len([n for n in read if n.startswith("EMBODIEDCLOUD_LOOP")]) == 0, read
 
 
-def test_document_pointers_resolve_to_real_lines_and_sections() -> None:
-    """文档里的 `文件:行号` 与 `宿主.md §节` 两种指针必须落到实物上。
+def test_rooted_path_pointers_are_checked_against_the_same_roots() -> None:
+    """限定在仓内根目录下的路径引用要核存在性；而且索引必须与 roots 同源。
 
-    形状是长期演化后才会露出来的那种：文件还在、行号早就不对了；章节被合并/删号了、
-    引用还指着旧编号。两种都在真仓里被这条判据抓到过（写门之前先普查：58 处行号指针
-    与 26 处章节指针，其中 1 处 `CURRENT_STATE §10` 已随文档重组而失效）。
+    这条判据的第一版把文件索引写死成一份目录清单，漏了两个真实存在的顶层目录，
+    第一次跑就把 11 条**存在**的路径报成悬空 —— 分母与划界不同源时，门禁只会自造假阳性。
     """
+    from pathlib import Path as _P
+
+    validator = _load_validator()
+    texts = {
+        "docs/A.md": (
+            "入口脚本见 runtime/real-entry.sh，配置见 deploy/kubernetes/exists.yaml；"
+            "示例路径 tmp/probe.py 与通配 docs/adr/*.md 不算指针；写歪的是 scripts/gone.py"
+        )
+    }
+    offenders = validator.doc_reference_offenders(
+        texts,
+        {"docs/A.md": 3},
+        {},
+        roots=("deploy", "runtime", "scripts"),
+        repo_files=frozenset({"runtime/real-entry.sh", "deploy/kubernetes/exists.yaml", "docs/A.md"}),
+    )
+    assert offenders == ["docs/A.md: 引用了仓里不存在的路径 scripts/gone.py"], offenders
+
+    index = validator._repo_file_index()
+    for root in validator._doc_roots():
+        sample = next(
+            (f for f in sorted((_P(".") / root).rglob("*")) if f.is_file() and "__pycache__" not in str(f)),
+            None,
+        )
+        if sample is not None:
+            rel = sample.as_posix().removeprefix("./")
+            assert rel in index, f"根目录 {root} 里的 {rel} 不在索引里：分母比划界窄"
+    stats = validator.doc_reference_stats()
+    assert stats["paths"] >= 200, f"路径指针分母太小，这条核起来近乎空转：{stats}"
+
+
+def test_the_repo_docs_have_no_dangling_pointers() -> None:
+    """真面：仓内文档现在 0 条悬空指针（先普查确认形状可信，才立的门）。"""
+    validator = _load_validator()
+    assert validator.dangling_doc_reference_offenders() == []
+    stats = validator.doc_reference_stats()
+    assert stats["fileline"] >= 50 and stats["anchors"] >= 3 and stats["paths"] >= 200, stats
+
+
+def test_document_pointers_resolve_to_real_lines_and_sections() -> None:
+    """`文件:行号` 与 `宿主.md §节` 两类指针逐条核，两类恒真形状也算偏离。"""
     validator = _load_validator()
     existing = {"app/x.py": 2, "docs/B.md": 9, "scripts/tool.py": 40}
     sections = {"B.md": {"1", "2", "2.1"}, "ARCHITECTURE.md": {"7", "8"}}
     good = {"docs/A.md": "见 scripts/tool.py:12 与 app/x.py:2；另见 B.md §2.1、ARCHITECTURE.md §8"}
     assert validator.doc_reference_offenders(good, existing, sections) == []
-    bad = {
-        "docs/A.md": (
-            "见 app/x.py:3；再看 docs/B.md §7；还有 C.md §1；最后是 nope.py:4"
-        ),
-    }
+    bad = {"docs/A.md": "见 app/x.py:3；再看 docs/B.md §7；还有 C.md §1；最后是 nope.py:4"}
     offenders = validator.doc_reference_offenders(bad, existing, sections)
     joined = "\n".join(offenders)
     assert len(offenders) == 4, offenders
     assert "app/x.py:3 超出该文件长度 2 行" in joined, offenders
-    assert "docs/B.md §7" in joined.replace(" ", "") or "B.md §7" in joined, offenders
-    assert "C.md" in joined and "nope.py" in joined, offenders
-    # 恒真形状：没文本、或文本里一条指针都没有 ⇒ 不算通过
+    assert "docs/B.md §7" in joined and "C.md" in joined and "nope.py" in joined, offenders
     assert validator.doc_reference_offenders({}, existing, sections)
     assert validator.doc_reference_offenders({"docs/A.md": "没有任何指针"}, existing, sections)
-
-
-def test_the_repo_docs_have_no_dangling_pointers() -> None:
-    """真面：仓内文档现在 0 条悬空指针——是先普查、确认形状可信，才立的门。"""
-    validator = _load_validator()
-    assert validator.dangling_doc_reference_offenders() == []
-    stats = validator.doc_reference_stats()
-    assert stats["fileline"] >= 50 and stats["anchors"] >= 3, f"分母太小，判据近乎空转：{stats}"
 
 
 def test_doc_reference_gate_is_wired_into_the_summary() -> None:
     src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
     assert "dangling_doc_reference_offenders(" in src and '"doc_references"' in src
     assert src.index("dangling_doc_reference_offenders(") < src.index('"checks": reproducible_checks(checks)')
-    # 边界也要写下来，免得后人以为这条管所有路径引用
-    assert "不做" in src[src.index("def doc_reference_offenders") : src.index("def doc_reference_offenders") + 1200]
+    body = src[src.index("def doc_reference_offenders") : src.index("def dangling_doc_reference_offenders")]
+    assert "不做" in body, "判据的边界（哪些路径有意不核）必须写在函数里，防止将来悄悄扩面"
