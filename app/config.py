@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     # --- warm pool ---
     warm_pool_enabled: bool = False
     warm_pool_size: int = 1  # 每启用模板的目标 warm workspace 数
+    # 给交互式启动预留的卡数：池子补位时不许把舰队吃干（0 = 不预留，与改造前行为一致）。
+    # 理由与实测读数见 docs/SUPPLY_CHAIN.md 的 warm pool 那一格 / tests/test_warmpool.py 容量段。
+    warm_pool_reserve_slots: int = 0
 
     # --- k8s provider ---
     k8s_namespace: str = "embodiedcloud"

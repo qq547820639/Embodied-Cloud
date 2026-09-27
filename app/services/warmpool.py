@@ -28,7 +28,16 @@ from ..metrics import (
     WARM_POOL_READY,
     record_warm_pool_claim_duration,
 )
-from ..models import OperationType, Template, User, WarmPoolState, Workspace, WorkspaceStatus
+from ..models import (
+    Gpu,
+    GpuStatus,
+    OperationType,
+    Template,
+    User,
+    WarmPoolState,
+    Workspace,
+    WorkspaceStatus,
+)
 from ..utils import utcnow
 
 if TYPE_CHECKING:
@@ -86,8 +95,8 @@ class WarmPoolManager:
         同步预热会长时间阻塞 worker 循环，期间 STOP/DESTROY/PROVISION 无法处理）。
         """
         if not self.settings.warm_pool_enabled:
-            return {"created": 0, "ready": 0, "destroyed": 0}
-        stats = {"created": 0, "ready": 0, "destroyed": 0}
+            return {"created": 0, "ready": 0, "destroyed": 0, "skipped_no_capacity": 0}
+        stats = {"created": 0, "ready": 0, "destroyed": 0, "skipped_no_capacity": 0}
         templates = list(db.scalars(select(Template).where(Template.enabled.is_(True))))
         # 1) 收割（先做）：PREWARMING → READY/FAILED，保证池位不残留占位
         for template in templates:
@@ -95,7 +104,12 @@ class WarmPoolManager:
         # 2) 清理：FAILED warm workspace 入队 DESTROY（有 active op 则下轮再试）
         for template in templates:
             self._cleanup_failed(db, template.id, stats)
-        # 3) 补位：只创建 + 入队异步 PROVISION，带冷却退避
+        # 3) 补位：只创建 + 入队异步 PROVISION，带冷却退避与容量闸门
+        reserve = int(self.settings.warm_pool_reserve_slots)
+        # 一份**共享**的空闲卡多重集：闸门必须跨模板算账，按模板各算各的会重复许诺同一张卡
+        # （实测：8 张卡、5 个模板、size=2 时逐模板判"有没有够用的卡"全部通过，仍然开出 10 格）。
+        free_gib = sorted(self._free_capacities_gib(db))
+        warned_over_reserve = False
         for template in templates:
             ready = self._count_state(db, template.id, WarmPoolState.READY)
             prewarming = self._count_state(db, template.id, WarmPoolState.PREWARMING)
@@ -105,7 +119,37 @@ class WarmPoolManager:
             # 冷却仅作用一轮：本轮 reap 失败的池位跳过补位，下一轮恢复
             cooldown = self._fail_cooldown.pop(template.id, 0)
             fillable = max(0, missing - cooldown)
-            for _ in range(fillable):
+            # 容量闸门（两道，理由都在 tests/test_warmpool.py 的注释里）：
+            # - 装不下的格**不开**：现在 AVAILABLE 卡里没有任何一张够这个模板的 VRAM，
+            #   创建了也只会是"注定失败的行 → 收割 FAILED → DESTROY"的空转；
+            # - `warm_pool_reserve_slots` 给交互请求留卡：池子不许把舰队吃干，
+            #   否则 size × 模板数 逼近容量时用户请求会全数失败（实测 8 卡／5 模板／size=2
+            #   → 池占满 8 张，交互 0/5 起得来）。默认 0＝不预留，行为与改造前一致。
+            # 补位是异步入队的（PROVISION 之后才真占卡），所以这里要自己把「本轮已开的格」
+            # 和「上一轮还在 PREWARMING 的格」一起从可用量里扣掉，否则同一轮会把同一张卡许诺两次。
+            required = int(template.recommended_vram_gb)
+            for _slot in range(fillable):
+                pick = next((g for g in free_gib if g >= required), None)
+                if pick is None:
+                    # 规则一：没有够用的卡就**不开格**（开出来注定失败 → 收割 → DESTROY 的空转）
+                    stats["skipped_no_capacity"] += fillable - _slot
+                    break
+                if len(free_gib) - 1 < reserve:
+                    # 规则二：这一格拿走就凑不满预留 ⇒ 留给交互请求
+                    stats["skipped_no_capacity"] += fillable - _slot
+                    if reserve >= len(free_gib) and not warned_over_reserve:
+                        # 借 K8s 的方向：预留大于容量不该"静默归零"（它是直接判错）。
+                        # 这里不抛（会把 worker 循环打死），但必须留下一条 WARNING，
+                        # 否则配置写错的人只看得见"池子怎么老是空的"。
+                        warned_over_reserve = True
+                        logger.warning(
+                            "warm pool reserve=%d leaves no room in %d free card(s): "
+                            "pool will not fill this round",
+                            reserve,
+                            len(free_gib),
+                        )
+                    break
+                free_gib.remove(pick)
                 workspace = self.orchestrator.create(
                     db,
                     template,
@@ -121,6 +165,19 @@ class WarmPoolManager:
                 self.orchestrator.start_async(workspace.id)
         self._refresh_gauge(db)
         return stats
+
+    def _free_capacities_gib(self, db: Session) -> list[int]:
+        """AVAILABLE 卡的显存（GiB）列表；只读，不改状态。
+
+        挑"最小的够用那张"来记账，与生产的 best_fit 分配同向（`scheduler.allocate` 的 ORDER BY），
+        所以闸门模拟出来的余量与 worker 真占卡时的余量是同一个方向。
+        """
+        return [
+            int(memory_mib // 1024)
+            for memory_mib in db.scalars(
+                select(Gpu.memory_total).where(Gpu.status == GpuStatus.AVAILABLE.value)
+            )
+        ]
 
     def _reap_prewarming(self, db: Session, template_id: str, stats: dict[str, int]) -> None:
         """收割 PREWARMING 占位：RUNNING → READY；终态/错误态 → FAILED。

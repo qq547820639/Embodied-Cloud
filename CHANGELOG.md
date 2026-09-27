@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 551 / passed 550 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 557 / passed 556 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -798,6 +798,47 @@ docker 档 21 → 22，全套 531 → 532。
   （与 `make policy-bench` 同一形状），带退出码：三条反向对照任一不符或分位索引对不上就 rc=1。
   本轮实跑 `rc=0`，读数为 `[warm-sla] overall=PASS（绝对 SLA 判定仍需 G1–G4 真机）`。
 
+### 池子把舰队吃干：`size=2` 时 5 个模板的交互启动 0/5，现在有了闸门与预留开关
+
+- 这条不是评审交回来的，是**给上一条 SLA 取证时顺手量出来的**：`make warm-capacity` 在 8 张异构卡 +
+  真 5 份模板的舰队上跑 `size ∈ {1,2,4}`，改前读数 `size=1` → 占 5 张、剩 3 张、交互 **5/5**；
+  `size=2`（需求 10 位）→ 开出 **10 格**、READY 8、剩 0 张、交互 **0/5**；`size=4` → 16 格、交互 0/5。
+  即池子的补位公式（`size − ready − prewarming − legacy`，**逐模板**）里没有任何一项与舰队容量有关。
+- **选型（四条候选，全部开过一手文档；比较改变了默认值与形状）**：
+  1. *Kubernetes 的 capacity reservation*（`kubernetes.io/docs/tasks/administer-cluster/reserve-compute-resources/`）：
+     `Allocatable = Capacity − Kube-Reserved − System-Reserved − Hard-Eviction-Threshold`，调度器不许超卖 Allocatable；
+     预留是**逐资源的绝对量**（`kubeReserved: {cpu: 100m}`），只有 eviction 阈值才允许百分比。
+     → 借它的语义：本次实现取"绝对张数"而不是我最初想的比例，且 `allocatable = capacity − reserve` 同构。
+     另外它是 **node 级**的，正对应我们"每张卡各自算账"的形状。
+  2. *YARN Capacity Scheduler*（`hadoop.apache.org/docs/stable/hadoop-yarn/hadoop-yarn-site/CapacityScheduler.html`）
+     `capacity`（floor，各队列之和必须 = 100）＋ `maximum-capacity`（ceiling，"limits the elasticity"）。
+     → 结构上更像"多租户配额"，我们要的是"一个池对一份容量"，floor/ceiling 那对语义在这里没有第二个队列可用；
+     借的是"池不许吃掉全部弹性"这一点。
+  3. *Kueue*（`kueue.sigs.k8s.io/docs/concepts/cluster_queue/`）`nominalQuota` / `borrowingLimit` +
+     `reclaimWithinCohort` 抢占。→ 需要跨队列借用与抢占，本仓只有一个池、没有租户间借用，引入它是过度设计。
+  4. *Slurm* `OverSubscribe`（`slurm.schedmd.com/slurm.conf.html`）默认 NO＝独占。→ 语义相近但那是作业排程器，
+     我们没有 partition 概念，借不到实现。
+  未找到一手出处的两条也记在这里：**K8s 上游没有任何"预留 N 张 GPU"的旋钮**（extended resources 不许超卖，
+  kubelet 的预留减法只覆盖 cpu/memory/ephemeral-storage/pid/hugepages，device-plugin 资源是**覆盖写**进
+  allocatable 的），Slurm 的 `ReservedNodes` 在现版 `slurm.conf` 手册里 0 命中。也就是说"给 GPU 留 headroom"
+  这件事没有可直接引的成熟旋钮，能借的只有 K8s 的**公式与绝对量形状**。
+- **择一决定**：自研两道闸门，但**形状与措辞借 K8s**（逐资源绝对预留 + `allocatable = capacity − reserve`，
+  而且照它"预留不许超过容量"的方向补了可见信号，见下条）；不引依赖（Kueue/ClusterQueue 需要一个不存在的
+  第二队列，Slurm/YARN 是另一类调度器）。`warm_pool_reserve_slots` 默认 **0** 的理由是实测而不是习惯：
+  `size=1` 在 8 卡上占 5、交互 5/5，没有现实受害者；默认改成 1 会让单卡机器上池子永远空着。
+- **过程中把自己写坏一次**（这条最能说明为什么反证要成对）：第一版闸门按**模板**各查一次"有没有够用的卡"，
+  两个模板看见同样两张卡 ⇒ 同一张卡被许诺两次，`size=2` 仍开 10 格、交互 0/5，
+  而我先写的 4 支用例（不开装不下的格／卡够了必须开／reserve=1 留一张／reserve=0 填满）**全绿**。
+  补的那支是"2 张卡 × 2 个模板 × size=2 只能开 2 格"的共享预算用例——它一红，闸门改成跨模板的多重集预扣，
+  实测 `size=2 + reserve=2` → 6 格、剩 2 张、**交互 5/5。
+- **照 K8s 的另一半语义补了"预留大于容量"的可见信号**：kubelet 那条公式的方向是"预留不许超过容量"
+  （它的校验器遇到 `reservation > capacity` 是报错，不是悄悄归零）。这里不能抛异常（抛了会打死 worker 循环），
+  所以采取能落地的同语义版本：`reserve ≥ 当前空闲卡数` 且本轮本来要补位时，打一条
+  `warm pool reserve=N leaves no room in M free card(s)` 的 WARNING，并把跳过的格数计进
+  `stats["skipped_no_capacity"]`。用例两头都在：`reserve=3`／2 张卡 ⇒ 池子 0 格 **且必须有 WARNING**
+  （没有这条，配置写错的人只会看见"池子怎么老是空的"）；`reserve=0` 同形状照旧填满 2 格。
+  先写测试时它确实红了（`assert []`）——三条前置断言全过，唯独日志为空，说明缺的就是信号本身。
+- 计数：本条切片新增常驻用例 6 支（容量段 5 支：不开装不下的格／卡够了必须开／共享预算／reserve 留一张／reserve=0 照旧填满；外加 over-reservation 可见信号 1 支），全套 551 → 557（passed 556 / skipped 1 / failed 0；两份计数面由 `docs_test_counts` 现算核对）。`make warm-capacity` 一并进 Makefile（与 `make warm-sla`／`make policy-bench` 同一形状：人工/CI 档，不进每轮 validate）。**。
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 
 `docs/VALIDATION.json`（`make validate` 生成）：collected 462 / passed 461 /

@@ -81,7 +81,7 @@ CIPHER = WorkspaceCredentialCipher("test-key-claim-0001")
 def _make_manager(db_factory, *, enabled: bool = True, size: int = 1) -> WarmPoolManager:
     provider = MockProvider("http://127.0.0.1:8000")
     orchestrator = WorkspaceOrchestrator(db_factory, provider, Path("/tmp/test-warm-claim"))  # noqa: S108
-    settings = SimpleNamespace(warm_pool_enabled=enabled, warm_pool_size=size)
+    settings = SimpleNamespace(warm_pool_enabled=enabled, warm_pool_size=size, warm_pool_reserve_slots=0)
     return WarmPoolManager(db_factory, orchestrator, settings)
 
 
@@ -214,7 +214,7 @@ def test_claim_rotation_failure_not_delivered():
     orchestrator = WorkspaceOrchestrator(
         Factory, provider, Path("/tmp/test-warm-claim2")  # noqa: S108
     )
-    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1)
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1, warm_pool_reserve_slots=0)
     manager = WarmPoolManager(Factory, orchestrator, settings)
     with Factory() as db:
         _make_template(db)
@@ -249,7 +249,7 @@ def test_claim_rotates_runtime_credential_before_delivery():
     orchestrator = WorkspaceOrchestrator(
         Factory, provider, Path("/tmp/test-warm-claim3")  # noqa: S108
     )
-    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1)
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1, warm_pool_reserve_slots=0)
     manager = WarmPoolManager(Factory, orchestrator, settings)
     with Factory() as db:
         _make_template(db)
@@ -348,7 +348,7 @@ def test_pool_metrics_uses_real_counts():
     orchestrator = WorkspaceOrchestrator(
         Factory, provider, Path("/tmp/test-warm-claim4")  # noqa: S108
     )
-    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=3)
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=3, warm_pool_reserve_slots=0)
     manager = WarmPoolManager(Factory, orchestrator, settings)
     with Factory() as db:
         _make_template(db)
@@ -390,7 +390,7 @@ def test_warm_pool_rotation_failure_cleans_runtime():
     orchestrator = WorkspaceOrchestrator(
         Factory, provider, Path("/tmp/test-warm-leak1")  # noqa: S108
     )
-    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1)
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1, warm_pool_reserve_slots=0)
     manager = WarmPoolManager(Factory, orchestrator, settings)
     with Factory() as db:
         _make_template(db)
@@ -414,7 +414,7 @@ def test_warm_pool_rotation_failure_releases_gpu():
     orchestrator = WorkspaceOrchestrator(
         Factory, provider, Path("/tmp/test-warm-leak2")  # noqa: S108
     )
-    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1)
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1, warm_pool_reserve_slots=0)
     manager = WarmPoolManager(Factory, orchestrator, settings)
     with Factory() as db:
         _make_template(db)
@@ -435,7 +435,7 @@ def test_failed_claim_can_not_be_reclaimed():
     orchestrator = WorkspaceOrchestrator(
         Factory, provider, Path("/tmp/test-warm-leak3")  # noqa: S108
     )
-    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1)
+    settings = SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1, warm_pool_reserve_slots=0)
     manager = WarmPoolManager(Factory, orchestrator, settings)
     with Factory() as db:
         _make_template(db)

@@ -9,13 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models import (
     Gpu,
     GpuHost,
+    GpuStatus,
     OperationStatus,
     OperationType,
     Template,
@@ -74,14 +75,24 @@ def _seed_gpu(db) -> None:
     db.commit()
 
 
-def _make_manager(db_factory, *, warm_pool_enabled: bool = True, warm_pool_size: int = 1) -> WarmPoolManager:
+def _make_manager(
+    db_factory,
+    *,
+    warm_pool_enabled: bool = True,
+    warm_pool_size: int = 1,
+    warm_pool_reserve_slots: int = 0,
+) -> WarmPoolManager:
     provider = MockProvider("http://127.0.0.1:8000")
     orchestrator = WorkspaceOrchestrator(
         db_factory,
         provider,
         Path("/tmp/test-embodiedcloud-warmpool"),  # noqa: S108 测试隔离目录
     )
-    settings = SimpleNamespace(warm_pool_enabled=warm_pool_enabled, warm_pool_size=warm_pool_size)
+    settings = SimpleNamespace(
+        warm_pool_enabled=warm_pool_enabled,
+        warm_pool_size=warm_pool_size,
+        warm_pool_reserve_slots=warm_pool_reserve_slots,
+    )
     return WarmPoolManager(db_factory, orchestrator, settings)
 
 
@@ -366,3 +377,150 @@ def test_count_legacy_pool_excludes_user_workspaces(db_factory):
         db.commit()
         manager = _make_manager(db_factory)
         assert manager._count_legacy_pool(db, "cartpole") == 1
+
+
+# ---------------------------------------------------------------------------
+# 补位与舰队容量（登记表 N-29）
+#
+# 两条规则，每条都配「必须开火」与「不许误开火」两头。
+# 规则一（默认生效）：现在没有任何一张空卡装得下这个模板时，**不要开这一格池位**——
+# 开出来的行注定 provision 失败 → 收割成 FAILED → 再入队 DESTROY，是纯空转
+# （容量实测台量出来：`size=2` × 5 模板 = 10 个需求位 vs 8 张卡 ⇒ 建过 10 行、READY 只有 8）。
+# 规则二（`warm_pool_reserve_slots`，默认 0＝不预留）：给交互式启动留 N 张卡。
+# 默认 0 不是没想到，是实测：生产默认 `size=1` 在 8 卡舰队上只占 5 张，
+# 5 个模板的交互请求 5/5 都起得来（`make warm-capacity` 同一台子量到 `size=2` 时交互 0/5）。
+#
+# 每个用例各自开一份库：`db_factory` 是函数级的，同一支用例里开两次会撞 templates.slug 唯一键
+# （上一版就是这么红的）。
+# ---------------------------------------------------------------------------
+
+
+def _seed_cards(db, sizes_gib: list[int]) -> None:
+    """按 GiB 播种一组空闲卡（比 _seed_gpu 的单张 32 GiB 更接近真舰队的异构形状）。"""
+    db.add(GpuHost(id="cap-host", name="cap-h", address="127.0.0.1", provider="mock"))
+    for idx, gib in enumerate(sizes_gib):
+        db.add(
+            Gpu(
+                id=f"cap-gpu-{idx}",
+                gpu_uuid=f"cap-uuid-{idx}",
+                host_id="cap-host",
+                model=f"cap-{gib}gib",
+                memory_total=gib * 1024,
+                gpu_index=idx,
+                status=GpuStatus.AVAILABLE.value,
+            )
+        )
+    db.commit()
+
+
+def _warm_rows(db, template_id: str) -> int:
+    """该模板当前挂着的 warm-名字行数（未 tombstone 的）。"""
+    return int(
+        db.scalar(
+            select(func.count(Workspace.id)).where(
+                Workspace.template_id == template_id,
+                Workspace.name.like("warm-%"),
+                Workspace.deleted_at.is_(None),
+            )
+        )
+        or 0
+    )
+
+
+def _two_templates(db, small_gb: int = 8, big_gb: int = 24) -> None:
+    for tid, gib in (("small", small_gb), ("big", big_gb)):
+        _make_template(db, tid)
+        row = db.get(Template, tid)
+        assert row is not None
+        row.recommended_vram_gb = gib
+    db.commit()
+
+
+def test_maintain_does_not_open_a_slot_no_card_can_serve(db_factory):
+    with db_factory() as db:
+        _two_templates(db)
+        _seed_cards(db, [8])  # 只有一张 8 GiB：24 GiB 的模板无论哪一轮都起不来
+        manager = _make_manager(db_factory, warm_pool_size=1)
+        stats = manager.maintain(db)
+        assert _warm_rows(db, "small") == 1, "装得下的那格被误伤（闸门太宽）"
+        assert _warm_rows(db, "big") == 0, "没有卡装得下 big 却还是开了池位＝注定失败的行"
+        assert stats["skipped_no_capacity"] == 1, stats
+
+
+def test_maintain_fills_every_slot_a_card_can_serve(db_factory):
+    """规则一的「不许误开火」：加一张 24 GiB 卡，同一份代码就必须把 big 也填上。
+
+    没有这一支，上面那条绿可以来自"永远不开大模板"甚至"永远不开格"。
+    """
+    with db_factory() as db:
+        _two_templates(db)
+        _seed_cards(db, [8, 24])
+        manager = _make_manager(db_factory, warm_pool_size=1)
+        stats = manager.maintain(db)
+        assert (_warm_rows(db, "small"), _warm_rows(db, "big")) == (1, 1)
+        assert stats["skipped_no_capacity"] == 0, stats
+
+
+def test_fill_is_a_shared_budget_across_templates(db_factory):
+    """闸门必须跨模板算总账：2 张卡 × 2 个模板 × size=2 = 4 格需求，只能开 2 格。
+
+    这一支是把自己先写坏之后补上的：第一版闸门按模板各查一次"有没有够用的卡"，
+    两个模板都看见同样的两张卡 ⇒ 4 格全开、交互饿死照旧（`make warm-capacity`
+    实测 size=2 时建过 10 行而 READY 只有 8）。共享多重集之后才收敛到 2。
+    """
+    with db_factory() as db:
+        _two_templates(db, small_gb=8, big_gb=8)
+        _seed_cards(db, [8, 8])
+        manager = _make_manager(db_factory, warm_pool_size=2)
+        stats = manager.maintain(db)
+        opened = _warm_rows(db, "small") + _warm_rows(db, "big")
+        assert opened == 2, f"闸门按模板各算各的，同一张卡被许诺了两次：{opened} 格 / 2 张卡"
+        assert stats["skipped_no_capacity"] == 2, stats
+
+
+def test_over_reservation_is_reported_not_silently_emptying_the_pool(db_factory, caplog):
+    """`reserve` ≥ 空闲卡数时不许静默把池子清空——K8s 对"预留大于容量"是报错，不是悄悄归零。
+
+    这里不抛异常（抛了会把 worker 循环打死），但必须留下一条 WARNING：
+    配置写错的人要在日志里看见，而不是只看见"池子怎么老是空的"。
+    """
+    import logging
+
+    with db_factory() as db:
+        _make_template(db, "cartpole")
+        db.get(Template, "cartpole").recommended_vram_gb = 8
+        _seed_cards(db, [48, 48])
+        db.commit()
+        manager = _make_manager(db_factory, warm_pool_size=2, warm_pool_reserve_slots=3)
+        with caplog.at_level(logging.WARNING, logger="embodiedcloud.warmpool"):
+            stats = manager.maintain(db)
+        assert _warm_rows(db, "cartpole") == 0, "预留 3 张却还有 2 张卡，池子不该占位"
+        assert stats["skipped_no_capacity"] == 2, stats
+        warns = [r.getMessage() for r in caplog.records if "reserve" in r.getMessage().lower()]
+        assert warns, "预留大于容量没有任何可见信号：配置写错只会表现为'池子总是空'"
+
+
+def test_reserve_slot_holds_one_card_back_for_interactive(db_factory):
+    with db_factory() as db:
+        _make_template(db, "cartpole")
+        db.get(Template, "cartpole").recommended_vram_gb = 8
+        _seed_cards(db, [48, 48])
+        db.commit()
+        manager = _make_manager(db_factory, warm_pool_size=2, warm_pool_reserve_slots=1)
+        manager.maintain(db)
+        assert _warm_rows(db, "cartpole") == 1, "reserve=1 没把一张卡留给交互请求"
+
+
+def test_reserve_zero_keeps_the_old_behind_no_headroom(db_factory):
+    """规则二的「不许误开火」：同一形状下 reserve=0 必须照旧填满 2 格。
+
+    否则上一条的 1 可能来自"闸门永远只放一格"这种假合规。
+    """
+    with db_factory() as db:
+        _make_template(db, "cartpole")
+        db.get(Template, "cartpole").recommended_vram_gb = 8
+        _seed_cards(db, [48, 48])
+        db.commit()
+        manager = _make_manager(db_factory, warm_pool_size=2, warm_pool_reserve_slots=0)
+        manager.maintain(db)
+        assert _warm_rows(db, "cartpole") == 2

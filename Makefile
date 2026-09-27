@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 UV ?= uv
 VERSION ?= 0.7.0
 
-.PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane policy-bench warm-sla \
+.PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane policy-bench warm-sla warm-capacity \
         lint typecheck build smoke clean check demo amd64-probe \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
@@ -53,6 +53,11 @@ policy-bench:
 # （tests/test_warmpool_http_surface.py）与这里的三条 print 判的是同一批事实。
 warm-sla:
 	$(PYTHON) scripts/warm_pool_sla_lab.py
+
+# warm pool 补位量 vs 舰队容量的对账台（N-29 的读数从这里出）。人工/CI 档，不进每轮 validate。
+# 用法：make warm-capacity [SIZES=1,2,4 RESERVE=0,0,2]
+warm-capacity:
+	$(PYTHON) -m scripts.warm_pool_capacity_lab $(if $(SIZES),--sizes $(SIZES),) $(if $(RESERVE),--reserve $(RESERVE),)
 
 lint:
 	$(PYTHON) -m ruff check app tests edge_agent scripts
