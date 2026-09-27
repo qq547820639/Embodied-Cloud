@@ -301,32 +301,35 @@ class KubernetesProvider:
         )
 
     def start(self, workspace: Workspace) -> None:
-        """把 Deployment 副本扩回 1（从 STOPPED 恢复）。"""
-        if not workspace.container_name:
-            return
+        """把 Deployment 副本扩回 1（从 STOPPED 恢复）。
+
+        名字与 destroy/reconcile 同源（列没落上就按约定推导）：改前的
+        `if not workspace.container_name: return` 让"列是空的"变成静默成功，
+        上层 `_release_admitted(command_succeeded=True)` 就被"命令没报错"骗过去了（N-70）。
+        """
+        deployment_name = workspace.container_name or self._deployment_name(workspace)
         api = self._require_client()
         try:
             api.AppsV1Api().patch_namespaced_deployment_scale(
-                name=workspace.container_name,
+                name=deployment_name,
                 namespace=self.settings.k8s_namespace,
                 body={"spec": {"replicas": 1}},
             )
         except Exception as exc:
-            raise RuntimeError(f"启动 deployment {workspace.container_name} 失败: {self._describe(exc)}") from exc
+            raise RuntimeError(f"启动 deployment {deployment_name} 失败: {self._describe(exc)}") from exc
 
     def stop(self, workspace: Workspace) -> None:
         """把 Deployment 副本缩到 0 (保留资源定义, 便于再次启动)."""
-        if not workspace.container_name:
-            return
+        deployment_name = workspace.container_name or self._deployment_name(workspace)
         api = self._require_client()
         try:
             api.AppsV1Api().patch_namespaced_deployment_scale(
-                name=workspace.container_name,
+                name=deployment_name,
                 namespace=self.settings.k8s_namespace,
                 body={"spec": {"replicas": 0}},
             )
         except Exception as exc:
-            raise RuntimeError(f"停止 deployment {workspace.container_name} 失败: {self._describe(exc)}") from exc
+            raise RuntimeError(f"停止 deployment {deployment_name} 失败: {self._describe(exc)}") from exc
 
     def destroy(self, workspace: Workspace) -> None:
         """删除 Deployment / Service / PVC (先删 Deployment 释放 PVC 挂载; 404 视为已删除)."""

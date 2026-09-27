@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 702 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 711 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702，门禁 G0.72／G0.73／G0.74／G0.75／G0.76。
+- 计数面 665→678→686→693→701→702→711，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -754,6 +754,61 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   N-63 的处置行与 N-69 的三重不可见分别记下，不再开双份。
 - 计数面 701→702，门禁 G0.76。
 
+### 「不存在」只能由引擎说（N-78，闭登记项 N-70）
+- 缺陷有两处伪造缺席，都落在 `app/services/providers/docker.py`：
+  ① `reconcile` 开头 `if not workspace.container_name: return MISSING` —— 名字是 provision
+  先 `docker run --name ec-…` 建容器、之后才持久化到那一列的，中间崩了就留下「容器活着而列为空」；
+  而同一时间 `destroy`/`pull_artifact` 按 `ec-{id[:12]}` 推导去找它 ⇒ 一个容器同时是活的和没的。
+  ② `inspect` 把**任何** rc!=0 都读成 `{'state': 'absent'}` —— 连「守护进程连不上」也算。
+  后果接到 N-63 的准入上：`_release_admitted(command_succeeded=False)` 只认 MISSING，
+  于是 daemon 抖动那段时间里每个 workspace 都「看起来没了」，卡被放回池子。
+- 本机 docker CLI 实测（daemon 在跑，非推断）：两种形状同为 rc=1，只差 stderr ——
+  不存在 `error: no such object: <name>`；连不上 `Cannot connect to the Docker daemon at
+  tcp://127.0.0.1:1. Is the docker daemon running?`；另有 `docker rm -f <absent>` rc=0 无输出、
+  `docker stop/start <absent>` rc=1 `Error response from daemon: No such container: X`、
+  `docker ps -a --filter name=^X$` rc=0 空输出。⇒ 任何按 rc 判决的实现必然把两者混为一谈，
+  分档只能读文案。
+- 选型门禁（本轮真做了外部核对）：候选 A `docker` 7.2.0（docker-py；PyPI JSON 实取 107 KB，
+  `LICENSE` 正文取回 10758 字节首行 Apache 2.0，近三档 releases 7.0.0b3/7.1.0/7.2.0，
+  `docker/errors.py` 取回 5379 字节并读到 :93 把 404 单独收成 `NotFound(APIError)`、
+  :83-90 还分 client/server 错）；候选 B `podman` 5.8.0（podman-py，PyPI license 字段直接读到
+  Apache License；面向 podman 的 REST，与本机 docker CLI／`--gpus` argv 路径不对口）。
+  择一：**自研＋借 A 的类型语义**（不引依赖）——本仓 `provision` 故意把 argv 交给守护进程自己
+  验收（G0.19 钉着那批判据），换 SDK 会把它拆掉，且 `edge_agent` 是 stdlib-only 包；
+  借到的具体东西是「404／不存在」与「问不到」是两个判决，不是一个布尔。
+- 改法（三份尺子共同的落点）：`DockerProvider._name()` 成为容器名唯一推导口径（provision/start/
+  stop/destroy/inspect/logs/wait_ready/exec/pull_artifact 全改读它）；`inspect` 失败经
+  `_absent_or_unknown(stderr)` 分 absent／unknown，`_run_checked` 的两档确认共用同一份名字表
+  （原来两份文案各写各的，`"no such"`／`"not found"` 那一份比实测文案宽，读成 absent 就放卡）；
+  `reconcile` 把 unknown 读成 UNKNOWN。`KubernetesProvider.start/stop` 原来是
+  `if not workspace.container_name: return` —— 空列时「命令没报错但其实什么都没做」，
+  改为与 `destroy`/`reconcile` 同源的 `_deployment_name`。
+- 判据 `tests/test_provider_absence_evidence.py`（8 支）＋真引擎那一条
+  `tests/test_docker_provider_integration.py::test_reconcile_asks_the_engine_when_the_name_column_is_empty`：
+  空列＋引擎说在跑 ⇒ ALIVE（改前 MISSING）；引擎说 `no such object` ⇒ MISSING（合规侧，改前也绿，
+  如实标成护栏）；连不上 ⇒ inspect unknown／reconcile UNKNOWN；跨文件后果那一支直接调
+  `_release_admitted(..., command_succeeded=False) is False`，并把「`command_succeeded=True` 时
+  UNKNOWN 放行」这一 by-design 口子也断出来（限定①登记于 N-63 处置行）；stop/start 在空列时必须
+  真发出带推导名的命令；结构判据按 AST 数「以空列断定 MISSING／返回 absent／裸 return 空转」的形状
+  必须为 0，且每个 provider 模块的容器名推导式恰好一份（配三种改前形状的反向对照 + 真源码放回
+  一行的正向对照）。
+- 自己踩到的一处判据缺陷（记下来因为它改变了结论）：结构判据第一版用 `"ec-" in unparse(node)` 数推导位点，
+  把 `_pvc_name` 的 `f"ec-pvc-{...}"` 也数进去，读出「k8s 有两份推导」的假违规 —— 收紧成「首个字面量
+  恰为 `ec-`」，并给这个假阳性补了一条常驻反向对照（PVC 那份不许被算成容器名推导）。
+- 改前复算（把 `docker.py` 与 `k8s.py` 一起换成 HEAD）：单元档 `F.FFFF..`（8 支里 5 开火），
+  一手读数 `assert MISSING is ALIVE`／`assert 'absent' == 'unknown'`；真引擎档也红：
+  `空列被当成缺席：引擎说这个容器在跑`（那是一个真在跑的 `ec-…` 容器）。跑完按 sha
+  `18235e7e…`／`e6b04bce…` 还原一致。
+- 邻面：`test_docker_provider`／`test_k8s_provider`／`test_docker_gate_hardening`／
+  `test_stop_release_admission`／`test_streaming_lifecycle` 与新判据合跑 66 支 rc=0；
+  docker 集成档（真容器）31 支 rc=0 无 skip；`ruff check app tests` All checks passed
+  （中途被自己一条对未启用规则 `ARG002` 的多余 noqa 判红一次）；`mypy app` Success（41 files）。
+- 未证实：daemon 真被掐断这一档在常驻侧只用夹具文案模拟（把守护进程停掉会打断同树上的其它用例，
+  属可控性限制）；`restarting`/`created`/`paused` 与 K8s `available_replicas=0`（含 Pending pod）
+  现在仍被判 MISSING —— 那是另一根轴（「存在但没在跑」到底算不算还在吃卡），本轮没自行改语义，
+  登记为 N-79。
+- 计数面 702→711，门禁 G0.77。
+
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
@@ -779,18 +834,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `app/routers/workspaces.py:55` `warm_pool.claim(...)`。常驻侧
   `tests/test_warmpool_claim.py:403` 只断 `provider.destroy_calls >= 1`（数调用不断结果），
   夹具的 `destroy` 根本不会失败，也报不出 runtime 状态。
-- `N-70`：**`DockerProvider.reconcile` 用 DB 列推断“容器不存在”，而同一个 provider 的
-  destroy 会按命名约定把名字推出来** ⇒ 假缺席。`providers/docker.py:435-436`
-  `if not workspace.container_name: return RuntimeState.MISSING`，而 `docker.py:285`
-  `container_name = workspace.container_name or f"ec-{workspace.id[:12]}"`（注释自己写了
-  “保证补偿清理可达”），`stop`（:277）却只在有名字时才动作。后果直接压在本轮的判据上：
-  `_release_admitted` 消费 `reconcile`，遇到“容器已创建但名字还没落库”（provision 在
-  `orchestrator.py:264` 才写 `container_name`，晚于 readiness 闸门）会读成 MISSING 并放行
-  释放。同档还有 :437-440 的 `except Exception: return UNKNOWN`——“问不到”在成功档被
-  当成“说没了”（`orchestrator.py:401-402`），k8s 侧 `providers/k8s.py:539-542` 对任意非 404
-  API 错误同样回 UNKNOWN。修法要先定“名字的唯一推导位”（stop/destroy/reconcile 三处
-  现在两套逻辑），再谈把 UNKNOWN 从放行档里摘出去——后者会让 mock/演示档全停不下来
-  （`providers/mock.py:72-74` 只会回 UNKNOWN），需要新的档位区分，不能顺手改。
+- ~~`N-70`：`DockerProvider.reconcile` 用 DB 列推断「容器不存在」，而同一个 provider 的 destroy 会按命名约定把名字推出来 ⇒ 假缺席~~ —— **已由 N-78 闭合**：容器名推导收成一处 `DockerProvider._name()`（start/stop/destroy/inspect/logs/wait_ready/exec/pull_artifact 同源），`inspect` 失败按 stderr 分 absent／unknown（本机实测两形状同为 rc=1：`error: no such object` vs `Cannot connect to the Docker daemon at …`），`reconcile` 把 unknown 读成 UNKNOWN ⇒ `_release_admitted(command_succeeded=False)` 在 daemon 不可达时拒绝放卡；`KubernetesProvider.start/stop` 的空列静默空转同批改掉。判据 `tests/test_provider_absence_evidence.py` 8 支（含真引擎档 `tests/test_docker_provider_integration.py::test_reconcile_asks_the_engine_when_the_name_column_is_empty`）；改前单元档 `F.FFFF..`（5 开火）、真引擎档红在「空列被当成缺席：引擎说这个容器在跑」。
 - `N-72`：**可用额为 0 时仍允许开机**（出厂默认档）。`billing.check_launch_eligible` 只挡  `available < 0`（`app/services/billing.py:~80`），而 `app/config.py:56` 出厂默认  `billing_enforce_preauthorization=False` ⇒ 零余额成员可以启动，钱在第一次结算时变成负数、  靠配额 monitor 兜。这是应然问题（要不要把 0 也挡掉／出厂是否该开预授权），不是实现 bug，  N-71 的判据已把两档现状钉住：预授权开启时 0 余额必须被拒。
 - `N-75`：**`gpu_seconds_total` 在 stop 重放里加两次**（N-74 量出来的一半）。`_finalize_stop`
   每次进入都 `record_gpu_seconds(booked)`，而重放时 `booked` 仍是那一条 USAGE 行的秒数（账本幂等
@@ -814,6 +858,15 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
 - ~~`N-33`：`tests/test_gpu_pool_guard.py` 那两支带哨兵（缺余量时算合法跳过）~~ —— 已由 **N-41 闭合**：
   夹具显式达成前置并断言，哨兵与闭集条目一并删除，条件跳过归零。
+
+- `N-79`：**「存在但没在跑」被判成缺席**（N-78 没动的那根轴）。`DockerProvider.reconcile`
+  在 inspect 拿到非 running 的 state 时落到 `RuntimeState.MISSING` —— 这涵盖了
+  `created`/`restarting`/`paused`/`dead` 这些「容器还在、只是暂时没进程」的态；`KubernetesProvider.reconcile`
+  （`providers/k8s.py:535-549`）同样把 `available_replicas` 读不到 ≥1 一律判 MISSING，含 pod 还在
+  Pending／节点不可调度的那一段时间。释放准入认 MISSING 就放卡 ⇒ 一个正在 restart 的容器或一个
+  迟早就绪的 pod 会与新人共用同一张卡。要不要把这些态改成 UNKNOWN／ALIVE 是口径决定（改严会让
+  永久卡住的 pod 把 GPU 钉死，需要配超时），本轮只登记不改：N-78 已经改了「问不到」那一档的判法，
+  这一档必须连超时策略一起定。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
 - **裁决依据是查来的，不是拍的**：读 AWS IoT Jobs 的任务生命周期页

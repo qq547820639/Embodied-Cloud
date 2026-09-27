@@ -418,6 +418,32 @@ def test_destroy_derives_container_name_when_not_persisted(provider, containers)
     assert not provider._container_exists(workspace), "按命名约定推导 container_name 的补偿清理未生效"
 
 
+def test_reconcile_asks_the_engine_when_the_name_column_is_empty(provider, containers):
+    """真引擎上的 N-70 判决：容器活着而列是空的 ⇒ ALIVE，停过之后才 MISSING。
+
+    改前 `reconcile` 开头 `if not workspace.container_name: return MISSING` —— 这台真机上
+    那个容器明明在跑，控制面却说它不在了，于是释放准入会把还有人吃的卡放回池子。
+    这里用 `ec-{id[:12]}` 造一个"名字合乎约定但没落库"的真容器，把两档都走一遍：
+    ALIVE（问到了）→ stop（现在真的发命令了）→ MISSING（引擎说没了）。
+    """
+    wid = str(uuid.uuid4())
+    name = f"ec-{wid[:12]}"
+    proc = _docker("run", "-d", "--rm", "--name", name, containers.image, "sh", "-c", "sleep 60")
+    assert proc.returncode == 0, proc.stderr
+    containers.names.append(name)
+    assert wait_running(provider, ws(name, workspace_id=wid)), "容器未进入 running"
+
+    workspace = ws(None, workspace_id=wid)  # 列没落上
+    assert provider.reconcile(workspace) is RuntimeState.ALIVE, (
+        "空列被当成缺席：引擎说这个容器在跑"
+    )
+
+    provider.stop(workspace)
+    assert provider.reconcile(workspace) is not RuntimeState.ALIVE, (
+        "stop 在空列时静默空转（改前的 `if workspace.container_name:`）"
+    )
+
+
 def test_run_checked_raises_on_real_failure_but_swallows_absent(provider, containers):
     # 幂等：容器不存在时 stop/start/rm 均不得抛
     provider.stop(ws("ec-dtest-absent"))
