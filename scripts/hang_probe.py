@@ -45,20 +45,27 @@ TIERS = {
 }
 
 CHILD = """
-import json, subprocess, sys
+import json, subprocess, sys, time
 cap = float({cap!r})
 _real = subprocess.run
+hit = {{"timeouts": 0, "seconds": 0.0}}
 def run(*args, **kwargs):
-    if kwargs.get("timeout") is None:
-        kwargs["timeout"] = cap
-    else:
-        kwargs["timeout"] = min(float(kwargs["timeout"]), cap)
-    return _real(*args, **kwargs)
+    requested = kwargs.get("timeout")
+    kwargs["timeout"] = cap if requested is None else min(float(requested), cap)
+    started = time.monotonic()
+    try:
+        return _real(*args, **kwargs)
+    except subprocess.TimeoutExpired:
+        # 数一次"被上限掐掉"的探测：判据要断的是"总耗时 = 次数 × 有效上限"，
+        # 而不是一个拍脑袋的秒数天花板（档位探测次数会变，写死的上限必然过时）。
+        hit["timeouts"] += 1
+        hit["seconds"] += time.monotonic() - started
+        raise
 subprocess.run = run
 sys.path.insert(0, ".")
 import importlib
 mod = importlib.import_module({module!r})
-print(json.dumps({{"reason": mod.gate_reason()}}))
+print(json.dumps({{"reason": mod.gate_reason(), "timeouts": hit["timeouts"], "waited": round(hit["seconds"], 2)}}))
 """
 
 # 三种剧本，代价差别正是想知道的事：
@@ -113,19 +120,21 @@ def _fake_docker_dir(tmp: Path, mode: str) -> tuple[Path, list[str]]:
 
 
 def _fake_round_trip(fake_dir: Path, env: dict[str, str]) -> float:
-    """量一次"替身自己答一句话要多久"（取三次里的最大值）。
+    """替身答一句话要多久——三次采样取**中位数**。
 
-    为什么需要：上一轮的超时上限是写死的秒数，高负载机器上替身自己都来不及在 2s 内答话，
-    于是"挂起取证"测到了机器负载而不是代码。上限必须由这个数算出来。
+    上限不能写死：高负载时替身自己就来不及答话（本机实测同一命令 0.07s 与 3.03s 都出现过），
+    那会让"挂起取证"测到机器负载而不是代码。取中位数而不是最大值：一次偶发慢采样
+    会把上限撑到好几倍，反过来让这台取证工具自己变成耗时大户。
     """
-    worst = 0.0
+    samples: list[float] = []
     for _ in range(3):
         started = time.monotonic()
         subprocess.run(  # noqa: S603 受控常量参数（替身脚本本身）
             [str(fake_dir / "docker"), "version"], env=env, text=True, capture_output=True, timeout=30
         )
-        worst = max(worst, time.monotonic() - started)
-    return round(worst, 3)
+        samples.append(time.monotonic() - started)
+    samples.sort()
+    return round(samples[len(samples) // 2], 3)
 
 
 def measure(mode: str, cap_seconds: float) -> dict:
@@ -159,8 +168,9 @@ def measure(mode: str, cap_seconds: float) -> dict:
         latency = 0.0
         if fake_dir is not None:
             latency = _fake_round_trip(fake_dir, env)
-            # 6 倍往返：一次 gate_reason() 通常要跑 2–5 次探测，留够余量又不无限放大
-            effective = min(25.0, max(cap_seconds, round(6 * latency, 2)))
+            # 4 倍中位往返、封顶 10s：既不让"没挂起"的探测被误判成挂起，
+            # 也保证最坏耗时是"探测次数 × 10s"这种可解释的量
+            effective = min(10.0, max(cap_seconds, round(4 * latency, 2)))
         else:
             effective = cap_seconds
         injected["fake_round_trip_seconds"] = latency
@@ -174,15 +184,21 @@ def measure(mode: str, cap_seconds: float) -> dict:
                 timeout=int(cap_seconds * 12 + 60),
             )
             elapsed = round(time.monotonic() - started, 2)
-            reason = None
+            reason, timeouts, waited = None, 0, 0.0
             if proc.returncode == 0:
                 try:
                     start = proc.stdout.index("{")
-                    reason = json.loads(proc.stdout[start: proc.stdout.rindex("}") + 1]).get("reason")
+                    payload = json.loads(proc.stdout[start: proc.stdout.rindex("}") + 1])
+                    reason = payload.get("reason")
+                    timeouts = int(payload.get("timeouts", 0))
+                    waited = float(payload.get("waited", 0.0))
                 except ValueError:
                     reason = None
             rows[tier] = {
                 "bound_s": injected["bound_seconds"],
+                "timeouts_observed": timeouts,
+                "waited_s": waited,
+                "effective_timeout_s": effective,
                 "offenders": [],
                 "reason": reason or "",
                 "stderr": proc.stderr[-200:] if reason is None else "",

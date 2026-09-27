@@ -2,17 +2,17 @@
 
 > 版本：0.7.0（自动生成，勿手改）
 
-## 总览：**FAIL**
+## 总览：**PASS_WITH_PHYSICAL_PENDING**
 
 | Gate | 状态 | 明细 |
 |---|---|---|
 | Test collected | PASS | 641 |
-| Test run | FAIL | failed=1 | `tests.test_hang_probe::test_hang_later_mode_measures_a_finite_cost_per_tier` |
+| Test run | PASS | failed=0 |
 | lint | PASS |  |
 | typecheck | PASS |  |
 | migration | PASS |  |
 | build | PASS |  |
-| docs_test_counts | FAIL | CHANGELOG 当前版本节: 文档写 (641, 0)，实测 (641, 1); docs/CURRENT_STATE.md: 文档写 (641, 0)，实测 (641, 1) |
+| docs_test_counts | PASS | CHANGELOG/CURRENT_STATE 计数面与本报告一致 |
 | docs_row_order | PASS | 带编号的登记表行均按号递增且无重号 |
 | report_split | PASS | 环境读数清单与报告字段对得上 |
 | docs_state_rows | PASS | 状态页的可复现数与本报告一致，且未手抄环境读数 |

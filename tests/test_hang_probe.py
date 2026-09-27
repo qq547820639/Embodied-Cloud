@@ -39,7 +39,11 @@ def test_hang_later_mode_measures_a_finite_cost_per_tier() -> None:
     for tier, row in report["tiers"].items():
         assert row["reason"], f"{tier} 挂住却没给出原因：{row}"
         assert row["offenders"] == [], f"{tier} 的原因不可行动：{row}"
-        assert 0 < row["elapsed_s"] < 60, f"{tier} 的代价不像被超时封顶：{row['elapsed_s']}s"
+        # 代价的天花板不写死秒数：等于"被掐掉的探测次数 × 当场量出的有效上限"（+调度余量）
+        assert row["timeouts_observed"] >= 1, f"{tier} 一次都没被掐，剧本没生效：{row}"
+        assert 0 < row["elapsed_s"] <= row["timeouts_observed"] * row["effective_timeout_s"] + 4, (
+            f"{tier} 的耗时对不上探测次数 × 有效上限：{row}"
+        )
     # 这一支的"卡住"必须是真卡住：假 CLI 里除 version 外全是 sleep
     assert report["injected"]["hang_subcommands"], report["injected"]
 
@@ -104,7 +108,7 @@ def test_half_hang_isolates_which_probe_pays_and_which_does_not() -> None:
         # 契约而不是环境：原因给得出、可行动、代价有上限
         assert row["reason"], (tier, row)
         assert row["offenders"] == [], (tier, row)
-        assert row["elapsed_s"] <= row["bound_s"], (tier, row)
+        assert row["elapsed_s"] <= row["timeouts_observed"] * row["effective_timeout_s"] + 4, (tier, row)
     # 至少有一档几乎不付费（剧本没有把所有探测一律掐死），而依赖兜底列表探测的那一档要付费
     # 上限由探针当场量出来的替身往返时间决定，不在测试里写死秒数
     injected = data["reports"]["half-hang"]["injected"]
@@ -142,6 +146,9 @@ def test_the_dual_half_hang_flips_who_pays() -> None:
         b["injected"]["effective_timeout_seconds"],
     )
     assert margin >= 2, (a["injected"], b["injected"])
+    for rows in (a_rows, b_rows):
+        for tier, row in rows.items():
+            assert row["elapsed_s"] <= row["timeouts_observed"] * row["effective_timeout_s"] + 4, (tier, row)
     assert b_rows["docker"]["elapsed_s"] > a_rows["docker"]["elapsed_s"] + margin, (
         a_rows["docker"], b_rows["docker"])
     for label, rows in (("half-hang", a_rows), ("half-hang-b", b_rows)):
@@ -149,4 +156,5 @@ def test_the_dual_half_hang_flips_who_pays() -> None:
             # 只断"这台子保证的事"：原因给得出、可行动、代价有上限。
             # 不断具体哪一档快、原因里必须出现哪个词——那在别的机器上是假的。
             assert row["reason"] and row["offenders"] == [], (label, tier, row)
-            assert row["elapsed_s"] <= row["bound_s"], (label, tier, row)
+            assert row["elapsed_s"] <= row["timeouts_observed"] * row["effective_timeout_s"] + 4, (
+                label, tier, row)
