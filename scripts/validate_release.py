@@ -16,11 +16,14 @@ GPU/K8s/Streaming/Robot 物理状态。CURRENT_STATE 引用本文件输出。
 用法：python scripts/validate_release.py
 """
 
+import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,14 +48,106 @@ ENV_CHECK_KEYS = ("unexpected_skips",)
 ENV_CHECK_PREFIXES = ("integration_",)
 # 哪些字段在"可复现的 check"里其实属环境读数（整条 check 留下、剥掉这几个字段）。
 ENV_FIELDS: dict[str, tuple[str, ...]] = {
-    "test_run": ("passed", "skipped", "skipped_names"),
+    "test_run": ("passed", "skipped", "skipped_names", "elapsed_seconds", "host_load", "host_cpus"),
 }
 
 
 def run(cmd: list[str], timeout: int = 900, env: dict[str, str] | None = None) -> tuple[int, str]:
     # S603: cmd 由本脚本受控常量构造（[sys.executable, "-m", pytest/ruff/mypy/...]），无用户输入
-    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout, env=env)  # noqa: S603
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout, env=env
+        )
+    except subprocess.TimeoutExpired:
+        # 超时不再往上抛 traceback：退 124（本仓既有的超时约定，见 tests/docker_probe.py），
+        # 并把是哪条命令、预算多少写进读数——lint 慢与测试慢至少要先分得开。
+        return 124, f"命令超时（{timeout}s）：{' '.join(cmd)}"
     return result.returncode, (result.stdout + result.stderr).strip()
+
+
+# 全量 test run 的预算与"超了怎么办"。
+#
+# 为什么原来那条不行：`subprocess.run(timeout=900)` 超时走的是 `process.kill()`（SIGKILL，
+# 本机 stdlib subprocess.py:552/566 实测读过），而 pytest 的 JUnit 报告只在
+# `pytest_sessionfinish` 里一次性写出（本机 pytest 9.1.1 `_pytest/junitxml.py:647`，
+# `open(self.logfile, "w")` 在 :652）。⇒ 被 SIGKILL 的这一跑**不产报告**，
+# 而 `dist/validate-junit.xml` 还留着上一跑的字节——下一段代码 `if junit.exists()`
+# 就会把昨天的读数当今天的用。今天没踩中这条，只是因为异常先把整个脚本打死了。
+#
+# 预算的出处（不再是拍一个数）：本机 `make validate` 那跑 suite time 632.3s／647 例
+# （2026-09-27，dist/validate-junit.xml 自报），900s 只有 1.42 倍余量；同一天另一个会话
+# 在同一台 10 vCPU 机器上并排跑它自己的 pytest，宿主 load 冲到 47，这一跑 >900s 被掐。
+# 1500s ≈ 2.4× 实测分布；而越界不再是 traceback，是一条具名判决，所以"怕太宽"这件事
+# 已经不存在——宽预算的代价只是晚一点知道。
+SUITE_BUDGET_SECONDS = 1500
+SUITE_GRACE_SECONDS = 30
+
+
+def run_pytest_bounded(
+    cmd: list[str],
+    junit_path: Path,
+    budget: float = SUITE_BUDGET_SECONDS,
+    grace: float = SUITE_GRACE_SECONDS,
+) -> dict[str, object]:
+    """跑全量 pytest：超时先 SIGINT 让它自己收尾（那条路会产 JUnit），兜底才 SIGKILL。
+
+    `start_new_session=True` 不是可选项：pytest 会派生子进程（真子进程档），
+    不发信号给整个进程组就只杀得掉包装进程，孙子们继续占着守护进程与端口。
+    """
+    junit_path.unlink(missing_ok=True)  # 上一次的报告绝不能被当成本次的
+    started = time.monotonic()
+    proc = subprocess.Popen(  # noqa: S603 cmd 由本脚本受控常量构造
+        cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    timed_out = False
+    killed = False
+    try:
+        out, err = proc.communicate(timeout=budget)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        try:
+            out, err = proc.communicate(timeout=grace)
+        except subprocess.TimeoutExpired:
+            killed = True
+            proc.kill()
+            out, err = proc.communicate()
+    return {
+        "returncode": proc.returncode,
+        "elapsed": round(time.monotonic() - started, 1),
+        "budget": budget,
+        "timed_out": timed_out,
+        "hard_killed": killed,
+        "text": ((out or "") + (err or "")).strip(),
+    }
+
+
+def suite_timeout_verdict(timed_out: bool, junit_present: bool, budget: float) -> dict | None:
+    """越界时给提交面的一句话；没越界返回 None。
+
+    刻意**不含 elapsed**：跑了多久是环境读数，留在本次跑那一侧；提交面上这句话必须
+    换台机器也逐字节相同（N-31 的分档），否则"没跑完"会把不可复现的数字写进可复现面。
+    判决是 FAIL 不是 PENDING：认证确实没发生，把它洗成"待验"等于放行。
+    """
+    if not timed_out:
+        return None
+    how = "SIGINT 后收尾，部分用例名可用" if junit_present else "SIGINT 也没换来报告，这一跑没有任何用例名"
+    return {
+        "status": "FAIL",
+        "note": f"全量 test run 未在预算内跑完（预算 {budget:g}s；{how}）——本轮无法计数，"
+        "这是认证未发生，不是代码红；宿主负载与共驻进程记在本次跑读数里",
+    }
+
+
+def host_pressure() -> dict[str, object]:
+    """宿主压力读数：只进本次跑那一侧（它随机器变），用来解释"为什么这一跑没跑完"。"""
+    try:
+        load = [round(x, 2) for x in os.getloadavg()]
+    except OSError:
+        load = []
+    return {"host_load": load, "host_cpus": os.cpu_count()}
 
 
 def build_env() -> dict[str, str]:
@@ -701,9 +796,11 @@ def main() -> int:
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
     junit = dist / "validate-junit.xml"
-    code, _ = run([PYTHON, "-m", "pytest", "--junitxml", str(junit)])
+    suite = run_pytest_bounded([PYTHON, "-m", "pytest", "--junitxml", str(junit)], junit)
+    code = int(suite["returncode"])
     universe = conditional_skip_universe()
-    if junit.exists():
+    verdict = suite_timeout_verdict(bool(suite["timed_out"]), junit.exists(), SUITE_BUDGET_SECONDS)
+    if junit.exists() and verdict is None:
         counts = count_tests_junit(junit)
         checks["test_collected"] = {"status": "PASS", "count": counts["collected"]}
         checks["test_run"] = {
@@ -715,6 +812,8 @@ def main() -> int:
             # git diff），而失败消息里带时间/端口就每次不同。现场另打 stdout。
             "failed_names": counts["failed_names"],
             "skipped_names": counts["skipped_names"],
+            "elapsed_seconds": suite["elapsed"],
+            **host_pressure(),
         }
         checks.update({f"integration_{k}": v for k, v in integration_gate_statuses(junit, gates).items()})
         offenders = skip_admission_offenders(universe, counts["skips"])
@@ -728,11 +827,24 @@ def main() -> int:
         }
         if counts["failed"]:
             print_failure_scene(junit)
+    elif verdict is not None:
+        # 预算内没跑完：提交面上是一条具名的 FAIL（认证确实没发生），不是 traceback，
+        # 也不是"待验"；跑了多久、宿主多忙只落在本次跑那一侧。
+        checks["test_collected"] = {"status": verdict["status"], "count": 0}
+        checks["test_run"] = {
+            "status": verdict["status"], "passed": 0, "skipped": 0, "failed": 0,
+            "failed_names": [], "skipped_names": [], "note": verdict["note"],
+            "elapsed_seconds": suite["elapsed"], **host_pressure(),
+        }
+        checks.update({
+            f"integration_{k}": {"status": "NOT_RUN", "note": verdict["note"]} for k in gates
+        })
+        checks["unexpected_skips"] = {"status": "NOT_RUN", "note": verdict["note"]}
     else:
         checks["test_collected"] = {"status": "FAIL", "count": 0}
         checks["test_run"] = {
             "status": "FAIL", "passed": 0, "skipped": 0, "failed": 0, "failed_names": [],
-            "skipped_names": [],
+            "skipped_names": [], "elapsed_seconds": suite["elapsed"], **host_pressure(),
         }
         checks.update({
             f"integration_{k}": {"status": "NOT_RUN", "note": "pytest 未产出 JUnit 报告"}

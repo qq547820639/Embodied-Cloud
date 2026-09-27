@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 647 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 653 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -436,6 +436,24 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 
 - 改前/改后同读数对比实测：旧尺 `red_undecided` → 新尺 `skip`，第二通道 absent 时两者都 `red_pin`。
   docker 档 27→30 支真守护进程全绿；计数面 644→647；门禁 G0.68。
+
+### 认证台的超时与取证的上界，各管各的量（N-59）
+- 两件事在同一轮顶出来。`make validate` 的 900s 预算被共驻会话顶穿后**打 traceback**
+  （并留着一份会被下轮误当本轮读数的旧 junit）；挂起取证那条墙钟上界今晚红在父侧开销上
+  ——黑子档 docker：`elapsed=12.62s`、`bound_s=6.0`，其中被掐等待只有 `2.02s`。
+- 关键更正：N-55/N-56 当年把复算红记成「高负载下替身 `sh` 答不出话」，N-57 记成「冷启动 ~3s」，
+  今晚的量说都不是——被掐等待从未接近 2s，越界的是父侧起解释器 + import 的十秒。
+  既有两条 `elapsed <= bound` 在 load≈17–47 下真红，改判 `waited_s <= bound_s` 后同负载变绿；
+  开销作为 `startup_overhead_s` 报出来，不进上界也不假装它恒定。
+- 有界跑批：先 unlink 旧报告 ⇒ 给整个进程组 SIGINT（`start_new_session=True`）⇒ 30s grace 拿部分报告
+  ⇒ 兜底 SIGKILL；越界 = 提交面具名 FAIL「本轮无法计数」，环境读数只在本次跑那一侧，
+  所以提交面换台机器仍逐字节相同。预算 1500s（≈2.4× 本机实测 suite 632.3s／647 例）；
+  `run()` 其余四步（lint／type／migration／build）超时一律→124 并点名是哪条命令。
+- 判据 6 支（有界跑批两极、陈旧报告不得当本轮读数、判决纯函数三态且不含本次秒数、
+  `run()`→124、剧本「谁会挂」派生自 FAKE 正文并带反向对照），门禁 G0.69；计数面 647→653。
+- 上一轮独立复核的六处过头话同轮修完（逐条见登记表 N-59 第 ④ 项）：其中两处是本轮新写的判据
+  自己踩的——按 `process.kill()` 这种**词**查旧形状被自己注释命中；`ENV_FIELDS` 添字段后
+  既有遮罩判据立刻红，那是夹具没跟上声明，补字段而不是放松判据。
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到

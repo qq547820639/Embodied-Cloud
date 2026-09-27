@@ -19,6 +19,8 @@ import importlib.util
 import json
 import os
 import re
+import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +34,111 @@ def _load_validator():
     spec.loader.exec_module(module)
     return module
 
+
+# --- 全量 test run 的预算：越界必须是具名判决，不能是 traceback，也不能吃到旧报告 ---
+
+
+def _mini_suite(tmp_path: Path, slow_seconds: int = 40) -> tuple[list[str], Path]:
+    """造一份"一条立刻过、第二条睡死"的真 pytest 套件，返回 cmd 与 junit 路径。
+
+    为什么用真子进程真套件而不是替身：这条判据要证的正是
+    "被 SIGINT 的那跑会不会产 JUnit、里面有没有已跑完的用例名"，
+    那是 pytest 会话收尾的行为（本机 `_pytest/junitxml.py:647` 只在 sessionfinish 写文件），
+    替身证不了。
+    """
+    suite = tmp_path / "test_mini_budget.py"
+    suite.write_text(
+        "import time\n\n\n"
+        "def test_alpha_fast() -> None:\n    assert True\n\n\n"
+        f"def test_beta_sleeps() -> None:\n    time.sleep({slow_seconds})\n",
+        encoding="utf-8",
+    )
+    junit = tmp_path / "mini-junit.xml"
+    cmd = [
+        sys.executable, "-m", "pytest", str(suite),
+        "--junitxml", str(junit), "-q", "-p", "no:cacheprovider",
+    ]
+    return cmd, junit
+
+
+def test_bounded_run_turns_a_budget_breach_into_a_named_verdict(tmp_path: Path) -> None:
+    """必开火：预算之内跑不完时，不抛 traceback、留下部分 JUnit、判决是 FAIL 而非放行。"""
+    v = _load_validator()
+    cmd, junit = _mini_suite(tmp_path)
+    result = v.run_pytest_bounded(cmd, junit, budget=8, grace=25)
+    assert result["timed_out"] is True, result
+    assert isinstance(result["returncode"], int) and result["returncode"] != 0, result
+    assert junit.exists(), "SIGINT 没让 pytest 收尾出 JUnit：部分报告这条依据不成立"
+    names = {tc.get("name") for tc in ET.parse(junit).getroot().iter("testcase")}  # noqa: S314 本机 pytest 产物
+    assert "test_alpha_fast" in names, f"已跑完的用例名没进部分报告：{names}"
+    assert "test_beta_sleeps" not in names, f"睡死那条竟被算成跑完了：{names}"
+    verdict = v.suite_timeout_verdict(True, junit.exists(), 8)
+    assert verdict is not None and verdict["status"] == "FAIL", verdict
+    assert "无法计数" in verdict["note"] and "部分用例名可用" in verdict["note"], verdict
+
+
+def test_bounded_run_leaves_a_finished_run_alone(tmp_path: Path) -> None:
+    """必不开火：预算够时这条判据不得凭空造出越界（否则超时判决成了免检通道）。"""
+    v = _load_validator()
+    suite = tmp_path / "test_mini_ok.py"
+    suite.write_text("def test_only() -> None:\n    assert 1 == 1\n", encoding="utf-8")
+    junit = tmp_path / "mini-ok.xml"
+    result = v.run_pytest_bounded(
+        [sys.executable, "-m", "pytest", str(suite), "--junitxml", str(junit), "-q", "-p", "no:cacheprovider"],
+        junit, budget=120, grace=10,
+    )
+    assert result["timed_out"] is False and result["returncode"] == 0, result
+    assert v.suite_timeout_verdict(False, junit.exists(), 120) is None
+    assert {tc.get("name") for tc in ET.parse(junit).getroot().iter("testcase")} == {"test_only"}  # noqa: S314
+
+
+def test_previous_runs_junit_is_never_consumed_as_this_one(tmp_path: Path) -> None:
+    """陈旧报告 hazard：上一跑的 junit 必须在起跑前被删掉。
+
+    `pytest_sessionfinish` 才写文件，而被 SIGKILL 的那跑根本不写——
+    于是"这一跑没跑完"与"磁盘上有一份昨天的"同时成立，
+    消费方那句 `if junit.exists()` 会把昨天的 647 读成今天的。
+    """
+    v = _load_validator()
+    cmd, junit = _mini_suite(tmp_path)
+    junit.write_text(
+        '<testsuite name="pytest" tests="999" errors="0" failures="0" skipped="0" time="1.0">'
+        '<testcase classname="昨天的" name="test_stale_marker" time="0.1"/></testsuite>',
+        encoding="utf-8",
+    )
+    result = v.run_pytest_bounded(cmd, junit, budget=8, grace=25)
+    assert result["timed_out"] is True, result
+    names = {tc.get("name") for tc in ET.parse(junit).getroot().iter("testcase")}  # noqa: S314 本机 pytest 产物
+    assert "test_stale_marker" not in names, "旧报告被当成本轮读数用了"
+    assert "test_alpha_fast" in names, names
+
+
+def test_timeout_verdict_polarities_are_pure() -> None:
+    """判决纯函数三态：没越界 None；越界有报告／没报告两条 note 不同；都不带秒数环境读数。"""
+    v = _load_validator()
+    assert v.suite_timeout_verdict(False, True, 1500) is None
+    with_report = v.suite_timeout_verdict(True, True, 1500)
+    without = v.suite_timeout_verdict(True, False, 1500)
+    assert with_report["status"] == without["status"] == "FAIL"
+    assert "部分用例名可用" in with_report["note"] and "没换来报告" in without["note"]
+    for note in (with_report["note"], without["note"]):
+        assert "1500" in note, note
+        assert not re.search(r"\b已等 [\d.]+s", note), f"提交面那句话里不许有本次跑的秒数：{note}"
+    # 预算这个数字只有一处定义，判据不自己再写一遍
+    src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
+    assert len(re.findall(r"^SUITE_BUDGET_SECONDS\s*=", src, flags=re.M)) == 1
+    # test run 那一步必须走有界跑批。查的是**调用形状**而不是 `process.kill()` 这种词——
+    # 本文件的注释里本来就要提它，按词查会被自己的正文命中（本轮已在这条上翻过一次）。
+    assert "run_pytest_bounded([PYTHON" in src, "test run 又退回裸 subprocess.run 了"
+    assert 'code, _ = run([PYTHON, "-m", "pytest"' not in src, "同一处出现第二种起跑形状"
+
+
+def test_run_maps_a_timeout_onto_124_instead_of_raising() -> None:
+    """`run()` 自己也一样：超时返回 124 + 是哪条命令，不许再把整个认证台打死。"""
+    v = _load_validator()
+    code, text = v.run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
+    assert code == 124, (code, text[:200])
+    assert "命令超时（1s）" in text and "-c" in text, text[:200]
 
 GATES = {
     "tests.test_docker_provider_integration": "DOCKER_VALIDATION_PENDING",
@@ -148,7 +255,9 @@ def _checks(**over) -> dict:
     checks = {
         "test_collected": {"status": "PASS", "count": 559},
         "test_run": {"status": "PASS", "passed": 557, "skipped": 2, "failed": 0,
-                     "failed_names": [], "skipped_names": ["a::b", "c::d"]},
+                     "failed_names": [], "skipped_names": ["a::b", "c::d"],
+                     # 与 validate 的产出保持同形：这三个是本次跑那一侧的环境字段
+                     "elapsed_seconds": 632.3, "host_load": [12.9, 8.5, 7.1], "host_cpus": 10},
         "unexpected_skips": {"status": "PASS", "note": "全部 skip 在闭集内"},
         "integration_docker": {"status": "PARTIAL", "note": "执行 25/26，跳过 1"},
         "integration_k8s": {"status": "PENDING", "note": "整档 1 用例未执行"},

@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -106,11 +107,23 @@ FAKES = {
     "half-hang": FAKE_HALF_HANG,
     "half-hang-b": FAKE_HALF_HANG_B,
 }
-HANGING = {
-    "hang-later": ["image inspect", "image ls", "pull", "build"],
-    "half-hang": ["image ls"],
-    "half-hang-b": ["image inspect"],
-}
+def hanging_subcommands(script: str) -> list[str]:
+    """从剧本正文里读"哪几条子命令会睡死"，不另立一张手抄表。
+
+    手抄表那份写宽过：给 hang-later 列了 image inspect／image ls／pull／build 四条，
+    可剧本的真实形状是 `*) sleep 3600`——除 version／info 外**全部**会挂，而 pull、build
+    这条取证路径根本不调用。派生之后剧本改了读数跟着改，不需要有人记得改第二处。
+    兜底臂报成 `*`（"其余全部"），不假装能枚举出有限清单。
+    """
+    out: list[str] = []
+    for line in script.splitlines():
+        quoted = re.match(r'^\s+"([^"]*)"\*\)\s+sleep\b', line)
+        if quoted:
+            out.append(quoted.group(1))
+            continue
+        if re.match(r'^\s+\*\)\s+sleep\b', line):
+            out.append("*")
+    return out
 
 
 def _fake_docker_dir(tmp: Path, mode: str) -> Path:
@@ -155,12 +168,14 @@ def _latency_stats(
     """并发 `load` 下替身答一句话的耗时分布。
 
     `warm_up=False` 是给判据用的对照档：它把"这一轮的第一个样本"留在分布里。
-    预热之所以是承重墙，实测有两层（读数与复算入口见 `tests/test_hang_probe.py` 的
-    `test_warm_up_is_what_keeps_the_cold_exec_out_of_the_distribution`）：
+    预热之所以是承重墙，只有一层是**已证实**的（复算入口是常驻用例
+    `test_warm_up_is_the_only_thing_keeping_the_cold_exec_out`，它用夹具把两档极都造了出来）：
     ① 一个**刚写出来**的替身文件，第一次 exec 比之后慢一个数量级（本机 12 次新目录实测
-       first p50=0.059s／max=0.274s，之后 p50=0.010s）；② 机器忙时还会叠上偶发慢采样。
-    两层都会把 5 个样本的 p95（本函数 n=5 时 nearest-rank p95 就是最大值）抬到接近甚至超过
-    请求上限，于是 `conclusive()` 翻假、这台子退 2 说"测不准"——而它其实什么都没测。
+       first p50=0.059s／max=0.274s，之后 p50=0.010s）。它抬高 5 样本的 p95（n=5 时
+       nearest-rank p95 就是最大值），抬到越过可判线时 `conclusive()` 翻假、这台子退 2。
+    ② 「机器忙时还会叠上偶发慢采样」是 N-55/N-56 写下的归因，**本轮没能复现**：宿主 load≈13
+       下 60 次预热后采样最慢 0.0191s、>0.5s 零个。这句按"未证实"留着（没被否证，也没被证实），
+       不拿它当判据的前提。
     被丢掉的那一次仍然报出来（`pre_warm_burst_s`），只是不进分布：主张要能被别人重开。
     """
     import statistics
@@ -213,7 +228,7 @@ def measure(mode: str, cap_seconds: float) -> dict:
             env["PATH"] = f"{fake_dir}{os.pathsep}{env.get('PATH', '')}"
             # 报"这一档剧本里真正会挂的那几个子命令"，不是替身认识的子命令全集：
             # 半挂剧本的意义正是"只有一层挂"，报成五个全挂就是把读数写宽了一格。
-            injected["hang_subcommands"] = HANGING[mode]
+            injected["hang_subcommands"] = hanging_subcommands(FAKES[mode])
         else:
             raise ValueError(f"未知模式：{mode}（可选 blackhole / {' / '.join(FAKES)}）")
         if fake_dir is not None:
@@ -262,7 +277,12 @@ def measure(mode: str, cap_seconds: float) -> dict:
                 except ValueError:
                     reason = None
             rows[tier] = {
+                # 上界只约束"被上限掐掉的等待"这一项。父侧那一段（起解释器 + import app）
+                # 不是这台子能承诺的量：本轮实测黑子档 waited=2.02s 而 elapsed=12.62s，
+                # 差出去的十秒全是宿主负载下的解释器/导入开销——它正是 N-55/N-56
+                # 两次"复算红"真正的形状。分开报，不混进上界，也不假装它恒定。
                 "bound_s": round(timeouts * effective + 4, 2),
+                "startup_overhead_s": round(max(0.0, elapsed - waited), 2),
                 "timeouts_observed": timeouts,
                 "waited_s": waited,
                 "effective_timeout_s": effective,
@@ -366,7 +386,8 @@ def main() -> int:
             print(
                 f"== {mode}（请求上限 {args.timeout:g}s；替身往返 "
                 f"{head.get('fake_round_trip_seconds', 0):g}s ⇒ 有效上限 "
-                f"{head.get('effective_timeout_seconds', args.timeout):g}s）"
+                f"{head.get('effective_timeout_seconds', args.timeout):g}s"
+                f"{'（请求值被 10s 封顶夹过）' if head.get('ceiling_bit') else ''}）"
             )
             for tier, row in report["tiers"].items():
                 bound = row.get("bound_s", "?")
