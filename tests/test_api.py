@@ -166,15 +166,17 @@ def test_metrics_exposition_is_what_the_code_declares():
         （`tests/test_metrics_spec.py` 的两支：`le` 不许漏给非 bucket 序列、喂一份带越界标签的文本）；
     ④  刚刚真跑过一次启动 ⇒ `workspace_launch_total` 必须带着 `template_id`+`provider` 出现
         （否则 ②③ 可以对着空集合恒真）。
-    已知边界：②③ 只覆盖"前缀来自声明"的序列，prometheus_client 自带的 `python_*`/`process_*`
-    被隔在外面——将来若有全新前缀的族，仍要靠 N-42 那两支接住。
+    已知边界（N-44 收掉的那半）：划界不再靠"族名的第一段前缀来自声明"，而是问默认注册表
+    "这个名字是不是由我们的 Counter/Gauge/Histogram 对象注册的"——全新前缀的族同样会被点名；
+    prometheus_client 自带的平台收集器（`python_gc_*`/`python_info`…）由同一条判据排除在外。
     """
     from tests.metrics_spec import (
         allowed_series,
-        app_prefixes,
         declared_metrics,
+        declared_series,
         expected_labels,
         parse_exposition,
+        registered_names,
     )
 
     with TestClient(app) as client:
@@ -188,18 +190,18 @@ def test_metrics_exposition_is_what_the_code_declares():
         body = client.get("/metrics").text
 
     declared = declared_metrics()
-    allowed = allowed_series(declared)
-    prefixes = app_prefixes(declared)
+    allowed = declared_series(declared)
+    owners = registered_names()
     observed = parse_exposition(body)
     assert observed, "exposition 里一个序列都没解析出来：本判据恒真"
 
-    unknown = sorted(name for name in observed if name.startswith(prefixes) and name not in allowed)
+    unknown = sorted(name for name in observed if name not in allowed and owners.get(name, True))
     assert not unknown, f"暴露了声明之外的序列：{unknown}"
 
     extra_labels: dict[str, list[str]] = {}
     for series, keys in observed.items():
-        family = allowed.get(series)
-        if family is None or not series.startswith(prefixes):
+        family = allowed_series(declared).get(series)
+        if family is None or not owners.get(series, True):
             continue
         expected = expected_labels(series, set(declared[family]["labels"]))  # type: ignore[arg-type]
         extra = sorted(keys - expected)

@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 602 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 603 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -167,6 +167,21 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 两次注入 + 一次反证：`app/main.py` 里注册 `gpu_stray_total` ⇒ `暴露了声明之外的序列：['gpu_stray_created','gpu_stray_total']`；
   从声明里删掉 `provider` ⇒ 进程在记账处炸、启动收敛不到终态（活进程里标签越界走不到那条分支，于是它的开火证明移到解析层）；
   已知样本喂解析 ⇒ 抓出"不校验数值列，把一句散文当成叫 `this` 的族"。判据 4 支、门禁 G0.53。
+
+
+### `/metrics` 的划界改成注册表说了算（N-44，闭合上一轮的"未证实"）
+- 上一轮我把"②③ 只覆盖前缀来自声明的序列"写进未证实清单：为了躲开 prometheus_client 自带的
+  `python_gc_*`/`python_info`，判据按前缀划界，于是**全新前缀**的族（在 `app/metrics.py` 之外注册）能从缝里走过去。
+- 改成问注册表：`REGISTRY._collector_to_names` 里 `isinstance(collector, MetricWrapperBase)` 的才是"我们注册的"，
+  库自带的平台收集器不是（本机 0.26.0 实测分类：`python_gc_*`/`python_info` 归库，其余 51 个名字归我们）。
+  内部结构一旦改名，`registered_names()` 显式抛错 —— 判据不许静默退回猜测。
+- 两条判据一起收紧（注册表层 + 暴露层），并补一支"库自带族的识别方式若变了就红"的自检。
+- 开火对照（真注入，不是推理）：在 `app/main.py` 建 `edge_heartbeats_total` 并打一次点 ⇒
+  `这些序列不是由 app/metrics.py 声明的：['edge_heartbeats', 'edge_heartbeats_created', …]` 与
+  `暴露了声明之外的序列：['edge_heartbeats_created', 'edge_heartbeats_total']`；撤掉注入后 `rc=0`，
+  `git diff app/main.py` 为空。
+- 本轮另有两处自伤被抓：`allowed_series(declared) | set(declared)`（dict 不能 | set，`rc=1` 当场报）、
+  注册表把 Counter 的**基名**也算进已注册名字，`allowed` 必须含基名（用 `declared_series()` 一份实现包办）。
 
 
 ### 本轮新增的待收口项

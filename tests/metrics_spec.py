@@ -83,8 +83,43 @@ def expected_labels(series: str, family_labels: set[str]) -> set[str]:
 
 
 def app_prefixes(declared: dict[str, dict[str, object]]) -> tuple[str, ...]:
-    """本仓指标的第一段前缀；用来把 prometheus_client 自带的 `python_*`/`process_*` 隔出去。"""
+    """本仓指标的第一段前缀（保留给需要粗筛的场合；判据不再靠它划界，见 `builtin_registered_names`）。"""
     return tuple(sorted({name.split("_")[0] for name in declared}))
+
+
+def registered_names() -> dict[str, bool]:
+    """默认注册表里每个序列名 → "是不是由本仓的指标对象注册的"。
+
+    区分方式实测过：`prometheus_client.metrics.MetricWrapperBase` 的实例就是我们
+    `Counter()/Gauge()/Histogram()` 建出来的对象；prometheus 自带的平台收集器
+    （`python_gc_*`、`python_info`…）不是。注册表内部结构一旦改名，这里**显式失败**，
+    绝不退回"按前缀猜"——那正是 N-43 留下的边界洞。
+    """
+    import prometheus_client as pc
+    from prometheus_client.metrics import MetricWrapperBase
+
+    mapping = getattr(pc.REGISTRY, "_collector_to_names", None)
+    if mapping is None:
+        raise AssertionError(
+            "prometheus_client 的注册表结构变了（读不到 _collector_to_names）："
+            "本判据失去划界能力，必须显式红，不能退回前缀猜测"
+        )
+    out: dict[str, bool] = {}
+    for collector, names in mapping.items():
+        ours = isinstance(collector, MetricWrapperBase)
+        for name in names:
+            out[str(name)] = ours
+    return out
+
+
+def declared_series(declared: dict[str, dict[str, object]]) -> set[str]:
+    """声明 + 其族基名（`# TYPE` 行与 Gauge 用基名，Counter/Histogram 用派生名）。"""
+    out = set(declared)
+    for name, spec in declared.items():
+        out.add(family_base(name, str(spec["kind"])))
+        out.add(name)
+    out |= set(allowed_series(declared))
+    return out
 
 
 SERIES_RE = re.compile(
