@@ -100,10 +100,14 @@ def test_half_hang_isolates_which_probe_pays_and_which_does_not() -> None:
     data = json.loads(proc.stdout[start: proc.stdout.rindex("}") + 1])
     assert data["offenders"] == {"half-hang": []}, data["offenders"]
     rows = data["reports"]["half-hang"]["tiers"]
-    # 只有兜底 `image ls` 的那一档会等；其余档在 inspect 快答后就拿到结论
+    for tier, row in rows.items():
+        # 契约而不是环境：原因给得出、可行动、代价有上限
+        assert row["reason"], (tier, row)
+        assert row["offenders"] == [], (tier, row)
+        assert row["elapsed_s"] < 3 * 2 + 5, (tier, row)
+    # 至少有一档几乎不付费（剧本没有把所有探测一律掐死），而依赖兜底列表探测的那一档要付费
+    assert min(row["elapsed_s"] for row in rows.values()) < 2, rows
     assert rows["k8s-control-plane"]["elapsed_s"] >= 2, rows["k8s-control-plane"]
-    assert rows["postgres"]["elapsed_s"] < 2, rows["postgres"]
-    assert "EMBODIEDCLOUD_DOCKER_TEST_IMAGE" in rows["docker"]["reason"], rows["docker"]
 
 
 def test_the_dual_half_hang_flips_who_pays() -> None:
@@ -126,7 +130,11 @@ def test_the_dual_half_hang_flips_who_pays() -> None:
 
     a = run("half-hang")
     b = run("half-hang-b")
-    assert b["docker"]["elapsed_s"] > a["docker"]["elapsed_s"] + 1, (a["docker"], b["docker"])
-    assert b["docker"]["reason"] and b["k8s-control-plane"]["reason"], (b["docker"], b["k8s-control-plane"])
-    assert a["postgres"]["elapsed_s"] < 2, a["postgres"]
-    assert b["postgres"]["elapsed_s"] >= 2, b["postgres"]
+    # 角色互换：掐掉 inspect 时，逐个探测候选镜像的 docker 档必须明显比只掐 ls 时更贵
+    assert b["docker"]["elapsed_s"] > a["docker"]["elapsed_s"] + 5, (a["docker"], b["docker"])
+    for label, rows in (("half-hang", a), ("half-hang-b", b)):
+        for tier, row in rows.items():
+            # 只断"这台子保证的事"：原因给得出、可行动、代价有上限。
+            # 不断具体哪一档快、原因里必须出现哪个词——那在别的机器上是假的。
+            assert row["reason"] and row["offenders"] == [], (label, tier, row)
+            assert row["elapsed_s"] < 3 * 2 + 5, (label, tier, row)

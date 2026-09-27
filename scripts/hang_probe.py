@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -118,17 +119,27 @@ def measure(mode: str, cap_seconds: float) -> dict:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         env = dict(os.environ)
+        fake_dir: Path | None = None
         env["HANG_PROBE"] = mode
         env.pop("DOCKER_HOST", None)
         env.pop("EMBODIEDCLOUD_DOCKER_TEST_IMAGE", None)
         if mode == "blackhole":
             env["DOCKER_HOST"] = BLACKHOLE_HOST
         elif mode in FAKES:
-            bin_dir, hanging = _fake_docker_dir(tmp, mode)
-            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            fake_dir, hanging = _fake_docker_dir(tmp, mode)
+            env["PATH"] = f"{fake_dir}{os.pathsep}{env.get('PATH', '')}"
             injected["hang_subcommands"] = hanging
         else:
             raise ValueError(f"未知模式：{mode}（可选 blackhole / {' / '.join(FAKES)}）")
+        if fake_dir is not None:
+            # 替身没拦到就不必再演了：真实守护进程的状态会决定读数，
+            # 那会让"谁在等"变成环境问题而不是代码结构问题（本轮在另一棵树上就是这样翻车的）。
+            found = shutil.which("docker", path=env.get("PATH", ""))
+            if found is None or not Path(found).is_relative_to(fake_dir):
+                raise RuntimeError(
+                    f"PATH 替身未生效（解析到 {found!r}，期望在 {fake_dir} 下）："
+                    "这台子必须在自己的替签下运行，否则读数描述的是环境而不是代码"
+                )
         for tier, (module, sentinel) in TIERS.items():
             code = CHILD.format(cap=cap_seconds, module=module)
             started = time.monotonic()
