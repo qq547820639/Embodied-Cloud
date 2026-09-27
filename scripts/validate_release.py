@@ -498,6 +498,8 @@ def dangling_reference_offenders(texts: dict[str, str], catalog: dict[str, set[s
 # 为它们开豁免名单会让判据变成一堆例外；路径存在性留给一次性普查，不进常驻门禁。
 DOC_FILELINE_RE = re.compile(r"([\w./-]+\.(?:py|md|sh|sql|toml|json)):(\d+)")
 DOC_ANCHOR_RE = re.compile(r"([\w./-]+\.md)\s*§\s*(\d+(?:\.\d+)?)")
+# 通配写法：只认 ASCII 路径字符（早先用 \w 会把紧跟其后的中文一起吞掉，造出假 glob）
+DOC_GLOBISH_RE = re.compile(r"(?<![\w/.~-])([A-Za-z0-9._/-]*\*[A-Za-z0-9._/-]*)")
 # 分母与"仓内根目录"同一来源：早先这里写死一份目录清单，漏了 `deploy/`、`runtime/`
 # 还含了不存在的 `infra/`，结果第一次跑就把 11 条**存在**的路径报成悬空——判据的分母
 # 必须由同一份roots 派生，否则门禁会指向自己造的假阳性。
@@ -548,14 +550,24 @@ def doc_reference_offenders(
             r"(?<![\w/.~-])((?:" + "|".join(re.escape(r) for r in sorted(roots)) + r")/[\w./-]*"
             r"\.(?:py|md|sh|json|toml|sql|ya?ml|ts|ini))"
         )
+        import fnmatch
+
         for doc, text in sorted(texts.items()):
             for match in rooted.finditer(text):
                 path = match.group(1).rstrip(".,;:")
-                if "*" in path:  # 通配写法是模式，不是指针
+                if "*" in path:  # 通配另算（下面单独核"有没有匹配到东西"）
                     continue
                 hits += 1
                 if path not in repo_files:
                     out.append(f"{doc}: 引用了仓里不存在的路径 {path}")
+            for pattern in DOC_GLOBISH_RE.findall(text):
+                pattern = pattern.rstrip(".,;:")
+                first = pattern.split("/")[0]
+                if first not in roots or "/" not in pattern:
+                    continue          # 不是仓内根目录下的 glob：示例/外部写法不管
+                hits += 1
+                if not any(fnmatch.fnmatchcase(existing, pattern) for existing in repo_files):
+                    out.append(f"{doc}: 通配 {pattern} 在仓里一个文件都匹配不到（空目录声称）")
     if not hits:
         out.append("文档里一条 `文件:行号`、`宿主 §节` 或仓内路径指针都没扫到：分母可疑，不按通过处理")
     return out
@@ -638,6 +650,7 @@ def doc_reference_stats() -> dict[str, int]:
         fileline += len(DOC_FILELINE_RE.findall(text))
         anchors += len(DOC_ANCHOR_RE.findall(text))
         paths += len([m.group(1) for m in rooted.finditer(text) if "*" not in m.group(1)])
+        paths += len([g for g in DOC_GLOBISH_RE.findall(text) if "/" in g])
     return {
         "docs": len(texts), "fileline": fileline, "anchors": anchors,
         "paths": paths, "files": len(line_counts),

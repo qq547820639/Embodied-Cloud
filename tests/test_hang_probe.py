@@ -104,3 +104,29 @@ def test_half_hang_isolates_which_probe_pays_and_which_does_not() -> None:
     assert rows["k8s-control-plane"]["elapsed_s"] >= 2, rows["k8s-control-plane"]
     assert rows["postgres"]["elapsed_s"] < 2, rows["postgres"]
     assert "EMBODIEDCLOUD_DOCKER_TEST_IMAGE" in rows["docker"]["reason"], rows["docker"]
+
+
+def test_the_dual_half_hang_flips_who_pays() -> None:
+    """对偶半挂（`inspect` 挂、`ls` 通）要把"谁在等"翻过来——否则上一次的结论可能是剧本偏袒。
+
+    N-52 的 half-hang 让 k8s 独占 20s、其余近乎 0；若那是因为剧本恰好只掐了 `image ls`，
+    换成掐 `image inspect` 时 docker 档就该变成付得最多的那个（它逐个探测候选镜像）。
+    这个"角色互换"是判据，不是观察。
+    """
+    def run(mode: str) -> dict:
+        proc = subprocess.run(  # noqa: S603 受控常量参数（本机解释器 + 仓库内脚本）
+            [sys.executable, "-m", "scripts.hang_probe", "--mode", mode, "--timeout", "2", "--json"],
+            cwd=ROOT, text=True, capture_output=True, timeout=900,
+        )
+        assert proc.returncode == 0, proc.stdout[-600:] + proc.stderr[-400:]
+        out = proc.stdout
+        data = json.loads(out[out.index("{"): out.rindex("}") + 1])
+        assert data["offenders"] == {mode: []}, data["offenders"]
+        return data["reports"][mode]["tiers"]
+
+    a = run("half-hang")
+    b = run("half-hang-b")
+    assert b["docker"]["elapsed_s"] > a["docker"]["elapsed_s"] + 1, (a["docker"], b["docker"])
+    assert b["docker"]["reason"] and b["k8s-control-plane"]["reason"], (b["docker"], b["k8s-control-plane"])
+    assert a["postgres"]["elapsed_s"] < 2, a["postgres"]
+    assert b["postgres"]["elapsed_s"] >= 2, b["postgres"]

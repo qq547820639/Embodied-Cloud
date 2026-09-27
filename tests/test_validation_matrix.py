@@ -688,12 +688,30 @@ def test_rooted_path_pointers_are_checked_against_the_same_roots() -> None:
     assert stats["paths"] >= 200, f"路径指针分母太小，这条核起来近乎空转：{stats}"
 
 
+def test_rooted_globs_must_match_at_least_one_file() -> None:
+    """通配写法也算指针——但它声称"这类文件在这里"，所以一个都匹配不到就是空目录声称。
+
+    两个极性都要有：匹配到时不许误报；字符类只认 ASCII 路径字符，
+    否则中文会被 `\\w` 这类字符类吞进 glob（普查时就造出过一条假 glob）。
+    """
+    validator = _load_validator()
+    files = frozenset({"docs/adr/0001-a.md", "docs/adr/0002-b.md", "docs/A.md"})
+    ok = {"docs/X.md": "决策记录在 docs/adr/*.md；这一句后面跟着中文，runtime/账五项全不动 不是路径"}
+    offenders = validator.doc_reference_offenders(
+        ok, {"docs/X.md": 3}, {}, roots=("docs", "runtime"), repo_files=files
+    )
+    assert offenders == [], offenders
+    bad = {"docs/X.md": "清单在 deploy/manifests/*.yaml"}
+    offenders = validator.doc_reference_offenders(bad, {"docs/X.md": 3}, {}, roots=("deploy",), repo_files=files)
+    assert offenders == ["docs/X.md: 通配 deploy/manifests/*.yaml 在仓里一个文件都匹配不到（空目录声称）"], offenders
+
+
 def test_the_repo_docs_have_no_dangling_pointers() -> None:
     """真面：仓内文档现在 0 条悬空指针（先普查确认形状可信，才立的门）。"""
     validator = _load_validator()
     assert validator.dangling_doc_reference_offenders() == []
     stats = validator.doc_reference_stats()
-    assert stats["fileline"] >= 50 and stats["anchors"] >= 3 and stats["paths"] >= 200, stats
+    assert stats["fileline"] >= 50 and stats["anchors"] >= 3 and stats["paths"] >= 400, stats
 
 
 def test_document_pointers_resolve_to_real_lines_and_sections() -> None:

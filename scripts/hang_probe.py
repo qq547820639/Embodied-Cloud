@@ -79,10 +79,26 @@ case "$1 $2" in
   *) exit 1 ;;
 esac
 """
-FAKES = {"hang-later": FAKE_HANG_LATER, "half-hang": FAKE_HALF_HANG}
+# 对偶半挂：`image ls` 快答"没有"、`image inspect` 挂住——用来确认没有哪条路径
+# 只是因为剧本恰好让它早退而看起来"不怕挂起"。
+FAKE_HALF_HANG_B = """#!/bin/sh
+case "$1 $2" in
+  "version "*) echo "Client: Docker Engine (hang-probe fake)"; exit 0 ;;
+  "info "*) echo "aarch64"; exit 0 ;;
+  "image ls"*) exit 0 ;;
+  "image inspect"*) sleep 3600 ;;
+  *) exit 1 ;;
+esac
+"""
+FAKES = {
+    "hang-later": FAKE_HANG_LATER,
+    "half-hang": FAKE_HALF_HANG,
+    "half-hang-b": FAKE_HALF_HANG_B,
+}
 HANGING = {
     "hang-later": ["image inspect", "image ls", "pull", "build"],
     "half-hang": ["image ls"],
+    "half-hang-b": ["image inspect"],
 }
 
 
@@ -179,7 +195,11 @@ def annotate(rows: dict[str, dict]) -> dict[str, dict]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=("blackhole", "hang-later", "half-hang", "both", "all"), default="both")
+    ap.add_argument(
+        "--mode",
+        choices=("blackhole", "hang-later", "half-hang", "half-hang-b", "both", "all"),
+        default="both",
+    )
     ap.add_argument("--timeout", type=float, default=20.0, help="单次探测的超时上限（秒）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
@@ -187,7 +207,7 @@ def main() -> int:
     if args.mode == "both":
         modes = ("blackhole", "hang-later")
     elif args.mode == "all":
-        modes = ("blackhole", "hang-later", "half-hang")
+        modes = ("blackhole", "hang-later", "half-hang", "half-hang-b")
     else:
         modes = (args.mode,)
     reports = {mode: measure(mode, args.timeout) for mode in modes}

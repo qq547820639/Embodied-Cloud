@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 639 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 641 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -334,6 +334,25 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   两处"把两个产物名缩写成同一后缀"的写法改掉，因为它们会以路径形状被读到。
 - 判据 1 支新增（roots/索引同源 + 分母阈值），门禁行 G0.64；计数面 638→639。
 
+
+### 通配声称与"谁在等"的对偶剧本（N-55）
+- 承 N-54 的指针门禁再补一类：**仓内通配**（如 `docs/adr/*.md`）也是一条声称——目录里一个文件都匹配不到，
+  就是"空目录声称"。字符类只认 ASCII 路径字符（普查时 `\w` 会把紧跟的中文一起吞掉，造出一条假 glob）。
+- 挂起取证加**对偶剧本** `half-hang-b`（`image inspect` 挂、`image ls` 通）：上一轮"只有 k8s 会等"的结论
+  可能只是剧本恰好掐了 `image ls`。四种剧本同一轮实测（`--timeout 20`，四张偏离表全空）：
+
+| 档 | blackhole | hang-later | half-hang（只 `ls` 挂） | half-hang-b（只 `inspect` 挂） |
+|---|---|---|---|---|
+| docker | 20.22s | 80.60s | 0.66s | **80.51s** |
+| postgres | 20.10s | 20.18s | 0.13s | 20.16s |
+| object-store | 20.03s | 20.04s | 0.04s | 20.03s |
+| k8s 控制面 | 20.03s | 40.04s | 20.04s | 20.04s |
+
+  读法：角色确实互换（docker 档从 0.66s 变 80.51s），说明"谁在等"由代码结构决定而不是剧本偏袒；
+  也修正了上一轮的结论——**docker 档才是最贵的那一层**（逐个候选镜像 `inspect`），而不是只有 k8s 暴露。
+- 常驻判据 2 支：通配两极（匹配到不误报 / 匹配不到点名 / 中文尾随不生成假 glob）、
+  对偶半挂的"角色互换"断言（含 pg 档两个剧本之间的 0.13s vs ≥2s 对照）。
+  真面分母阈值提到 paths ≥400（现 485）。登记表 N-55、门禁 G0.65，计数面 639→641。
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
