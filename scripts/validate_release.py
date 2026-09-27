@@ -314,6 +314,12 @@ ACTIONABLE_MARKERS = (
 )
 
 
+# "可行动"有两种成立方式：说出缺什么（关键词表），或直接给一条能跑的动作。
+# 只给动作这一支是新加的：docker 档的原因原本描述了现状（"没有本地缓存…试过：…"），
+# 既没有关键词也没有动作，被 N-49 的半挂剧本抓出来后补上了 `docker pull` / 变量名两条指引。
+ACTION_RE = re.compile(r"docker pull|pip install|export [A-Z_][A-Z0-9_]*|make [a-z][a-z0-9-]*")
+
+
 def pending_reason_offenders(statuses: dict[str, object]) -> list[str]:
     out: list[str] = []
     for key, value in sorted(statuses.items()):
@@ -331,7 +337,7 @@ def pending_reason_offenders(statuses: dict[str, object]) -> list[str]:
             out.append(f"{key}: PENDING 的原因段是空的（哨兵 {sentinel or '?'}）")
         elif reason == sentinel:
             out.append(f"{key}: 原因只是把哨兵又抄了一遍（{reason}）——补环境的人看不出缺什么")
-        elif not any(marker in reason for marker in ACTIONABLE_MARKERS):
+        elif not any(marker in reason for marker in ACTIONABLE_MARKERS) and not re.search(ACTION_RE, reason):
             out.append(f"{key}: 原因没指向可行动缺项：{reason[:70]}")
     return out
 
@@ -371,19 +377,31 @@ def env_names_read_by(sources: dict[str, str]) -> set[str]:
             parts.append(node.id)
         return "environ" in parts or "os" in parts
 
+    def resolve(name: str, str_values: dict[str, str], ref_values: dict[str, str]) -> str | None:
+        """跟着 `A = B = … = "字面量"` 走到底；有环就停在 None，不递归炸栈。"""
+        seen: set[str] = set()
+        current: str | None = name
+        while current is not None and current not in seen:
+            seen.add(current)
+            if current in str_values:
+                return str_values[current]
+            current = ref_values.get(current)
+        return None
+
     found: set[str] = set()
     for text in sources.values():
         tree = parse(text)
-        consts: dict[str, str] = {}
+        str_values: dict[str, str] = {}
+        ref_values: dict[str, str] = {}
         for node in tree.body:
-            if (
-                isinstance(node, Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], Name)
-                and isinstance(node.value, Constant)
-                and isinstance(node.value.value, str)
-            ):
-                consts[node.targets[0].id] = node.value.value
+            if not (isinstance(node, Assign) and len(node.targets) == 1 and isinstance(node.targets[0], Name)):
+                continue
+            target = node.targets[0].id
+            if isinstance(node.value, Constant) and isinstance(node.value.value, str):
+                str_values[target] = node.value.value
+            elif isinstance(node.value, Name):
+                ref_values[target] = node.value.id
+
         for node in walk(tree):
             first: object | None = None
             if isinstance(node, Subscript) and is_env_root(node.value):
@@ -394,8 +412,10 @@ def env_names_read_by(sources: dict[str, str]) -> set[str]:
                     first = node.args[0] if node.args else None
             if isinstance(first, Constant) and isinstance(first.value, str):
                 found.add(first.value)
-            elif isinstance(first, Name) and first.id in consts:
-                found.add(consts[first.id])
+            elif isinstance(first, Name):
+                resolved = resolve(first.id, str_values, ref_values)
+                if resolved:
+                    found.add(resolved)
     return found
 
 

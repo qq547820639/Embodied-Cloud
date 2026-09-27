@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 633 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 635 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -290,6 +290,24 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   我把注释与测试里那处假名字改回正确拼法，测试夹具改用明显不存在的占位名（不复用真开关的近似拼法）。
   门禁 G0.61，计数面 632→633。
 
+
+### 挂起取证分出"谁在等"，原因必须落成动作（N-52）
+- `hang-later` 剧本是"整层全挂"的极端假设，回答不了"哪一层探测真的暴露在挂起风险里"。
+  新加 `half-hang`：假 docker 对 `image inspect` 快答"没有"、对 `image ls` 挂住。三模式同轮实测
+  （`--timeout 20`，偏离表全空）：
+  - blackhole：四档 20.05–20.40s（版本探测先挂 ⇒ 每档只付一次）
+  - hang-later：docker 80.90s、k8s 控制面 40.05s、pg 20.31s、s3 20.04s
+  - half-hang：只有 k8s 控制面付 20.06s，其余 0.05–0.85s ⇒ **只有那条兜底 `docker image ls` 会等**
+- 常量间接读的解析从一跳改成带环检测的传递闭包（`A = B = "名字"` 认；`A = B`/`B = A` 不炸栈也不造出处），
+  判据双向，免得把判据调瞎当成调准。
+- "可行动"扩成两种成立方式：说出缺什么（关键词表）**或**给出能跑的动作（`docker pull`／`pip install`／
+  `export 变量`／`make 目标`）。这条改动立刻反过来说服我改文案：docker 档的原因只描述了现状
+  （"没有本地缓存…试过：…"），现在补成"先 docker pull 其中任一，或用 EMBODIEDCLOUD_DOCKER_TEST_IMAGE
+  指向本地已有的镜像"——里面的变量名又由 N-51 的出处判据核对，形成闭环。
+- 判据新增 2 支（半挂隔离 + 传递解析），`docs/OPERATIONS.md` §7.3 换成这一轮的三模式读数；
+  门禁 G0.62，计数面 633→635。
+- 记账脚本又自伤一次：把新函数插进循环体内导致 `B023`（闭包捕住循环变量），
+  改法是把 `resolve()` 提到循环外、把两个字典当参数传——lint 这次替我发现了结构问题，不只是风格问题。
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到

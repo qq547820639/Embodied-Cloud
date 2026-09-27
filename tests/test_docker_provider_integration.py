@@ -91,7 +91,10 @@ def _usable_image() -> tuple[str | None, str]:
         image_arch = _image_arch(cand)
         if arch and image_arch.endswith(arch):
             return cand, ""
-    base = f"没有本地缓存且架构匹配（daemon={arch or '未知'}）的测试镜像，试过：{', '.join(c for c in candidates if c)}"
+    base = (
+        f"没有本地缓存且架构匹配（daemon={arch or '未知'}）的测试镜像，试过：{', '.join(c for c in candidates if c)}"
+        "；先 `docker pull` 其中任一，或用 EMBODIEDCLOUD_DOCKER_TEST_IMAGE 指向本地已有的镜像"
+    )
     return None, "；".join([base, *notes])
 
 

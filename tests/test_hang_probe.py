@@ -83,3 +83,24 @@ def test_makefile_wires_the_target() -> None:
             block.append(line)
     assert block and "hang-probe" in " ".join(block), "新目标没写进 .PHONY，`make -n` 会把它当文件目标"
     assert "-m scripts.hang_probe" in make
+
+def test_half_hang_isolates_which_probe_pays_and_which_does_not() -> None:
+    """半挂剧本（`image inspect` 快答"没有"、`image ls` 挂住）分得出谁在等、谁不等。
+
+    这是对 N-49 那个极端假设的修正：全挂的剧本说不清"哪一层探测暴露在挂起风险里"。
+    同时这一支还钉住一台子的副产品——它在 half-hang 下抓到过 docker 档的原因只描述了
+    现状、没给动作（"没有本地缓存…试过：…"），据此把原因补成可行动的。
+    """
+    proc = subprocess.run(
+        [sys.executable, "-m", "scripts.hang_probe", "--mode", "half-hang", "--timeout", "2", "--json"],
+        cwd=ROOT, text=True, capture_output=True, timeout=900,
+    )
+    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-400:]
+    start = proc.stdout.index("{")
+    data = json.loads(proc.stdout[start: proc.stdout.rindex("}") + 1])
+    assert data["offenders"] == {"half-hang": []}, data["offenders"]
+    rows = data["reports"]["half-hang"]["tiers"]
+    # 只有兜底 `image ls` 的那一档会等；其余档在 inspect 快答后就拿到结论
+    assert rows["k8s-control-plane"]["elapsed_s"] >= 2, rows["k8s-control-plane"]
+    assert rows["postgres"]["elapsed_s"] < 2, rows["postgres"]
+    assert "EMBODIEDCLOUD_DOCKER_TEST_IMAGE" in rows["docker"]["reason"], rows["docker"]

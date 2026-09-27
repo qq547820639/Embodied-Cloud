@@ -60,21 +60,37 @@ mod = importlib.import_module({module!r})
 print(json.dumps({{"reason": mod.gate_reason()}}))
 """
 
-FAKE_DOCKER = """#!/bin/sh
-# hang-probe 的替身 docker：version/info 正常答，其余子命令挂住（真挂，靠调用方的超时掐）
-case "$1" in
-  version) echo "Client: Docker Engine (hang-probe fake)"; exit 0 ;;
-  info) echo "aarch64"; exit 0 ;;
+# 三种剧本，代价差别正是想知道的事：
+#   hang-later —— 除 version/info 外全挂（极端：整层探测都在等）
+#   half-hang  —— `image inspect` 立刻答"没有"、`image ls` 挂住（真实半挂：只有兜底那条路会等）
+FAKE_HANG_LATER = """#!/bin/sh
+case "$1 $2" in
+  "version "*) echo "Client: Docker Engine (hang-probe fake)"; exit 0 ;;
+  "info "*) echo "aarch64"; exit 0 ;;
   *) sleep 3600 ;;
 esac
 """
+FAKE_HALF_HANG = """#!/bin/sh
+case "$1 $2" in
+  "version "*) echo "Client: Docker Engine (hang-probe fake)"; exit 0 ;;
+  "info "*) echo "aarch64"; exit 0 ;;
+  "image ls"*) sleep 3600 ;;
+  "image inspect"*) echo "no such image" >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+"""
+FAKES = {"hang-later": FAKE_HANG_LATER, "half-hang": FAKE_HALF_HANG}
+HANGING = {
+    "hang-later": ["image inspect", "image ls", "pull", "build"],
+    "half-hang": ["image ls"],
+}
 
 
-def _fake_docker_dir(tmp: Path) -> tuple[Path, list[str]]:
+def _fake_docker_dir(tmp: Path, mode: str) -> tuple[Path, list[str]]:
     bin_dir = tmp / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     script = bin_dir / "docker"
-    script.write_text(FAKE_DOCKER, encoding="utf-8")
+    script.write_text(FAKES[mode], encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return bin_dir, ["image", "pull", "build", "inspect", "ls"]
 
@@ -91,12 +107,12 @@ def measure(mode: str, cap_seconds: float) -> dict:
         env.pop("EMBODIEDCLOUD_DOCKER_TEST_IMAGE", None)
         if mode == "blackhole":
             env["DOCKER_HOST"] = BLACKHOLE_HOST
-        elif mode == "hang-later":
-            bin_dir, hanging = _fake_docker_dir(tmp)
+        elif mode in FAKES:
+            bin_dir, hanging = _fake_docker_dir(tmp, mode)
             env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
             injected["hang_subcommands"] = hanging
         else:
-            raise ValueError(f"未知模式：{mode}（可选 blackhole / hang-later）")
+            raise ValueError(f"未知模式：{mode}（可选 blackhole / {' / '.join(FAKES)}）")
         for tier, (module, sentinel) in TIERS.items():
             code = CHILD.format(cap=cap_seconds, module=module)
             started = time.monotonic()
@@ -163,12 +179,17 @@ def annotate(rows: dict[str, dict]) -> dict[str, dict]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=("blackhole", "hang-later", "both"), default="both")
+    ap.add_argument("--mode", choices=("blackhole", "hang-later", "half-hang", "both", "all"), default="both")
     ap.add_argument("--timeout", type=float, default=20.0, help="单次探测的超时上限（秒）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
-    modes = ("blackhole", "hang-later") if args.mode == "both" else (args.mode,)
+    if args.mode == "both":
+        modes = ("blackhole", "hang-later")
+    elif args.mode == "all":
+        modes = ("blackhole", "hang-later", "half-hang")
+    else:
+        modes = (args.mode,)
     reports = {mode: measure(mode, args.timeout) for mode in modes}
     offenders = {mode: tier_offenders(report["tiers"]) for mode, report in reports.items()}
     if args.json:

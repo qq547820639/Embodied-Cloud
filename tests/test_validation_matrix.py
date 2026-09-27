@@ -500,6 +500,21 @@ def test_pending_reasons_must_point_at_an_actionable_gap() -> None:
     assert fn({"integration_x": {"status": "PENDING", "note": ""}})
     # 反向对照：全部 PASS 时无可核 = 不报错
     assert fn({"integration_x": {"status": "PASS", "note": "3/3 用例在真实后端上执行"}}) == []
+    # "可行动"允许两种成立方式：说出缺什么，或给一条能跑的动作（后者由 N-49 半挂剧本逼出来）
+    action_only = {
+        "integration_x": {
+            "status": "PENDING",
+            "note": "整档 3 用例未执行，原因：先 docker pull 任一候选镜像（哨兵 X_PENDING）",
+        }
+    }
+    assert fn(action_only) == [], fn(action_only)
+    neither = {
+        "integration_x": {
+            "status": "PENDING",
+            "note": "整档 3 用例未执行，原因：镜像不在，环境问题（哨兵 X_PENDING）",
+        }
+    }
+    assert len(fn(neither)) == 1, fn(neither)
 
 
 def test_pending_reason_gate_is_wired_into_the_summary() -> None:
@@ -607,3 +622,30 @@ def test_the_env_catalog_counts_reads_not_mentions() -> None:
     catalog = validator.reference_catalog()["env"]
     for name in ("EMBODIEDCLOUD_PG_IMAGE", "EMBODIEDCLOUD_KIND_BIN", "EMBODIEDCLOUD_EDGE_TOKEN"):
         assert name in catalog, f"真被读的开关掉出目录：{name}"
+
+def test_env_read_resolution_is_transitive_but_not_fooled_by_cycles() -> None:
+    """常量间接读要能走多跳；两个常量互相指对方时不许死循环、也不许凭空造出处。
+
+    上一版只解一跳（`CONST = "名字"`），我把这条边界写进了未证实。
+    现在按传递闭包解，并显式验证：多跳能认、环不会卡、指不到字面量的名字不算出处。
+    """
+    validator = _load_validator()
+    sources = {
+        "two_hop.py": (
+            "import os\n"
+            'HOP1 = "EMBODIEDCLOUD_TWO_HOP"\n'
+            "HOP2 = HOP1\n"
+            "VALUE = os.environ.get(HOP2)\n"
+        ),
+        "cycle.py": (
+            "import os\n"
+            "LOOP_A = LOOP_B\n"
+            "LOOP_B = LOOP_A\n"
+            'os.environ.get(LOOP_A)\n'
+            'os.environ.get("EMBODIEDCLOUD_AFTER_CYCLE")\n'
+        ),
+    }
+    read = validator.env_names_read_by(sources)
+    assert "EMBODIEDCLOUD_TWO_HOP" in read, "两跳间接读没认出来"
+    assert "EMBODIEDCLOUD_AFTER_CYCLE" in read, "环旁边的正常读点被带没了"
+    assert len([n for n in read if n.startswith("EMBODIEDCLOUD_LOOP")]) == 0, read
