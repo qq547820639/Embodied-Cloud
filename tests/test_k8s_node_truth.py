@@ -3,7 +3,8 @@
 - reservation.node_name 是明确字段（非 host_id 字符串解析）
 - K8s provider 真实模式禁止 reservation=None
 - nodeSelector 由 reservation.node_name 构造
-- reconcile 检测 Pod 实际 nodeName != reserved node → 不得保持 RUNNING（FAILED）
+- reconcile 检测 Pod 实际 nodeName != reserved node → 先叫 provider.stop，认账了才 FAILED；
+  provider 仍自述 ALIVE 时卡不回池、也不写终态（N-68）
 """
 
 from types import SimpleNamespace
@@ -188,46 +189,111 @@ def test_pod_selector_matches_reserved_node(tmp_path):
 
 
 class NodeMismatchProvider(KubernetesProvider):
-    """inspect 返回与实际 node 不同的 Pod（模拟调度到错误节点）。"""
+    """inspect 返回与实际 node 不同的 Pod（模拟调度到错误节点）。
 
-    def __init__(self, settings, fake):
+    `stop`/`reconcile` 是一对有状态的档：`retire_on_stop=True` 是诚实档（停过之后 provider
+    亲口说 runtime 没了）；`retire_on_stop=False` 是撒谎档——`stop` 正常返回但 pod 还在，
+    K8s 里对应"缩容请求已发、finalizer 还没放行"那一档。释放准入读的是 provider 的自述，
+    不是 `stop` 的返回码，所以两档的差别只在 provider 说什么，不在命令成没成。
+    `stop` 的签名照抄生产实现（`providers/k8s.py:317` 返回 None）。
+    """
+
+    def __init__(self, settings, fake, *, retire_on_stop: bool = True):
         super().__init__(settings, _client=fake, model_factory=make_fake_models)
         self.actual_node = "wrong-node-99"
+        self.retire_on_stop = retire_on_stop
+        self.stopped = False
+        self.stop_calls = 0
 
     def inspect(self, workspace):
         return {"node_name": self.actual_node}
 
+    def stop(self, workspace) -> None:
+        self.stop_calls += 1
+        if self.retire_on_stop:
+            self.stopped = True
+
     def reconcile(self, workspace):
-        return RuntimeState.ALIVE
+        return RuntimeState.MISSING if self.stopped else RuntimeState.ALIVE
 
 
-def test_reconcile_detects_node_mismatch():
-    """§10：Pod 实际 node != reserved node → reconcile 置 FAILED + 释放 GPU。"""
-    provider = NodeMismatchProvider(
-        Settings(eula_accepted=True, k8s_namespace="embodiedcloud"), FakeNodeClient()
-    )
-    orchestrator = WorkspaceOrchestrator(
+def _mismatch_orchestrator(provider):
+    return WorkspaceOrchestrator(
         Factory, provider, __import__("pathlib").Path("/tmp/test-k8s-node-2")  # noqa: S108 测试隔离目录
     )
+
+
+def _seed_mismatch_workspace(workspace_id: str) -> None:
     with Factory() as db:
         _seed_with_node(db, node_name="gpu-node-01")
         ws = Workspace(
-            id="w4", name="w", template_id="cartpole", provider="k8s",
+            id=workspace_id, name="w", template_id="cartpole", provider="k8s",
             status=WorkspaceStatus.RUNNING.value,
         )
         db.add(ws)
         db.commit()
-        gpu = GpuScheduler(Factory).allocate(db, "w4", gpu_requirement_gb=8)
+        gpu = GpuScheduler(Factory).allocate(db, workspace_id, gpu_requirement_gb=8)
         ws.gpu_id = gpu.id
         db.commit()
 
+
+def test_reconcile_detects_node_mismatch():
+    """§10：Pod 实际 node != reserved node → 先停 pod，认账之后才置 FAILED + 释放 GPU。"""
+    provider = NodeMismatchProvider(
+        Settings(eula_accepted=True, k8s_namespace="embodiedcloud"), FakeNodeClient()
+    )
+    orchestrator = _mismatch_orchestrator(provider)
+    _seed_mismatch_workspace("w4")
+
     stats = orchestrator.reconcile_all()
     assert stats["failed"] == 1
+    # 缺陷的另一半：改前这条路一次都不叫 provider.stop（N-68）
+    assert provider.stop_calls == 1, f"节点不一致没有去停那个 pod（stop_calls={provider.stop_calls}）"
     with Factory() as db:
         ws = db.get(Workspace, "w4")
         assert ws.status == WorkspaceStatus.FAILED.value
         assert "node mismatch" in ws.error_message
         assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == "w4")) is None
+        assert db.scalar(select(Gpu)).status == GpuStatus.AVAILABLE.value
+
+
+def test_node_mismatch_does_not_release_the_gpu_while_the_pod_is_still_alive():
+    """撒谎档：stop 返回成功但 provider 仍自述 ALIVE ⇒ 不放卡、不写终态，下一轮接着停。
+
+    这一条钉的是 N-63 的同一条准入在节点不一致分支上同样成立：把卡从还在吃卡的 pod 手里
+    放掉就是「一卡双跑」。状态保持 RUNNING 而不是 FAILED/STOPPING —— 既没有可核对的
+    runtime 事实支持写终态，也在 `recover_stuck_gpu_allocations` 的保护集内（否则它会
+    绕过准入直接把卡清成 AVAILABLE）。
+    """
+    provider = NodeMismatchProvider(
+        Settings(eula_accepted=True, k8s_namespace="embodiedcloud"),
+        FakeNodeClient(),
+        retire_on_stop=False,
+    )
+    orchestrator = _mismatch_orchestrator(provider)
+    _seed_mismatch_workspace("w6")
+
+    stats = orchestrator.reconcile_all()
+    assert stats["failed"] == 0, f"没认账却计了失败：{stats}"
+    with Factory() as db:
+        ws = db.get(Workspace, "w6")
+        assert ws.status == WorkspaceStatus.RUNNING.value
+        assert "node mismatch" in ws.error_message
+        assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == "w6")) is not None
+        assert db.scalar(select(Gpu)).status == GpuStatus.ALLOCATED.value
+
+    # 第二趟：不是"记一笔就算"，而是真再去停一次（重试仍受同一准入约束）
+    orchestrator.reconcile_all()
+    assert provider.stop_calls == 2
+    with Factory() as db:
+        assert db.get(Workspace, "w6").status == WorkspaceStatus.RUNNING.value
+
+    # 单变量：provider 改口之后，同一条分支才把卡放掉并写终态
+    provider.retire_on_stop = True
+    stats = orchestrator.reconcile_all()
+    assert stats["failed"] == 1
+    with Factory() as db:
+        assert db.get(Workspace, "w6").status == WorkspaceStatus.FAILED.value
         assert db.scalar(select(Gpu)).status == GpuStatus.AVAILABLE.value
 
 

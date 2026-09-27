@@ -509,6 +509,8 @@ class WorkspaceOrchestrator:
 
         规则：
         - DB RUNNING + runtime ALIVE  → 保持（adopt）
+        - DB RUNNING + K8s 节点不一致 → 先走 `_stop_cleanup`（provider.stop + 准入），
+          认账了才 FAILED；没认账保持 RUNNING，下一轮接着试（N-68）
         - DB RUNNING + runtime MISSING → 结算确认的 usage → 释放 GPU → FAILED
         - DB PROVISIONING + runtime ALIVE → RUNNING（adopt）
         - DB PROVISIONING + runtime MISSING → 无 active operation 则重新入队（retry）
@@ -552,16 +554,25 @@ class WorkspaceOrchestrator:
                             )
                 if w.status == WorkspaceStatus.RUNNING.value:
                     if node_mismatch:
-                        # 分配节点与实际运行节点不一致 → 不得保持 RUNNING
-                        self._settle_running_segment(db, w)
-                        self.scheduler.release(db, w.id)
-                        w.status = WorkspaceStatus.FAILED.value
+                        # 分配节点与实际运行节点不一致 → 不得保持 RUNNING。但"卡回池"的前提
+                        # 仍然是 runtime 事实不在（N-63 的同一条准入）：改前这里是
+                        # settle + release + FAILED 三连，一次都不叫 provider.stop ⇒ pod 还在
+                        # 错的节点上吃卡，卡却已回池（同类第三实例）。现在先走 `_stop_cleanup`
+                        # 完整清理，认账了才置 FAILED；没认账就保持 RUNNING 并把原因留在
+                        # error_message 上，下一轮这条分支接着重试（RUNNING 在
+                        # recover_stuck_gpu_allocations 的保护集内，卡不会被它放掉）。
                         w.error_message = (
                             f"reconciled: pod node mismatch (actual={actual_node}, reserved={reserved_node})"
                         )
-                        w.stopped_at = utcnow()
-                        w.started_at = None
-                        stats["failed"] += 1
+                        error = self._stop_cleanup(db, w)
+                        if error is None:
+                            w.status = WorkspaceStatus.FAILED.value
+                            stats["failed"] += 1
+                        else:
+                            logger.warning(
+                                "reconcile: node-mismatch stop not admitted for %s: %s",
+                                w.id[:8], error,
+                            )
                     elif state == RuntimeState.ALIVE:
                         stats["kept"] += 1  # adopt：继续运行
                     elif state == RuntimeState.MISSING:
@@ -642,7 +653,8 @@ class WorkspaceOrchestrator:
         - 投影余额 = 当前余额 - 本运行段 live 消耗（预估）
           投影余额 < 0（即将透支）→ 优雅停止（settle + release + STOPPED）
         - course quota：模板对应 lab 配额用尽 → 同样停止
-        幂等：停止走 _finalize_stop（幂等结算/释放）；重复 monitor 不重复扣费。
+        幂等：停止经 `stop()` → `_stop_cleanup`（provider.stop ＋ 释放准入 ＋ 幂等结算/释放），
+        没被认账的停止不把 workspace 写成终态，也不计入已停数；重复 monitor 不重复扣费。
         """
         stats = {"stopped": 0, "scanned": 0, "notified": 0}
         with self.session_factory() as db:

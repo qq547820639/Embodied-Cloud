@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 701 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 702 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701，门禁 G0.72／G0.73／G0.74／G0.75。
+- 计数面 665→678→686→693→701→702，门禁 G0.72／G0.73／G0.74／G0.75／G0.76。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -710,6 +710,50 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   release 失败那一档状态是 STOPPING，live 分支根本不进，真正可达的是 destroy 失败档。
 - 计数面 693→701，门禁 G0.75。
 
+### 节点不一致那路先停 pod，认账了才放卡（N-77，闭登记项 N-68）
+- 缺陷（N-68 登记于 N-63 那一轮，本轮按登记的顺序修）：`reconcile_all` 的 K8s 节点不一致分支
+  是 settle + release + FAILED 三连，全程没叫过 `provider.stop`。观测本身说明那个 pod 活着
+  ——`actual_node` 就是从 `provider.inspect(w)` 读来的。于是「pod 还在错的节点上吃卡、卡却已回池」，
+  而 `reconcile_all` 之后按 status 跳过 FAILED，再没人看一眼。这是 N-63 那条不变量的第三实例
+  （第一实例 stop 重试、第二实例 provision 失败＝N-67、第三实例这里、第四实例 warm pool＝N-69）。
+- 改法：这一条分支改成「先 `error_message` 落原因，再走 `_stop_cleanup`」——它内部是
+  streaming terminate → `provider.stop` → `_release_admitted` 准入 → `_finalize_stop`（结算/放卡/STOPPED）。
+  认账了才把 STOPPED 改成 FAILED 并计 `failed`；**没认账就保持 RUNNING**（不写终态）：既没有可核对的
+  runtime 事实支持写 FAILED，也因为 RUNNING 在 `recover_stuck_gpu_allocations`
+  （`app/services/scheduler.py:257-318`）的保护集内——写成 FAILED 会被它按「非占用态」把卡清成
+  AVAILABLE，正好绕过刚加的准入。下一轮这条分支接着重试（沿用 N-63 的「重试真的再叫一次」）。
+- 选型门禁跳过理由：不是新的技术方案，是 N-63 已定设计的第三个接线点，候选集在那一轮已经比过
+  （借 Kubernetes finalizer 的「在用资源不得判为已删除」＋moby 把 304/404 都算停止成功）。
+  两个候选自问自答：① 复用 `_stop_cleanup`（选它——本仓有一条 AST 判据钉「释放准入判据恰好一份实现」，
+  自己写第二份当场就红）；② 直接 `provider.destroy` + `_release_admitted(command_succeeded=False)`
+  （不选：节点不一致要的是「停掉」，不是「连资源定义一起删」，且会把已建好的 Service/PVC 一起带走）。
+- 判据：`tests/test_k8s_node_truth.py` 重新造了一只有状态的夹具（`stop` 计数、`reconcile` 随
+  停没停改口；`stop` 的返回形状照抄 `providers/k8s.py:317` 的 None）。两支各钉一极——
+  诚实档：`stop_calls == 1` ＋ FAILED ＋ 分配行没了 ＋ 卡 AVAILABLE；
+  撒谎档（stop 正常返回但 provider 仍自述 ALIVE）：`failed == 0` ＋ 状态仍 RUNNING ＋
+  分配行还在 ＋ 卡仍 ALLOCATED，第二趟 `stop_calls == 2`（不是记一笔就算），第三趟 provider 改口才放卡写终态。
+  连同既有的「节点一致→保持 RUNNING」合起来 6 支；`tests/test_stop_release_admission.py` 的接线棘轮
+  随之改判：`reconcile_consumers` 1→2，反向对照改成三档（全不改 2／只断一条 1／两条都断 0）——
+  原来只数「0 与 1」，新增第二条分支后「少接一条」会被读成通过。
+- 改前复算（把 `app/services/orchestrator.py` 换成 HEAD 那份就地换面，跑完按 sha `b8c48ace…` 还原）：
+  `...FF.........FF...`（19 支里 4 开火）——
+  `节点不一致没有去停那个 pod（stop_calls=0）`／`没认账却计了失败：{'failed': 1, …}`／
+  接线棘轮 `{'reconcile_consumers': 1} != 2`／反向对照自己的锚点门 `锚点不是恰好两处（1）`。
+  注意第一支：改前「FAILED＋卡回池」这两条它是满足的，开火的只有「没去停」那一句 ⇒ 原用例把缺陷
+  当成了契约，本轮把它拆成两极才是真判据。
+- 顺手更正一条对运维的假承诺：`monitor_runtime_quotas` 的 docstring 写着「停止走 `_finalize_stop`」，
+  而代码走的是 `self.stop` → `_stop_cleanup`（N-63 之后就不一样了）；改成按实现说话，并补上
+  「没被认账的停止不写终态、也不计入已停数」。
+- 邻面（我自己跑）：`test_stop_release_admission`／`test_k8s_node_truth`／`test_worker`／
+  `test_streaming_lifecycle`／`test_durable_ops`／`test_provision_rollback`／`test_settled_projection`／
+  `test_warmpool`／`test_warmpool_claim` 合跑 100 支 rc=0；`ruff check app tests` All checks passed；
+  `mypy app` Success（41 files）。
+- 未证实：真集群里的「缩容到 0 之后 pod 还在」（finalizer 未放行）没验——本机无 K8s 档，
+  撒谎档是靠夹具的自述模拟的，属机制限制而非本轮没做完；节点不一致在真机上的 GPU 双跑后果
+  同样只到控制面判决为止。另外本轮**没有**新开登记项：回收器那条「终态即放卡」的后门已由
+  N-63 的处置行与 N-69 的三重不可见分别记下，不再开双份。
+- 计数面 701→702，门禁 G0.76。
+
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
@@ -723,17 +767,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   但要先量清“destroy 失败该由谁认账、`_fail` 的三个调用点各自的 runtime 形状”，
   不当顺手改。注意它会把 `tests/test_stop_release_admission.py` 里 `admitted_uses == 2`
   那一格顶到 3——接同一条判据时必须同步改判那条常驻断言，不能让它悄悄变宽。
-- `N-68`：**reconcile 的节点不一致分支把卡放了，却没停那个 pod**（第三实例）。
-  `orchestrator.py:547-557`：`node_mismatch` 为真时 `_settle_running_segment` ＋
-  `self.scheduler.release(db, w.id)`（:550）＋ 写 FAILED（:551）＋ `started_at=None`，
-  全程没叫 `provider.stop`；而 `actual_node` 恰恰来自 :534 的 `provider.inspect(w)`——
-  观测本身说明那个 pod 活着。之后 :519 按 status 跳过 STOPPED/FAILED，再没人管它。
-  严重度我按事实分两档写：如果那个 pod 用的不是本机预留的那张卡，这里主要是“弃养一个
-  活着的 runtime”；如果它落在别的 workspace 预留的节点上，那张卡此刻就在双跑，而这段代码
-  对此毫无动作。常驻对照 :558 的 `elif state == RuntimeState.ALIVE: kept` 说明 ALIVE 是被
-  区分得出来的，不是读不到。**现有一条用例在反向钉它**：
-  `tests/test_k8s_node_truth.py:204-231`（夹具 :200-201 的 `reconcile` 明写
-  `return RuntimeState.ALIVE`，而 :230-231 断分配行为 None 且卡 AVAILABLE）——  它今天绿，正是因为“pod 还活着”被当成了“可以放卡”。修它必须连这条一起改判。
+- ~~`N-68`：reconcile 的节点不一致分支把卡放了，却没停那个 pod（同类第三实例）~~ —— **已由 N-77 闭合**：该分支改走 `_stop_cleanup`（`app/services/orchestrator.py:556-575`），认账了才置 FAILED；provider 仍自述 ALIVE 时保持 RUNNING 不写终态、卡不回池，下一轮接着停。判据 `tests/test_k8s_node_truth.py` 的夹具改成有状态（`stop` 计数＋`reconcile` 随停没停改口），诚实档读 `stop_calls == 1`／撒谎档读 `failed == 0`＋`Gpu` 仍 ALLOCATED＋第二趟 `stop_calls == 2`；接线棘轮 `reconcile_consumers` 1→2 并把反向对照改成 2/1/0 三档。改前就地换面复算 `...FF.........FF...`（19 支里 4 开火），一手读数 `节点不一致没有去停那个 pod（stop_calls=0）`。
 - `N-69`：**warm pool 认领失败那一路把销毁失败只记日志，然后照样放卡并写成终态**（第四实例，
   且三重不可见）。`app/services/warmpool.py:346-351`：`provider.destroy` 抛错被 :348-349
   收成 `logger.error` 后**继续往下**执行 `scheduler.release`；:352-353 对 release 的失败同样

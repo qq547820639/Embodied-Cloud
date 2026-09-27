@@ -420,9 +420,9 @@ def release_admission_wiring(source: str) -> dict[str, int]:
     "stop_consumers": stop() 里对 _stop_cleanup 的调用数,
     "reconcile_consumers": reconcile_all() 里对 _stop_cleanup 的调用数}`。
 
-    链的形状是：判据只在 `_stop_cleanup` 里被消费一次，`stop` 与 `reconcile_all` 两个入口
-    都走 `_stop_cleanup`。按 AST 判而不是按文本判：注释里出现判据名不算接上，
-    挪动行号也不会让这条判据失效。
+    链的形状是：判据只在 `_stop_cleanup` 里被消费一次，`stop` 走它一处、`reconcile_all`
+    走它两处（STOPPING+ALIVE 的重试档与 RUNNING 的节点不一致档）。按 AST 判而不是按文本判：
+    注释里出现判据名不算接上，挪动行号也不会让这条判据失效。
     """
     tree = ast.parse(source)
 
@@ -466,29 +466,39 @@ def _orchestrator_source() -> str:
 
 
 def test_the_release_admission_judgment_has_one_copy_both_entries_consume_it():
-    """判据恰好一份实现、只在 `_stop_cleanup` 里被消费一次；两个入口都接的是它。"""
+    """判据恰好一份实现、只在 `_stop_cleanup` 里被消费两次；入口共三处分支接的是它。
+
+    N-68 之后 reconcile 的节点不一致分支也走 `_stop_cleanup`（不再自己 settle+release+FAILED），
+    所以 `reconcile_consumers` 从 1 变 2 —— 这条判据是"接线位点"的棘轮，新增消费位点必须
+    连同本行一起改判，不许悄悄多接或不接。
+    """
     assert release_admission_wiring(_orchestrator_source()) == {
         "definitions": 1,
         "cleanup_definitions": 1,
         "admitted_uses": 2,  # 成功档与失败档各问一次（command_succeeded 取值不同）
         "stop_consumers": 1,
-        "reconcile_consumers": 1,
+        "reconcile_consumers": 2,
     }
 
 
 def test_the_wiring_checker_can_see_a_disconnected_consumer():
-    """反向对照：把 reconcile_all 的收尾换回"直接 finalize"，尺子必须报缺席。
+    """反向对照：`reconcile_all` 的两条收尾分支各断一次，尺子都要看见。
 
     没有这一支，上一条判据在"判据本身读不到东西"的形状下会一直绿着。
+    N-68 之后 `reconcile_all` 里有两处 `_stop_cleanup`（STOPPING+ALIVE 重试档、
+    RUNNING 节点不一致档），所以变异要分三档：全不改=2、只断一条=1、两条都退回
+    直接 finalize=0。只数"0 与 2"会把"其中一条分支根本没接"读成通过。
     """
     source = _orchestrator_source()
     line = "error = self._stop_cleanup(db, w)"
     # 落地证明按锚点唯一性做：空改写（命中 0）不许被读成"变异通过"
-    assert source.count(line) == 1, f"锚点不是恰好一处（{source.count(line)}）"
-    mutant = source.replace(line, "self._finalize_stop(db, w)")
-    assert release_admission_wiring(mutant)["reconcile_consumers"] == 0
+    assert source.count(line) == 2, f"锚点不是恰好两处（{source.count(line)}）"
+    one_cut = source.replace(line, "self._finalize_stop(db, w)", 1)
+    assert release_admission_wiring(one_cut)["reconcile_consumers"] == 1, "少一条分支看不见"
+    both_cut = source.replace(line, "self._finalize_stop(db, w)")
+    assert release_admission_wiring(both_cut)["reconcile_consumers"] == 0
     # 另一极：真实源码上同一把尺子不开火
-    assert release_admission_wiring(source)["reconcile_consumers"] == 1
+    assert release_admission_wiring(source)["reconcile_consumers"] == 2
 
 
 @pytest.mark.parametrize("behavior", BEHAVIORS)
