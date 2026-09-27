@@ -166,16 +166,28 @@ TLS 网关。
 
 ## 8. 可观测性
 
-- `/metrics` Prometheus 格式。逐个全名列出（`tests/test_observability.py` 会把这份清单与
-  `app/metrics.py` 里声明的族逐项对账，缩写式写法机器查不了）：
-  - 面向用户的启动：`workspace_launch_total`、`workspace_launch_failed_total`、
-    `workspace_launch_seconds`、`template_launch_total`、`template_failure_total`
-  - 池/资源水位：`workspace_running`、`gpu_allocated`、`gpu_seconds_total`、
-    `warm_pool_ready`
-  - warm pool 领取：`warm_pool_claim_total`、`warm_pool_claim_failed`、`warm_pool_claim_seconds`
-  - warm pool 自身补位（N-39，与上面的"用户启动"分族）：`warm_pool_prewarm_total`、
-    `warm_pool_prewarm_failed_total`、`warm_pool_prewarm_seconds`
-  - 流媒体：`stream_session_total`、`stream_failure_total`
+- `/metrics` Prometheus 格式。族名 + 标签维度逐行写全，`tests/test_observability.py` 会把这张表与 `app/metrics.py` 的 AST 声明**双向**对账（族少了、多了、标签不符都红；缩写式写法机器查不了）：
+
+| 指标族 | 标签 | 用途 |
+|---|---|---|
+| `workspace_launch_total` | `template_id,provider` | 用户按下的启动次数（不含池内补位，N-39） |
+| `workspace_launch_failed_total` | `template_id,provider` | 用户启动失败次数；告警口径见 OPERATIONS |
+| `workspace_launch_seconds` | `template_id` | 用户启动耗时直方图，PRODUCT_SPEC 的 P50/P95 查这个 |
+| `template_launch_total` | `template_id` | 按模板的启动次数（与 workspace_launch_total 同一处判定，同样不含池内补位） |
+| `template_failure_total` | `template_id` | 按模板的启动失败次数（同上，不含池内补位） |
+| `workspace_running` | — | RUNNING 状态的 workspace 数 |
+| `gpu_allocated` | — | ALLOCATED 状态的卡数 |
+| `gpu_seconds_total` | — | 已计费的 GPU 秒 |
+| `stream_session_total` | `workspace_id` | 流媒体会话创建次数 |
+| `stream_failure_total` | `workspace_id` | 流媒体会话失败次数 |
+| `warm_pool_ready` | — | 池内 READY 格数 |
+| `warm_pool_claim_total` | — | claim 尝试次数 |
+| `warm_pool_claim_failed` | — | claim 失败（池空/竞争被抢/入口轮换闸） |
+| `warm_pool_claim_seconds` | `template_id` | 只给成功交付的 claim 记时（池越差不会把 P95 变好看） |
+| `warm_pool_prewarm_total` | `template_id` | 池自己开格的次数（N-39 分族） |
+| `warm_pool_prewarm_failed_total` | `template_id` | 池内补位失败次数；持续 >0 说明容量与 size 不匹配 |
+| `warm_pool_prewarm_seconds` | `template_id` | 池内补位耗时（不是用户感受到的启动时间） |
+
 - 为什么池内补位要单独一族：`warm_pool_state` 非空的 runtime 是控制面自己开的格，它与交互式
   请求抢同一个原子分配器、输掉是设计内的行为；记进 `workspace_launch_*` 会同时算错
   用户启动量、失败率与 `workspace_launch_seconds` 的 P50/P95（后两个正是告警与 SLA 的读数面）。

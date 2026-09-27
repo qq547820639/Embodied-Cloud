@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 596 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 598 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -143,6 +143,18 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 判据两支（闭集不许再含该模块 + 该文件 AST 里不许再有 `.skip(`／`GATE_SENTINEL`），门禁目录 G0.51；
   `G0.42` 那行对闭集组成的描述同步更正。
 - 顺手：`rig` 的 `cards` 断言与新增前置一起跑，`tests/test_gpu_pool_guard.py` 现在 4 支全跑、0 跳过。
+
+### 指标文档从"族名"核到"标签维度 + 告警引用"（N-42）
+- N-39 那一步把 §8 的缩写式清单改成逐个全名并加了双向对账，但核的只是名字集合：标签维度
+  （`workspace_launch_total{template_id,provider}` 的 `provider`）改了文档不会红，
+  `docs/OPERATIONS.md` 告警表里写的指标名同样没人核 —— 告警句子可以指着一条不存在的序列。
+- §8 改成「族名 + 标签 + 用途」三列表格（17 族全列），判据从 `app/metrics.py` 的 AST 取
+  `{族: 标签}` 做三向对账（多写、漏写、标签不符各点名）；另一支只核运维文档**表格首列**里的
+  snake_case 名字必须是已声明族。
+- 判据过宽一次，当场收到反例：全文扫 `*_total/*_seconds/*_ready` 被 provider 的方法名
+  `wait_ready` 打红 ⇒ 收紧作用域到"表格首列"，保住牙齿（把 `gpu_allocated` 写成 `gpu_allocations` 仍红）
+  又不禁正文提方法名。两支都配了必开对照 + 恢复后复算（`rc=0`）。
+
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到

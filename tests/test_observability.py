@@ -137,3 +137,84 @@ def test_every_prometheus_metric_family_is_documented() -> None:
     section = doc.split("## 8. 可观测性", 1)[1].split("\n## ", 1)[0]
     missing = sorted(name for name in names if name not in section)
     assert not missing, f"这些指标族没写进 §8：{missing}"
+
+
+def _declared_metrics() -> dict[str, list[str]]:
+    """从 app/metrics.py 的 AST 里取 {指标族名: 标签列表}（顺序按声明）。"""
+    import ast
+    from pathlib import Path as _P
+
+    tree = ast.parse(_P("app/metrics.py").read_text(encoding="utf-8"))
+    out: dict[str, list[str]] = {}
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+            continue
+        func = node.value.func
+        fname = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+        if fname not in {"Counter", "Gauge", "Histogram"} or not node.value.args:
+            continue
+        if not isinstance(node.value.args[0], ast.Constant):
+            continue
+        name = node.value.args[0].value
+        labels: list[str] = []
+        for arg in node.value.args[1:]:
+            if isinstance(arg, ast.List):
+                labels = [e.value for e in arg.elts if isinstance(e, ast.Constant)]
+                break
+        out[name] = labels
+    return out
+
+
+def test_metrics_table_documents_the_label_set_too() -> None:
+    """§8 的指标表要连**标签维度**一起写，并与代码声明逐项双向对账。
+
+    只核族名不够：告警与查询都按标签写（`workspace_launch_total{provider=...}`），
+    标签一变，文档就又在描述一个不存在的指标。N-39 加三族时就是把"族名"补上了，
+    标签还没人核 —— 这条补上那一半。
+    """
+    from pathlib import Path as _P
+
+    declared = _declared_metrics()
+    assert len(declared) >= 17, f"从代码只解析出 {len(declared)} 族，分母不可信"
+    doc = _P("docs/ARCHITECTURE.md").read_text(encoding="utf-8")
+    section = doc.split("## 8. 可观测性", 1)[1].split("\n## ", 1)[0]
+    documented: dict[str, list[str]] = {}
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        name = cells[0].strip("`")
+        labels = [s.strip() for s in cells[1].strip("`").split(",")] if cells[1] not in ("", "—") else []
+        documented[name] = [s for s in labels if s]
+    assert documented, "§8 里读不到指标表（判据会恒真）"
+    only_doc = sorted(set(documented) - set(declared))
+    only_code = sorted(set(declared) - set(documented))
+    assert not only_doc, f"文档写了代码里没有的族：{only_doc}"
+    assert not only_code, f"这些族没进文档表：{only_code}"
+    wrong = {n: (documented[n], declared[n]) for n in documented if documented[n] != declared[n]}
+    assert not wrong, f"标签维度与声明不符：{wrong}"
+
+
+def test_alert_table_only_references_declared_metrics() -> None:
+    """运维文档表格**首列**里的 snake_case 名字必须是真声明过的指标族。
+
+    第一版扫全文，被 `wait_ready`（provider 的方法名，不是指标）假阳性打红 ——
+    收紧到"只看表格首列"：写错指标名照样红，正文里的方法名不再参与，
+    免得把判据退化成"文档不许出现下划线词"。
+    """
+    import re
+    from pathlib import Path as _P
+
+    text = _P("docs/OPERATIONS.md").read_text(encoding="utf-8")
+    first_cells = [
+        ln.strip("|").split("|")[0]
+        for ln in text.splitlines()
+        if ln.startswith("|") and set(ln) - set("|-: ")
+    ]
+    tokens: set[str] = set()
+    for cell in first_cells:
+        tokens.update(re.findall(r"\b[a-z][a-z0-9]*_[a-z0-9_]+\b", cell))
+    assert tokens, "OPERATIONS 的表格首列里没有任何指标名：本判据恒真"
+    declared = set(_declared_metrics())
+    unknown = sorted(tokens - declared)
+    assert not unknown, f"表格首列引用了不存在的指标族：{unknown}"
