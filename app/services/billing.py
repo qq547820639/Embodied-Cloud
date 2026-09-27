@@ -175,6 +175,19 @@ class BillingPolicy:
         )
         return int(total or 0)
 
+    def gross_credits(self, db: Session, user: User) -> int:
+        """两个池子的合计：个人账户收该用户的全部行，组织账户只收无主行。
+
+        全仓只有这一处做这个加法。改前它抄了三遍（`available_credits`、`reserve_launch`、
+        配额 monitor 的投影余额），任何一侧改动都会让三个判据口径分叉；两池相加的
+        不相交性由 `CreditLedgerService.organization_balance` 的谓词保证（成员行不再
+        被当成组织余额重算）。
+        """
+        gross = self.ledger.balance(db, user.id)
+        if user.organization_id:
+            gross += self.ledger.organization_balance(db, user.organization_id)
+        return gross
+
     def available_credits(self, db: Session, user: User) -> int:
         """可花额度 = 个人 + 组织账本余额 − 已被 hold 圈住的额度。
 
@@ -182,10 +195,7 @@ class BillingPolicy:
         不再计入，消费由 usage 账本条目体现，二者不会重复扣一次。
         """
         accounts = self.user_accounts(db, user)
-        gross = self.ledger.balance(db, user.id)
-        if user.organization_id:
-            gross += self.ledger.organization_balance(db, user.organization_id)
-        return gross - self.pending_hold_total(db, [a.id for a in accounts])
+        return self.gross_credits(db, user) - self.pending_hold_total(db, [a.id for a in accounts])
 
     def reserve_launch(
         self,
@@ -217,10 +227,9 @@ class BillingPolicy:
         accounts = self.user_accounts(db, user)
         self.lock_accounts(db, accounts)
         required = (minutes if minutes is not None else self.minimum_launch_minutes) * 60
-        gross = self.ledger.balance(db, user.id)
-        if user.organization_id:
-            gross += self.ledger.organization_balance(db, user.organization_id)
-        available = gross - self.pending_hold_total(db, [a.id for a in accounts])
+        available = self.gross_credits(db, user) - self.pending_hold_total(
+            db, [a.id for a in accounts]
+        )
         if available < required:
             raise BillingError(
                 f"insufficient credits to reserve launch: {available} available, "

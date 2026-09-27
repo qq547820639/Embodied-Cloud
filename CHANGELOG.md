@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 678 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 686 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,53 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678，门禁 G0.72。
+- 计数面 665→678→686，门禁 G0.72／G0.73。
+
+### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
+- 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
+  `ledger.balance(user)` 与 `ledger.organization_balance(org)` 直接相加，而账本行常态是
+  **两个归属一起写**（usage 见 `ledger.py:100-111`，充值/调整见 `routers/usage.py:68-77`），
+  两个谓词按构造相交。读数：给 a1 充 1000 ⇒ `available(a1)=2000`（应然 1000）、
+  同组织从未出钱的 `available(b1)=1000`（应然 0）⇒ 未出钱的成员可以径直过启动门禁；
+  a1 再消耗 300 ⇒ `available(b1)=700`，别人的消耗扣到 b1 头上。
+- 分池口径不是我发明的，仓里已经写着：`tests/test_credit_holds.py::
+  test_org_credits_are_visible_but_hold_is_taken_once`（:274-297）给组织充值时只写
+  `organization_id`、不写 `user_id`（:278-284），断言 5100 = 100 个人 + 5000 组织；
+  `reserve_launch` 的注释也写“记账账户：优先个人”。所以组织池的定义是**无主行**
+  （`user_id IS NULL`），个人池收该用户全部行。改后那条既有用例照绿。
+- 择引（本轮真的据此选了“先改读侧”）：Odoo `account.move.line` 用 CHECK 强制
+  “一条分录恰好一个归属”——`_check_accountable_required_fields = CHECK(... OR account_id
+  IS NOT NULL)` 与非记账行必须 `account_id IS NULL`
+  （Odoo 主干 `addons/account/models/account_move_line.py` 第 557-564 行，本机从 `raw.githubusercontent.com/odoo/odoo/master/…` 取回 203741 字节亲读）；
+  PostgreSQL `ddl.sgml:602-616`（225811 字节）说 CHECK 是列值必须满足的布尔表达式——
+  它只约束写入，不回头改历史行。本仓 `models.py:400` 明写“账本 append-only，不回填改写”，
+  所以历史双主行只能靠读侧谓词归池 ⇒ 择一：借 Odoo 的“恰好一个归属”语义先做读侧分池，
+  写侧 CHECK／`account_id` 列留作另轮（需要迁移与归池决策，不能顺手加）。
+- 改法：`ledger.py:76-92` 的 `organization_balance` 加 `user_id IS NULL`；
+  `billing.py:178-189` 新增 `gross_credits`，把重复三遍的相加合一
+  （`available_credits` :198、`reserve_launch` :230、monitor 投影余额 :668 都改读它）。
+- 判据 `tests/test_credit_purse_split.py`（8 支）：成员行只进个人池（a1 可用 1000、
+  组织池 0）；同组织无钱者可用 0；**无主组织行对两个成员都可见**（合规侧，5000/5100 与
+  既有用例同数）；别人的消耗不扣我；无组织用户不受影响；相加表达式在 app/ 里按 AST 数
+  恰好一处（`def gross_credits` 也恰好一份）＋合成源码反向对照（再加一份就读到 2）；
+  三个消费位各自核 `gross_credits` 调用数。
+- 一处自我更正（判据写错，不是代码错）：我第一版把“可用额为 0 就该被启动门禁拒”写成应然，
+  实测 `check_launch_eligible` 只挡负数（`billing.py:~80` 的 `if available < 0`），而
+  `config.py:56` 出厂默认 `billing_enforce_preauthorization=False` ⇒ 0 余额确实能开机。
+  判据因此改成两档极：预授权**开启**档必须拒 b1、放 a1；“0 余额可开机是否应然”不在本轮
+  改门禁语义，登记为 N-72。
+- 改前复算（把 ledger/billing/orchestrator 三个文件一起换成 HEAD 再跑同一批尺子，
+  cp＋`git show`，跑完按 sha 还原：`1080fb3e…`／`bec748c5…`／`a4b4f5b5…` 两端一致）：
+  `FF.F.F.F` —— 8 支里 5 支开火（三档钱＋两份接线判据），照绿的 3 支正是合规档
+  （无主组织行共享、无组织用户、尺子自测的合成反向对照）。只回退 ledger.py 时读数是
+  `FF.F....`（3 开火）——两份“相加副本”的判据要靠 billing/orchestrator 一起回退才会开火，
+  第一遍我漏了这条，复算做实后才看得见。
+- 邻面回归 47 支全绿（billing_policy／credit_holds／usage_admin_adjustment／
+  stop_release_admission），`make lint` 与 `make typecheck` rc=0。
+- 未证实：真 PostgreSQL 上的并发充值/扣减没重跑（pg 档本轮未开）；组织池“无主行”的
+  写入路径目前只有测试与管理端调整两种，产品侧“给组织充值”的端点并不存在——
+  也就是说改后可用额几乎只等于个人余额，这是口径正确化的结果，不是新问题。
+- 计数面 678→686，门禁 G0.73。
 
 ### 本轮新增的待收口项
 - `N-64`：**`accumulated_seconds` 的累加在账本的幂等保护之外**。`orchestrator.py:418`
@@ -585,14 +631,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `app/routers/usage.py:36,40`（展示＋估价）、`app/services/billing.py:358`
   （`course_usage_seconds` 是配额门禁！）、`app/static/app.js:425,703`。⇒ 扣一次、
   展示与配额算两次。
-- `N-65`：**`available_credits` 把个人与组织余额直接相加，而账本行同时带两个归属**。
-  `ledger.py:104-105`（usage）与 `app/routers/usage.py:72-73`（recharge）在同一行写
-  `user_id` 与 `organization_id`；`balance()` 只按 user_id 过滤（:68-74）、
-  `organization_balance()` 只按 org 过滤（:76-82），`billing.py:185-188` 直接相加 ⇒ 两集合
-  按构造相交：正数（充值）算两遍 ⇒ 可用额虚高、预授权门禁被放宽；负数（usage）扣两遍 ⇒
-  虚低。同一段加法还有两份副本（`billing.py:220-223`、`orchestrator.py:667-672` 的 monitor
-  投影余额），且 `models.py:397-417` 的 `BillingAccount(subject_type, subject_id)` 本来就是
-  "谁付钱"的单一入口 —— 账本行没有 account_id，所以这道闸门没用上它。
+- ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
 - `N-66`：**hold 的幂等键按 workspace 全局唯一 ⇒ 二次启动永远拿不到 pending hold**。
   `billing.py:232` 用 `f"hold:{workspace_id}"`，落在 `models.py:447` 的全局 unique 列上；
   :208-215 的去重只看 `status == PENDING`，而 :246-253 的 IntegrityError 兜底**只按 key 查、
@@ -642,6 +681,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   API 错误同样回 UNKNOWN。修法要先定“名字的唯一推导位”（stop/destroy/reconcile 三处
   现在两套逻辑），再谈把 UNKNOWN 从放行档里摘出去——后者会让 mock/演示档全停不下来
   （`providers/mock.py:72-74` 只会回 UNKNOWN），需要新的档位区分，不能顺手改。
+- `N-72`：**可用额为 0 时仍允许开机**（出厂默认档）。`billing.check_launch_eligible` 只挡  `available < 0`（`app/services/billing.py:~80`），而 `app/config.py:56` 出厂默认  `billing_enforce_preauthorization=False` ⇒ 零余额成员可以启动，钱在第一次结算时变成负数、  靠配额 monitor 兜。这是应然问题（要不要把 0 也挡掉／出厂是否该开预授权），不是实现 bug，  N-71 的判据已把两档现状钉住：预授权开启时 0 余额必须被拒。
 - `N-61`：~~要不要把构建后端从 setuptools 换成 hatchling`**【N-62 结案：不换】** 本机在 `git worktree` 副本上真跑过：hatchling 1.32.4 两建 wheel 同为 `629d6ff7e24f`（它自己就钉 tar 成员 mtime/uid/gid 与 gzip mtime，读安装到本机 venv 的源文件核对过）；与 setuptools 的 wheel 差异只有三处——成员 55 对 56（少 `dist-info/top_level.txt`，全仓 grep 零读者）、`Requires-Dist` 只差 PEP 508 的引号风格（22 条语义同集）、`WHEEL` 的 Generator 行。净收益只是删掉 `scripts/sdist_normalize.py`（约 100 行，6 支判据与两处消费位都已落门禁），代价是 `uv.lock` 重解析、`dev` extra 对齐、wheel 侧 `recomputable` 基线重钉与所有引用产物 sha 的文档面重扫⇒ 不抵。再议的触发条件：自研归一哪天失效，或后端侧出现**别的**产品收益。
 ~~`N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
   `SOURCE_DATE_EPOCH`，逐字节定位见上一节）。wheel 已可复算；sdist 那一半要么给 `dist/checksums.txt`

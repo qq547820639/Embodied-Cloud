@@ -74,9 +74,19 @@ class CreditLedgerService:
         return int(total or 0)
 
     def organization_balance(self, db: Session, organization_id: str) -> int:
+        """组织池余额：**只数没有个人归属的行**（`user_id IS NULL`）。
+
+        账本行同时带 `user_id` 与 `organization_id` 是常态（`settle_workspace_run` 与
+        充值/调整都两个一起写），所以"按 organization_id 求和"会把成员的个人行再数一遍：
+        一个人的充值被算进同组织其他人的可用额（实测：给 a1 充 1000 ⇒ a1 可用 2000、
+        从未出钱的 b1 可用 1000）。分池口径与 `test_credit_holds.py` 里"组织账户补足
+        可用额"那条既有意图一致——组织自己的入账本来就只带 `organization_id`。
+        个人池因此是"该用户的全部行"，两池不相交。
+        """
         total = db.scalar(
             select(func.coalesce(func.sum(CreditLedger.amount), 0)).where(
-                CreditLedger.organization_id == organization_id
+                CreditLedger.organization_id == organization_id,
+                CreditLedger.user_id.is_(None),
             )
         )
         return int(total or 0)

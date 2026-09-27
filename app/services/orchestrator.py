@@ -663,13 +663,9 @@ class WorkspaceOrchestrator:
                     if started.tzinfo is None:
                         started = started.replace(tzinfo=UTC)
                     live = max(0, int((utcnow() - started).total_seconds()))
-                # 口径对齐 billing.check_launch_eligible：个人 + 组织 合并余额
-                org_balance = (
-                    self.ledger.organization_balance(db, user.organization_id)
-                    if user.organization_id
-                    else 0
-                )
-                projected = self.ledger.balance(db, user.id) + org_balance - live
+                # 口径与 `available_credits` 同源：这份加法全仓只写在 `gross_credits` 里
+                # （原先这里再抄一遍 `balance + organization_balance`，三处口径会分叉）
+                projected = self.billing.gross_credits(db, user) - live
                 # course quota 检查
                 labs = db.scalars(
                     select(Lab).where(Lab.template_id == w.template_id)
