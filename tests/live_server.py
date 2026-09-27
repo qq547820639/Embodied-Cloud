@@ -43,6 +43,59 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
+def health_reason(url: str, *, client=None, timeout: float = 5.0) -> str:
+    """一次健康探测：返回""表示就绪，否则返回**为什么还没就绪**。
+
+    关键是"什么异常都不外抛"。就绪循环原来只 `contextlib.suppress(OSError)`，
+    而 httpx 的连接/读超时属于 `httpx.TransportError`（不是 OSError）——健康检查一卡住，
+    异常就从循环里穿出去，绕开"未就绪 ⇒ 带服务日志的失败"这条有诊断价值的出路，
+    把消费它的两档（浏览器、边缘 agent）变成 setup 错误。
+    """
+    try:
+        import httpx
+
+        target = client or httpx
+        response = target.get(url, timeout=timeout)
+        status = int(getattr(response, "status_code", 0) or 0)
+        return "" if status == 200 else f"HTTP {status}"
+    except ImportError as exc:  # 没装 httpx：这档本来就该跳，不该在这里炸
+        return f"缺 httpx：{exc}"
+    except Exception as exc:  # 有意宽捕：探测的答案是"没就绪"，不是异常类型
+        return f"{type(exc).__name__}: {exc}"
+
+
+def wait_until_ready(
+    *,
+    probe,
+    alive,
+    deadline_seconds: float,
+    sleep=time.sleep,
+    log_tail=lambda: "<无日志>",
+    exit_code=None,
+) -> tuple[bool, str]:
+    """轮询到就绪；任何失败都收敛成 (False, 带日志的原因)。
+
+    `probe()` 约定不抛（`health_reason` 就是照这个约定写的），但这里仍然兜住异常：
+    判据要护的是"循环绝不外抛"，不是"调用方一定守约"。
+    """
+    deadline = time.monotonic() + deadline_seconds
+    last = "未探测"
+    while True:
+        if not alive():
+            rc = exit_code() if exit_code is not None else None
+            return False, f"服务进程已退出 rc={rc}：\n{log_tail()}"
+        try:
+            last = probe()
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+        if not last:
+            return True, ""
+        if time.monotonic() >= deadline:
+            return False, f"未在 {deadline_seconds:.0f}s 内就绪（最后一次读数：{last}）：\n{log_tail()}"
+        sleep(0.3)
+
+
+
 @contextlib.contextmanager
 def live_server(root: Path | None = None, *, provider: str = "mock") -> Iterator[Server]:
     """一次性控制面：mock provider + 独立 sqlite + 独立 workspace 目录。
@@ -91,22 +144,24 @@ def live_server(root: Path | None = None, *, provider: str = "mock") -> Iterator
             text=True,
         )
         server = Server(url=base, db_path=db, log_path=log_path, workspace_root=workspaces, proc=proc)
-        ready = False
-        deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
+        def _probe() -> str:
+            # 端口没通时不算"未就绪"的原因里也不刺眼：socket 探测失败就回一句短语
+            with contextlib.closing(socket.socket()) as sock:
+                sock.settimeout(1)
+                if sock.connect_ex(("127.0.0.1", port)) != 0:
+                    return "端口未监听"
+            return health_reason(f"{base}/api/health", client=httpx)
+
+        ok, why = wait_until_ready(
+            probe=_probe,
+            alive=lambda: proc.poll() is None,
+            deadline_seconds=_READY_TIMEOUT_SECONDS,
+            exit_code=lambda: proc.returncode,
+            log_tail=server.log_tail,
+        )
+        if not ok:
+            raise RuntimeError(f"uvicorn 起不来：{base}\n{why}")
         try:
-            while time.monotonic() < deadline:
-                if proc.poll() is not None:
-                    raise RuntimeError(f"uvicorn 提前退出 rc={proc.returncode}:\n{server.log_tail()}")
-                with contextlib.suppress(OSError):
-                    with contextlib.closing(socket.socket()) as probe:
-                        probe.settimeout(1)
-                        probe.connect(("127.0.0.1", port))
-                    if httpx.get(f"{base}/api/health", timeout=5).status_code == 200:
-                        ready = True
-                        break
-                time.sleep(0.3)
-            if not ready:
-                raise RuntimeError(f"uvicorn 未在 {_READY_TIMEOUT_SECONDS}s 内就绪：{base}\n{server.log_tail()}")
             yield server
         finally:
             proc.terminate()

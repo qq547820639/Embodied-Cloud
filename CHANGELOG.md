@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 616 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 622 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -213,6 +213,20 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 真实复跑四档：`rc=0`、75 条通过（daemon 现在 13 ms 应答，健康路径的判定没被改宽）。
 - 记一笔纪律账：`N-45` 那次读者判据抓到了我自己吃掉的 `if __name__ == "__main__"`；这次是跨环境复算
   抓到了只在另一台"机器"上才会出现的失败。两道都是上一轮建的，本轮还了债。
+
+
+### 就绪等待与探测：任何失败模式都收敛成原因，不是异常（N-47）
+- N-46 按"四个模块的 `gate_reason()`"扫了一遍就收工，这轮复核发现**同类还有两处**，而且参数化判据看不见它们：
+  `tests/live_server.py` 的就绪循环只吞 `OSError`（httpx 的超时是 `TransportError`，会穿出去，
+  把浏览器/边缘两档变成 setup 错误、丢掉服务日志），以及 `tests/k8s_server.py:node_image_cached()`
+  仍直接用 `_docker(timeout=30)`（`gate_reason` 更早 return，参数化那支永远走不到它）。
+- 做法是把"探测"变成两个不抛异常的共享函数：`health_reason(url, client=…)`（""＝就绪，否则一句原因）与
+  `wait_until_ready(probe, alive, deadline_seconds, sleep, log_tail, exit_code)`（失败一律收敛成
+  `(False, 带日志的原因)`，连探测实现自己抛也兜住），`live_server()` 改成薄调用方。
+- 判据 6 支，含一支**接线**判据：夹具源码里必须真的调用这两个函数——不然判据护的是没人走的实现。
+  另有三态探测（超时／503／200）、进程先退报 `rc=`、k8s 在挂起 daemon 下答"没缓存"。
+- 真实复跑两档（真起 uvicorn 子进程）：`rc=0`，13 条通过；`ruff check tests` 干净。
+- 教训写进记忆：修"一类"不能按文件个数扫，要按**失败模式**扫（拒连／超时／非 OSError 的传输异常／SDK 自抛）。
 
 
 ### 本轮新增的待收口项

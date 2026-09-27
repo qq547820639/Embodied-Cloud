@@ -81,10 +81,14 @@ def node_image_cached() -> bool:
     只有 `kindest/node@sha256:a1ed56…`，没有 `:v1.37.0`，所以只查 tag 会把"已经缓存"
     读成"未缓存"（档位被无谓地跳过）。两种形态都认。
     """
-    if _docker("image", "inspect", node_image(), timeout=30).returncode == 0:
+    # 这一处也在跳过判定链上（gate_reason → node_image_cached）：daemon 卡住时答"没缓存"，
+    # 不抛 —— N-46 那轮按模块参数化的判据看不见它，因为 gate_reason 更早一步就 return 了。
+    inspect = docker_probe(_docker, "image", "inspect", node_image(), timeout=30)
+    if inspect.returncode == 0:
         return True
     repo = node_image().split(":")[0]
-    return bool(_docker("image", "ls", "-q", repo, timeout=30).stdout.strip())
+    listing = docker_probe(_docker, "image", "ls", "-q", repo, timeout=30)
+    return bool(listing.stdout.strip())
 
 
 def gate_reason() -> str | None:
