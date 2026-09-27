@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 UV ?= uv
 VERSION ?= 0.7.0
 
-.PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane policy-bench \
+.PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane policy-bench warm-sla \
         lint typecheck build smoke clean check demo amd64-probe \
         control-image workspace-image gpu-preflight gpu-test \
         compose-up compose-down migrate migrate-up migrate-downgrade \
@@ -47,6 +47,12 @@ test-k8s-control-plane:
 # 常驻判据（tests/test_scheduler_policy.py）复用这里的 run_policy，读数与 CI 同源。
 policy-bench:
 	$(PYTHON) -m tests.scheduler_policy_lab
+
+# warm pool SLA 取证台：一次真 claim 的客户端/服务端双读数 + 冷启动基准（mock）。
+# 不进每轮 validate（要起栈、且绝对值判定本就归 G1–G4），但常驻用例的四条反向对照
+# （tests/test_warmpool_http_surface.py）与这里的三条 print 判的是同一批事实。
+warm-sla:
+	$(PYTHON) scripts/warm_pool_sla_lab.py
 
 lint:
 	$(PYTHON) -m ruff check app tests edge_agent scripts

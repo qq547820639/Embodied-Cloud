@@ -762,7 +762,7 @@ docker 档 21 → 22，全套 531 → 532。
 - **端到端读数**（真 HTTP 路径，不是单测里的替身）：补池到 8 个 READY → 普通用户
   `POST /api/workspaces` → **201**、交付行 `name=warm-cartpole status=running`（证明确实走 claim
   而不是新建），客户端 **15.3 ms**、服务端 `count=1.0 / sum=0.00719`（7.2 ms），池 8 → 7；
-  admin `iterations=20` → p50 **3.79 ms**／p95 **4.48 ms**／max 4.99 ms，由另一把尺独立重算同值；
+  admin `iterations=20` → p50 **3.79 ms**／p95 **4.48 ms**／max 4.99 ms，并核到 p95 取的是最近秩那一格（下标 18）；
   `iterations=21` → **422**；非 admin 两端 → **403／403**。
 - **这些数不等于 SLA 达标**（写清楚免得被复用）：mock provider 的 `wait_ready` 直接 `return True`、
   `provision` 只 `mkdir`，所以量到的是**控制面自身那一段**。绝对值那一格仍在
@@ -786,6 +786,17 @@ docker 档 21 → 22，全套 531 → 532。
   夹具在 `finally` 里把释放补做回去，不留残骸。
 - 计数：新增常驻用例 6 支（HTTP 面 5 ＋ claim 延迟 1），全套 545 → 551（passed 550 / skipped 1 /
   failed 0，两份计数面由 `make validate` 的 `docs_test_counts` 现算核对）。
+- **一条我自己写的"独立重算"是假对账，被自己的复跑当场戳穿**：取证脚本最初这样核对分位数——
+  实现里算 `p50 = statistics.median(sorted(samples))`，我在旁边又写了一遍
+  `abs(statistics.median(s) - data["p50_s"]) < 1e-9` 并称"两把尺一致"。那是**同一个函数调用两次**，
+  永远为真，什么都不证明（与"判据读不到事实却报一致"同族）。改判成核**分位索引**：
+  n=20 时最近秩 p95 取下标 18，既不是最大也不是最小——这一条能抓住实现里的 off-by-one。
+  第二次跑（`make warm-sla` 复跑）同时暴露了另一件事：mock 下这些绝对值本身会抖
+  （p50 3.79 → 2.44 ms、claim 服务端 7.2 → 3.7 ms），所以文档面从"钉一个数"改成"记范围 + 给复跑入口"。
+- **取证脚本进了仓库**：原先那次数值来自 `/Volumes/Extra/qoder-scratch` 里一个不入库的脚本，
+  下一个读者照名字根本重跑不出来。现在它是 `scripts/warm_pool_sla_lab.py` + `make warm-sla`
+  （与 `make policy-bench` 同一形状），带退出码：三条反向对照任一不符或分位索引对不上就 rc=1。
+  本轮实跑 `rc=0`，读数为 `[warm-sla] overall=PASS（绝对 SLA 判定仍需 G1–G4 真机）`。
 
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 
