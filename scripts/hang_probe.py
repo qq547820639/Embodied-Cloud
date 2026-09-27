@@ -9,8 +9,11 @@
   其余子命令 `sleep` 到天荒地老，于是每一层探测都被**自己的超时**掐掉。
 
 两种都是真子进程、真超时（不是 monkeypatch）；唯一的替身是超时上限：子进程里把
-`subprocess.run(timeout=…)` 的 timeout 夹到 `HANG_PROBE_TIMEOUT_CAP`，这样常驻判据可以按
-2 秒跑完，而人手动跑 `make hang-probe` 用真实的 20/30 秒。
+`subprocess.run(timeout=…)` 的 timeout 夹到当场算出的**有效上限**
+（`min(EFFECTIVE_CEILING, max(请求值, 4×预热后 p95))`）。所以常驻判据按 `--timeout 2`
+跑完，人手动 `make hang-probe`（请求 20s）时三份替身剧本会夹到 10s 封顶——
+只有 `blackhole` 不夹（它不起替身、也就没有往返可量），那一档才真是请求的 20 秒。
+差值不藏：JSON 与表头都打 `ceiling_bit`。
 
 每个档位还顺带过一遍 N-48 的可行动性判据（`pending_reason_offenders`）：
 挂起时给出的原因必须是"能指着补"的句子，否则这台子自己就是红的。
@@ -110,31 +113,86 @@ HANGING = {
 }
 
 
-def _fake_docker_dir(tmp: Path, mode: str) -> tuple[Path, list[str]]:
+def _fake_docker_dir(tmp: Path, mode: str) -> Path:
     bin_dir = tmp / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     script = bin_dir / "docker"
     script.write_text(FAKES[mode], encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return bin_dir, ["image", "pull", "build", "inspect", "ls"]
+    return bin_dir
 
 
-def _fake_round_trip(fake_dir: Path, env: dict[str, str]) -> float:
-    """替身答一句话要多久——三次采样取**中位数**。
+# 有效上限的两个旋钮：倍率与封顶。封顶是"最坏墙钟"与"会不会把慢误判成挂"之间的取舍，
+# 所以它必须**可见**：当封顶压过倍率、余量不足 2×往返时，这台子判定为"测不准"，
+# 用退出码 2 明说，而不是交出一份把慢当成挂的读数。
+LATENCY_MULTIPLIER = 4.0
+EFFECTIVE_CEILING = 10.0
+MIN_MARGIN = 2.0
 
-    上限不能写死：高负载时替身自己就来不及答话（本机实测同一命令 0.07s 与 3.03s 都出现过），
-    那会让"挂起取证"测到机器负载而不是代码。取中位数而不是最大值：一次偶发慢采样
-    会把上限撑到好几倍，反过来让这台取证工具自己变成耗时大户。
+
+def derive_effective(latency: float, requested: float) -> float:
+    """由实测往返算出这次用的超时上限（纯函数，判据与实现共用一份）。"""
+    if latency <= 0:
+        return requested
+    return min(EFFECTIVE_CEILING, max(requested, round(LATENCY_MULTIPLIER * latency, 2)))
+
+
+def conclusive(latency: float, effective: float) -> bool:
+    """余量够不够说"这是挂起不是慢"：effective 至少要是往返时间的 MIN_MARGIN 倍。"""
+    if latency <= 0:
+        return True
+    return effective >= MIN_MARGIN * latency
+
+
+def latency_profile(env: dict[str, str], fake_dir: Path, loads: tuple[int, ...], samples: int = 5) -> dict:
+    """不同并发负载下的往返耗时分布（预热后）。"""
+    return {str(load): _latency_stats(fake_dir, env, load, samples) for load in loads}
+
+
+def _latency_stats(
+    fake_dir: Path, env: dict[str, str], load: int, samples: int = 5, *, warm_up: bool = True
+) -> dict[str, float]:
+    """并发 `load` 下替身答一句话的耗时分布。
+
+    `warm_up=False` 是给判据用的对照档：它把"这一轮的第一个样本"留在分布里。
+    预热之所以是承重墙，实测有两层（读数与复算入口见 `tests/test_hang_probe.py` 的
+    `test_warm_up_is_what_keeps_the_cold_exec_out_of_the_distribution`）：
+    ① 一个**刚写出来**的替身文件，第一次 exec 比之后慢一个数量级（本机 12 次新目录实测
+       first p50=0.059s／max=0.274s，之后 p50=0.010s）；② 机器忙时还会叠上偶发慢采样。
+    两层都会把 5 个样本的 p95（本函数 n=5 时 nearest-rank p95 就是最大值）抬到接近甚至超过
+    请求上限，于是 `conclusive()` 翻假、这台子退 2 说"测不准"——而它其实什么都没测。
+    被丢掉的那一次仍然报出来（`pre_warm_burst_s`），只是不进分布：主张要能被别人重开。
     """
-    samples: list[float] = []
-    for _ in range(3):
+    import statistics
+
+    def burst() -> float:
+        procs = [
+            subprocess.Popen(  # noqa: S603 受控常量参数（替身脚本本身）
+                [str(fake_dir / "docker"), "version"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            for _ in range(load)
+        ]
         started = time.monotonic()
-        subprocess.run(  # noqa: S603 受控常量参数（替身脚本本身）
-            [str(fake_dir / "docker"), "version"], env=env, text=True, capture_output=True, timeout=30
-        )
-        samples.append(time.monotonic() - started)
-    samples.sort()
-    return round(samples[len(samples) // 2], 3)
+        for proc in procs:
+            proc.wait(timeout=60)
+        return time.monotonic() - started
+
+    first = burst()
+    got = sorted(round(burst(), 3) for _ in range(samples))
+    if not warm_up:
+        got = sorted([*got, round(first, 3)])
+    return {
+        "p50": round(statistics.median(got), 3),
+        "p95": got[min(len(got) - 1, int(0.95 * len(got)))],
+        "max": got[-1],
+        "pre_warm_burst_s": round(first, 3),
+    }
+
+
+def _fake_round_trip(fake_dir: Path, env: dict[str, str]) -> dict[str, float]:
+    """预热后的往返分布：上限要连它的尾部都盖得住，否则读数不可信。"""
+    return _latency_stats(fake_dir, env, 1, 5)
 
 
 def measure(mode: str, cap_seconds: float) -> dict:
@@ -151,9 +209,11 @@ def measure(mode: str, cap_seconds: float) -> dict:
         if mode == "blackhole":
             env["DOCKER_HOST"] = BLACKHOLE_HOST
         elif mode in FAKES:
-            fake_dir, hanging = _fake_docker_dir(tmp, mode)
+            fake_dir = _fake_docker_dir(tmp, mode)
             env["PATH"] = f"{fake_dir}{os.pathsep}{env.get('PATH', '')}"
-            injected["hang_subcommands"] = hanging
+            # 报"这一档剧本里真正会挂的那几个子命令"，不是替身认识的子命令全集：
+            # 半挂剧本的意义正是"只有一层挂"，报成五个全挂就是把读数写宽了一格。
+            injected["hang_subcommands"] = HANGING[mode]
         else:
             raise ValueError(f"未知模式：{mode}（可选 blackhole / {' / '.join(FAKES)}）")
         if fake_dir is not None:
@@ -166,16 +226,23 @@ def measure(mode: str, cap_seconds: float) -> dict:
                     "这台子必须在自己的替签下运行，否则读数描述的是环境而不是代码"
                 )
         latency = 0.0
+        round_trip: dict[str, float] = {}
         if fake_dir is not None:
-            latency = _fake_round_trip(fake_dir, env)
-            # 4 倍中位往返、封顶 10s：既不让"没挂起"的探测被误判成挂起，
-            # 也保证最坏耗时是"探测次数 × 10s"这种可解释的量
-            effective = min(10.0, max(cap_seconds, round(4 * latency, 2)))
+            stats = _fake_round_trip(fake_dir, env)
+            # 上限由预热后的 p95 算出；封顶是"最坏墙钟"与"能不能区分慢与挂"的取舍，
+            # 一旦封顶把余量吃光，就明说测不准（退出码 2）而不是交出一份假读数
+            latency = stats["p95"]
+            round_trip = stats
+            effective = derive_effective(latency, cap_seconds)
         else:
             effective = cap_seconds
         injected["fake_round_trip_seconds"] = latency
+        injected["round_trip_profile"] = round_trip
+        injected["conclusive"] = conclusive(latency, effective)
         injected["effective_timeout_seconds"] = effective
-        injected["bound_seconds"] = round(3 * effective + 5, 2)
+        # 封顶与请求值不是一回事：请求 20s 时三份替身剧本实际都跑在 10s 上，
+        # 这个差必须自己说出来，否则"我请求了 20s"会被读成"每档最多等 20s"。
+        injected["ceiling_bit"] = effective < cap_seconds
         for tier, (module, sentinel) in TIERS.items():
             code = CHILD.format(cap=effective, module=module)
             started = time.monotonic()
@@ -195,7 +262,7 @@ def measure(mode: str, cap_seconds: float) -> dict:
                 except ValueError:
                     reason = None
             rows[tier] = {
-                "bound_s": injected["bound_seconds"],
+                "bound_s": round(timeouts * effective + 4, 2),
                 "timeouts_observed": timeouts,
                 "waited_s": waited,
                 "effective_timeout_s": effective,
@@ -251,12 +318,37 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--mode",
-        choices=("blackhole", "hang-later", "half-hang", "half-hang-b", "both", "all"),
+        choices=("blackhole", "hang-later", "half-hang", "half-hang-b", "both", "all", "latency"),
         default="both",
     )
     ap.add_argument("--timeout", type=float, default=20.0, help="单次探测的超时上限（秒）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
+
+    if args.mode == "latency":
+        # 只量负载下的替身往返分布：用来检查"倍率/封顶"这组常数还成不成立
+        with tempfile.TemporaryDirectory() as td:
+            fake_dir = _fake_docker_dir(Path(td), "hang-later")
+            env = dict(os.environ, PATH=f"{fake_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+            env.pop("DOCKER_HOST", None)
+            env.pop("EMBODIEDCLOUD_DOCKER_TEST_IMAGE", None)
+            profile = latency_profile(env, fake_dir, (1, 4, 8))
+        print(json.dumps({"latency_profile": profile}, ensure_ascii=False, indent=2))
+        unverifiable = []
+        for load, row in profile.items():
+            eff = derive_effective(row["p95"], args.timeout)
+            ok = conclusive(row["p95"], eff)
+            # 并发 1 那一行的 pre_warm 是这个替身文件**这辈子第一次**被 exec；
+            # 后面几档的 pre_warm 只是"被丢掉的那一次"，别再叫它冷启动。
+            tag = "（替身文件的首次 exec）" if load == "1" else ""
+            print(
+                f"   并发 {load:>2s}: p50={row['p50']}s p95={row['p95']}s"
+                f" 被预热的{row['pre_warm_burst_s']}s{tag}"
+                f" ⇒ 有效上限 {eff}s（{'可区分慢与挂' if ok else '测不准：封顶把余量吃光了'}）"
+            )
+            if not ok:
+                unverifiable.append(load)
+        return 2 if unverifiable else 0
 
     if args.mode == "both":
         modes = ("blackhole", "hang-later")
@@ -285,7 +377,12 @@ def main() -> int:
             if offenders[mode]:
                 print("   判据未过：", *offenders[mode], sep="\n     - ")
     total = [o for lst in offenders.values() for o in lst]
-    return 1 if total else 0
+    if total:
+        return 1
+    if not all(r["injected"].get("conclusive", True) for r in reports.values()):
+        print("[capacity] 这台机器上慢与挂无法区分（余量被封顶吃掉）——读数不作结论", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

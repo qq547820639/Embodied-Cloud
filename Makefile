@@ -123,7 +123,8 @@ validate:
 	$(PYTHON) scripts/validate_release.py
 
 # 挂起取证：真造一次"外部依赖卡住"（黑洞地址 / 假 docker CLI），量每档付几秒、说了什么。
-# 默认用真实 20s 超时；常驻判据用 --timeout 2 的同一份实现（见 tests/test_hang_probe.py）。
+# --timeout 是**请求值**：三份假 CLI 剧本还要过一道 10s 封顶（慢与挂之间必须留 2× 余量），
+# 只有 blackhole 不夹（见 scripts/hang_probe.py 模块头）。常驻判据用 --timeout 2 的同一份实现。
 hang-probe:
 	$(PYTHON) -m scripts.hang_probe $(if $(TIMEOUT),--timeout $(TIMEOUT),)
 

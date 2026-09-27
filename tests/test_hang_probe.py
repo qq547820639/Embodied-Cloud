@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -41,9 +42,7 @@ def test_hang_later_mode_measures_a_finite_cost_per_tier() -> None:
         assert row["offenders"] == [], f"{tier} 的原因不可行动：{row}"
         # 代价的天花板不写死秒数：等于"被掐掉的探测次数 × 当场量出的有效上限"（+调度余量）
         assert row["timeouts_observed"] >= 1, f"{tier} 一次都没被掐，剧本没生效：{row}"
-        assert 0 < row["elapsed_s"] <= row["timeouts_observed"] * row["effective_timeout_s"] + 4, (
-            f"{tier} 的耗时对不上探测次数 × 有效上限：{row}"
-        )
+        assert 0 < row["elapsed_s"] <= row["bound_s"], f"{tier} 的耗时越过探针算出的上界：{row}"
     # 这一支的"卡住"必须是真卡住：假 CLI 里除 version 外全是 sleep
     assert report["injected"]["hang_subcommands"], report["injected"]
 
@@ -108,7 +107,7 @@ def test_half_hang_isolates_which_probe_pays_and_which_does_not() -> None:
         # 契约而不是环境：原因给得出、可行动、代价有上限
         assert row["reason"], (tier, row)
         assert row["offenders"] == [], (tier, row)
-        assert row["elapsed_s"] <= row["timeouts_observed"] * row["effective_timeout_s"] + 4, (tier, row)
+        assert row["elapsed_s"] <= row["bound_s"], (tier, row)
     # 至少有一档几乎不付费（剧本没有把所有探测一律掐死），而依赖兜底列表探测的那一档要付费
     # 上限由探针当场量出来的替身往返时间决定，不在测试里写死秒数
     injected = data["reports"]["half-hang"]["injected"]
@@ -148,7 +147,7 @@ def test_the_dual_half_hang_flips_who_pays() -> None:
     assert margin >= 2, (a["injected"], b["injected"])
     for rows in (a_rows, b_rows):
         for tier, row in rows.items():
-            assert row["elapsed_s"] <= row["timeouts_observed"] * row["effective_timeout_s"] + 4, (tier, row)
+            assert row["elapsed_s"] <= row["bound_s"], (tier, row)
     assert b_rows["docker"]["elapsed_s"] > a_rows["docker"]["elapsed_s"] + margin, (
         a_rows["docker"], b_rows["docker"])
     for label, rows in (("half-hang", a_rows), ("half-hang-b", b_rows)):
@@ -156,5 +155,84 @@ def test_the_dual_half_hang_flips_who_pays() -> None:
             # 只断"这台子保证的事"：原因给得出、可行动、代价有上限。
             # 不断具体哪一档快、原因里必须出现哪个词——那在别的机器上是假的。
             assert row["reason"] and row["offenders"] == [], (label, tier, row)
-            assert row["elapsed_s"] <= row["timeouts_observed"] * row["effective_timeout_s"] + 4, (
-                label, tier, row)
+            assert row["elapsed_s"] <= row["bound_s"], (label, tier, row)
+
+
+def test_the_timeout_formula_is_a_function_of_measured_latency() -> None:
+    """上限与"能不能判"必须是同一个纯函数的两个出口，而不是两处各写一遍的经验值。
+
+    两极都验：小往返 ⇒ 请求值就是上限且判定可信；大往返 ⇒ 封顶生效、此时工具必须
+    承认"测不准"（宁可退 2 也不交出一份把慢说成挂的读数）。
+    """
+    from scripts.hang_probe import conclusive, derive_effective
+
+    assert derive_effective(0.01, 2.0) == 2.0 and conclusive(0.01, 2.0)
+    assert derive_effective(1.2, 2.0) == 4.8 and conclusive(1.2, 4.8)
+    big = derive_effective(6.0, 2.0)          # 4×6=24 被封顶到 10
+    assert big == 10.0 and not conclusive(6.0, big), (big, conclusive(6.0, big))
+
+
+def test_the_probe_is_conclusive_across_concurrency_levels() -> None:
+    """并发 1／4／8 下，预热后的往返分布都必须仍容得下"慢 ≠ 挂"的余量。
+
+    这里**不出现任何绝对秒数**：本机实测过替身文件首次 exec 比之后慢一个数量级
+    （0.05–0.27s 对 0.01s），机器忙时还会叠上偶发慢采样；两者都会把 5 个样本的 p95
+    抬高。判"这台子今天能不能做挂起取证"用的是探针自己的 `conclusive()`，
+    它的两极由 `test_warm_up_is_the_only_thing_keeping_the_cold_exec_out` 用夹具钉住。
+    """
+    proc = subprocess.run(
+        [sys.executable, "-m", "scripts.hang_probe", "--mode", "latency", "--timeout", "2"],
+        cwd=ROOT, text=True, capture_output=True, timeout=900,
+    )
+    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-400:]
+    out = proc.stdout
+    data = json.loads(out[out.index("{"): out.rindex("}") + 1])["latency_profile"]
+    assert sorted(data) == ["1", "4", "8"], data
+    from scripts.hang_probe import conclusive, derive_effective
+
+    for load, row in data.items():
+        # 被预热丢掉的那一次必须照样报出来：不报就成了"分布里没有慢样本"的假绿
+        assert row["pre_warm_burst_s"] >= 0, (load, row)
+        eff = derive_effective(row["p95"], 2.0)
+        assert conclusive(row["p95"], eff), f"并发 {load} 已不可判：p95={row['p95']} 上限={eff}"
+        assert eff >= row["p95"], (load, row, eff)
+
+
+def test_warm_up_is_the_only_thing_keeping_the_cold_exec_out(tmp_path) -> None:
+    """预热这一跳是承重的：拿一个"第一次 exec 慢、之后快"的替身喂两个档位。
+
+    上一轮把机制写成"负载"，这一轮先写成夹具再写进文档——因为"本机第一次要 3s"
+    这句话今晚复现不出来（12 次新目录实测 max 0.274s），而"新写入的文件首次 exec
+    慢一个数量级"是可以被造出来的。判据只断两档的**判定翻转**，不断机器状态。
+    """
+    import scripts.hang_probe as probe
+
+    cold_sleep = 5.5
+    assert not probe.conclusive(cold_sleep, probe.derive_effective(cold_sleep, 2.0)), \
+        "夹具的慢样本没有越过可判线：这支对照失去区分力"
+
+    def fixture(tag: str) -> tuple:
+        d = tmp_path / tag
+        (d / "bin").mkdir(parents=True)
+        script = d / "bin" / "docker"
+        marker = d / "touched"
+        script.write_text(
+            "#!/bin/sh\n"
+            f'[ -f "{marker}" ] || {{ sleep {cold_sleep}; touch "{marker}"; }}\n'
+            'echo "Client: Docker Engine (cold-exec fake)"\n'
+        )
+        script.chmod(0o755)
+        env = dict(os.environ, PATH=f"{script.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+        return d / "bin", env
+
+    cold_dir, cold_env = fixture("cold")
+    unwarmed = probe._latency_stats(cold_dir, cold_env, 1, 5, warm_up=False)
+    warm_dir, warm_env = fixture("warm")
+    warmed = probe._latency_stats(warm_dir, warm_env, 1, 5)
+
+    # 未预热：冷启动落在分布里 ⇒ p95 至少盖住那一次睡眠 ⇒ 判定翻成"测不准"
+    assert unwarmed["p95"] >= cold_sleep * 0.8, unwarmed
+    assert not probe.conclusive(unwarmed["p95"], probe.derive_effective(unwarmed["p95"], 2.0)), unwarmed
+    # 预热：同一形状的替身，分布里已经没有那一次睡眠 ⇒ 判定回到"可区分慢与挂"
+    assert warmed["pre_warm_burst_s"] >= cold_sleep * 0.8, warmed
+    assert probe.conclusive(warmed["p95"], probe.derive_effective(warmed["p95"], 2.0)), warmed
