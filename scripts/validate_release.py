@@ -306,6 +306,36 @@ def _is_env_check(key: str) -> bool:
     return key in ENV_CHECK_KEYS or key.startswith(ENV_CHECK_PREFIXES)
 
 
+# PENDING 的说明必须落到"缺什么"上：跳过本身不是终点，读的人要能照着补环境。
+# 原因文本都是代码里的 skip 文案（常量），所以这条判据的结论不随环境变：
+# 全档跑通时没有 PENDING = 无可核 = PASS；跳了档就必须可行动。
+ACTIONABLE_MARKERS = (
+    "缺", "未", "不可", "无法", "需要", "超时", "不在场", "没装", "装不上", "不匹配", "拒绝",
+)
+
+
+def pending_reason_offenders(statuses: dict[str, object]) -> list[str]:
+    out: list[str] = []
+    for key, value in sorted(statuses.items()):
+        if not isinstance(value, dict) or value.get("status") != "PENDING":
+            continue
+        note = str(value.get("note") or "").strip()
+        _before, sep, tail = note.partition("原因：")
+        if not sep:
+            out.append(f"{key}: PENDING 却没留下『原因：…』段：{note[:70] or '(空)'}")
+            continue
+        reason, _, sent = tail.partition("（哨兵")
+        reason = reason.strip()
+        sentinel = sent.rstrip("）").strip()
+        if not reason:
+            out.append(f"{key}: PENDING 的原因段是空的（哨兵 {sentinel or '?'}）")
+        elif reason == sentinel:
+            out.append(f"{key}: 原因只是把哨兵又抄了一遍（{reason}）——补环境的人看不出缺什么")
+        elif not any(marker in reason for marker in ACTIONABLE_MARKERS):
+            out.append(f"{key}: 原因没指向可行动缺项：{reason[:70]}")
+    return out
+
+
 def reproducible_checks(checks: dict) -> dict:
     """提交面：剥掉环境读数后的报告。换机器重跑必须逐字节相同。"""
     view: dict[str, dict] = {}
@@ -442,6 +472,14 @@ def main() -> int:
     checks["report_split"] = {
         "status": "FAIL" if split_offenders else "PASS",
         "note": "; ".join(split_offenders) if split_offenders else "环境读数清单与报告字段对得上",
+    }
+    # PENDING 的说明要能指着补：健康时没有 PENDING 档 = 无可核 = PASS。
+    tier_statuses = {k: v for k, v in checks.items() if k.startswith("integration_")}
+    pending_offenders = pending_reason_offenders(tier_statuses)
+    pending_note = "PENDING 档的原因都指向可行动缺项（无 PENDING 档时视为通过）"
+    checks["pending_reasons"] = {
+        "status": "FAIL" if pending_offenders else "PASS",
+        "note": "; ".join(pending_offenders) if pending_offenders else pending_note,
     }
     # 状态页 §1：可复现的数对上、随环境抖的数不许手抄。事实源缺位时不猜 0，直接判红。
     missing_facts = [
@@ -701,7 +739,10 @@ def _render_md(report: dict, title_suffix: str = "") -> str:
     for key in sorted(k[len("integration_"):] for k in c if k.startswith("integration_")):
         item = c[f"integration_{key}"]
         lines.append(f"| Integration {key} | {item['status']} | {item.get('note', '')} |")
-    for key in ("unexpected_skips", "docs_test_counts", "docs_row_order", "report_split", "docs_state_rows"):
+    for key in (
+        "unexpected_skips", "docs_test_counts", "docs_row_order",
+        "report_split", "docs_state_rows", "pending_reasons",
+    ):
         if key in c:
             lines.append(f"| {key} | {c[key]['status']} | {c[key].get('note', '')} |")
     for key in ("gpu", "streaming", "robot"):

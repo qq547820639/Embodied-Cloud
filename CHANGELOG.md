@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 622 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 624 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -227,6 +227,21 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   另有三态探测（超时／503／200）、进程先退报 `rc=`、k8s 在挂起 daemon 下答"没缓存"。
 - 真实复跑两档（真起 uvicorn 子进程）：`rc=0`，13 条通过；`ruff check tests` 干净。
 - 教训写进记忆：修"一类"不能按文件个数扫，要按**失败模式**扫（拒连／超时／非 OSError 的传输异常／SDK 自抛）。
+
+
+### PENDING 要说清缺什么，并用真挂起验证过（N-48）
+- 档位"干净跳过"的格式在 N-31/N-41 就管住了（闭集 + 哨兵 + 明细落到本次跑读数），但**内容**没人管：
+  原因可以是空的、可以只把哨兵再抄一遍，跳过照样绿。
+- 新增 `pending_reason_offenders()` 与门禁 `pending_reasons`：四种偏离各自点名（无"原因："段／原因为空／
+  原因＝哨兵本身／原因不含任何可行动标记）。它留在**提交面**一侧——原因文本是代码里的 skip 文案常量，
+  结论不随环境变；健康时没有 PENDING 档＝无可核＝PASS，所以 `make validate` 在任何机器上都同判。
+- 顺手把 N-46／N-47 那条"未证实"做掉：**真挂起**而不是注入异常——`DOCKER_HOST=tcp://192.0.2.1:2375`
+  （TEST-NET-1 黑洞地址，丢包≠拒连）下四档复跑：`test_docker_provider_integration rc=0 wall=20s`（27 skip）、
+  `test_postgres_concurrency rc=0 wall=21s`（19 skip）、`test_s3_artifact_store rc=0 wall=20s`
+  （15 skip + 5 条不依赖 daemon 的单测照跑）、`test_k8s_control_plane rc=0 wall=20s`；
+  三档 `gate_reason()` 统一给出 `docker daemon 不可达（命令超时（20s））`，三次前置合计 60.0s
+  ⇒ 每档的挂起代价被单次探测封顶。这份真实原因喂进新判据 ⇒ `[]`。
+- 判据 2 支（五种夹具极性 + 接线次序），门禁目录 G0.58，计数面 622→624。
 
 
 ### 本轮新增的待收口项

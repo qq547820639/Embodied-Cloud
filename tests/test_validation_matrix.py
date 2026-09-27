@@ -461,3 +461,51 @@ def test_validate_registers_the_state_gate_before_the_summary() -> None:
         "对账发生在组装提交面之后 → 它的红进不了这一轮的面"
     )
 
+
+def test_pending_reasons_must_point_at_an_actionable_gap() -> None:
+    """PENDING 的说明要落到"缺什么"，不许退化成把哨兵当原因、或一句没有指向的话。
+
+    档位干净跳过是 N-31 定下的形状，但"跳过"本身不是终点：读的人要能照着原因去补环境。
+    原因文本都是代码里的常量（skip 文案），所以这条判据的结论不随环境变——
+    健康时没有 PENDING 档 = 无可核 = PASS；跳了档就必须说清缺项。
+    """
+    validator = _load_validator()
+    fn = validator.pending_reason_offenders
+    good = {
+        "integration_postgres": {
+            "status": "PENDING",
+            "note": "整档 19 用例未执行，原因：缺驱动：pip install -e .[postgres]"
+                    "（哨兵 POSTGRES_VALIDATION_PENDING）",
+        },
+        "integration_docker": {"status": "PASS", "note": "26/26 用例在真实后端上执行"},
+    }
+    assert fn(good) == []
+    # 只有哨兵、没有原因
+    sentinel_only = {
+        "integration_x": {
+            "status": "PENDING",
+            "note": "整档 3 用例未执行，原因：X_PENDING（哨兵 X_PENDING）",
+        }
+    }
+    assert len(fn(sentinel_only)) == 1, fn(sentinel_only)
+    # 有原因但不指向任何缺项
+    vague = {
+        "integration_x": {
+            "status": "PENDING",
+            "note": "整档 3 用例未执行，原因：今天不太方便（哨兵 X_PENDING）",
+        }
+    }
+    assert len(fn(vague)) == 1, fn(vague)
+    # 空 note 不算"通过"
+    assert fn({"integration_x": {"status": "PENDING", "note": ""}})
+    # 反向对照：全部 PASS 时无可核 = 不报错
+    assert fn({"integration_x": {"status": "PASS", "note": "3/3 用例在真实后端上执行"}}) == []
+
+
+def test_pending_reason_gate_is_wired_into_the_summary() -> None:
+    """接线：`pending_reasons` 必须在组装提交面之前算出来，否则它的红进不了这一轮的面。"""
+    src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
+    assert "pending_reason_offenders(" in src and '"pending_reasons"' in src
+    assert src.index("pending_reason_offenders(") < src.index('"checks": reproducible_checks(checks)'), (
+        "对账发生在组装提交面之后 → 它的 FAIL 改不了 overall"
+    )

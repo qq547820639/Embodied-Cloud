@@ -6,7 +6,7 @@
 
 | Gate | 状态 | 明细 |
 |---|---|---|
-| Test collected | PASS | 622 |
+| Test collected | PASS | 624 |
 | Test run | PASS | failed=0 |
 | lint | PASS |  |
 | typecheck | PASS |  |
@@ -16,6 +16,7 @@
 | docs_row_order | PASS | 带编号的登记表行均按号递增且无重号 |
 | report_split | PASS | 环境读数清单与报告字段对得上 |
 | docs_state_rows | PASS | 状态页的可复现数与本报告一致，且未手抄环境读数 |
+| pending_reasons | PASS | PENDING 档的原因都指向可行动缺项（无 PENDING 档时视为通过） |
 | Physical gpu | NOT_RUN | 需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行 |
 | Physical streaming | NOT_RUN | 需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行 |
 | Physical robot | NOT_RUN | 需要真实硬件/凭据（NVIDIA GPU、Isaac Sim 流媒体面、物理机器人），本机不可执行 |

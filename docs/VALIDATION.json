@@ -4,7 +4,7 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 622
+      "count": 624
     },
     "test_run": {
       "status": "PASS",
@@ -48,6 +48,10 @@
     "report_split": {
       "status": "PASS",
       "note": "环境读数清单与报告字段对得上"
+    },
+    "pending_reasons": {
+      "status": "PASS",
+      "note": "PENDING 档的原因都指向可行动缺项（无 PENDING 档时视为通过）"
     },
     "docs_state_rows": {
       "status": "PASS",
