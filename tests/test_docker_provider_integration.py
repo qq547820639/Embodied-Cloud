@@ -30,6 +30,7 @@ from app.models import Template, Workspace
 from app.services.ports import is_port_free
 from app.services.providers.base import ResourceReservation, RuntimeState
 from app.services.providers.docker import DockerProvider
+from tests.docker_probe import detail_of, docker_probe
 
 GATE_SENTINEL = "DOCKER_VALIDATION_PENDING"
 
@@ -56,35 +57,51 @@ IMAGE = os.environ.get("EMBODIEDCLOUD_DOCKER_TEST_IMAGE", "")
 IMAGE_CANDIDATES = ("node:22-alpine", "postgres:16-alpine", "ubuntu:24.04", "alpine:latest")
 
 
-def _daemon_arch() -> str:
-    raw = _docker("info", "--format", "{{.Architecture}}").stdout.strip()
+def _docker_probe(*args: str, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    """前置检查统一走 `tests/docker_probe.py`（四个 docker 档共用一份异常吸收）。"""
+    return docker_probe(_docker, *args, timeout=timeout)
+
+
+def _daemon_arch(notes: list[str]) -> str:
+    probe = _docker_probe("info", "--format", "{{.Architecture}}")
+    if probe.returncode != 0:
+        notes.append(f"docker info: {(probe.stderr or probe.stdout).strip()[:120]}")
+        return ""
+    raw = probe.stdout.strip()
     return {"aarch64": "arm64", "x86_64": "amd64"}.get(raw, raw)
 
 
 def _image_arch(image: str) -> str:
-    return _docker("image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image).stdout.strip()
+    return _docker_probe("image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image).stdout.strip()
 
 
 def _usable_image() -> tuple[str | None, str]:
-    """返回 (可用的测试镜像, 不可用原因)。"""
-    arch = _daemon_arch()
+    """返回 (可用的测试镜像, 不可用原因)。前置检查的异常都在这条路上被吸收成原因文本。"""
+    notes: list[str] = []
+    arch = _daemon_arch(notes)
     candidates = (IMAGE,) if IMAGE else IMAGE_CANDIDATES
     for cand in candidates:
         if not cand:
             continue
-        if _docker("image", "inspect", cand, timeout=20).returncode != 0:
+        inspect = _docker_probe("image", "inspect", cand)
+        if inspect.returncode != 0:
+            if inspect.stderr and inspect.stderr.strip() not in notes:
+                notes.append(f"docker image inspect {cand}: {inspect.stderr.strip()[:100]}")
             continue
         image_arch = _image_arch(cand)
-        if image_arch.endswith(arch):
+        if arch and image_arch.endswith(arch):
             return cand, ""
-    return None, f"没有本地缓存且架构匹配（daemon={arch}）的测试镜像，试过：{', '.join(candidates)}"
+    base = f"没有本地缓存且架构匹配（daemon={arch or '未知'}）的测试镜像，试过：{', '.join(c for c in candidates if c)}"
+    return None, "；".join([base, *notes])
 
 
 def gate_reason() -> str | None:
     if shutil.which("docker") is None:
         return "docker CLI 不可用"
-    if _docker("version", timeout=20).returncode != 0:
-        return "docker daemon 不可达"
+    probe = _docker_probe("version")
+    if probe.returncode != 0:
+        detail = detail_of(probe)
+        return f"docker daemon 不可达（{detail or 'docker version 返回非零'}）"
     image, reason = _usable_image()
     if image is None:
         return reason
@@ -1036,3 +1053,31 @@ def test_control_plane_image_runtime_layout_is_what_the_docs_assume():
         assert _sh(f"command -v {script_name} || echo ABSENT").endswith("ABSENT"), (
             f"{script_name} 又出现在镜像 PATH 里——项目被装回发行包了？确认是有意的并同步改本用例"
         )
+
+
+def test_a_hanging_docker_cli_is_a_clean_skip_not_26_setup_errors(monkeypatch) -> None:
+    """daemon 卡住（超时）必须与"拒连"同样走干净跳过路径。
+
+    真事：一次干净树复算里 `docker version` 超时 20 秒，本模块 26 条用例全部
+    `failed on setup with "subprocess.TimeoutExpired"` —— 拒连会被识别成"daemon 不可达"
+    而跳过，卡住却把异常抛出前置检查，环境抖动在发布门禁上表现为代码失败（26 个 FAIL）。
+    """
+    def _boom(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["docker", *[str(a) for a in args]], timeout=kwargs.get("timeout", 20))
+
+    monkeypatch.setitem(globals(), "_docker", _boom)
+    reason = gate_reason()
+    assert isinstance(reason, str) and reason, f"卡住的 daemon 没被判成不可用：{reason!r}"
+    assert "超时" in reason or "timeout" in reason.lower(), reason
+    image, why = _usable_image()
+    assert image is None and why, (image, why)
+
+    # 反向对照：把 _docker 换成"健康"的形状，前置检查不许再报超时（它可能报别的原因，那不算失败）
+    class _Ok:
+        returncode = 0
+        stdout = "aarch64\namd64\n"
+        stderr = ""
+
+    monkeypatch.setitem(globals(), "_docker", lambda *a, **k: _Ok())
+    healthy = gate_reason() or ""
+    assert "超时" not in healthy and "timeout" not in healthy.lower(), healthy

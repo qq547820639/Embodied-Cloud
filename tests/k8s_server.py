@@ -28,6 +28,8 @@ import time
 import uuid
 from pathlib import Path
 
+from tests.docker_probe import detail_of, docker_probe
+
 DEFAULT_NODE_IMAGE = "kindest/node:v1.37.0"
 GATE_SENTINEL = "K8S_CONTROL_PLANE_PENDING"
 _READY_TIMEOUT_SECONDS = 300
@@ -89,8 +91,9 @@ def gate_reason() -> str | None:
     """可跑返回 None，否则返回原因（skip 文案与 release gate 分类共用）。"""
     if shutil.which("docker") is None:
         return "docker CLI 不可用"
-    if _docker("version", timeout=20).returncode != 0:
-        return "docker daemon 不可达"
+    probe = docker_probe(_docker, "version")
+    if probe.returncode != 0:
+        return f"docker daemon 不可达（{detail_of(probe) or 'docker version 返回非零'}）"
     if kind_binary() is None:
         return "缺 kind 二进制（EMBODIEDCLOUD_KIND_BIN 或 PATH）"
     if not node_image_cached():

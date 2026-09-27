@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 607 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 616 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -198,6 +198,21 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 一次自家事故被读者还债：给 `main()` 加退出码时把 `if __name__ == "__main__"` 整块吃掉
   （脚本静默退 0、什么都不打印）——N-37 那支"stdout 必须有表头"的读者判据当场抓住。
   记账脚本改仓库代码后必须立刻编译/真跑一次，这条纪律今天第四次生效。
+
+
+### daemon 卡住与拒连走同一条干净跳过路径（N-46）
+- 触发点是复算自己报的：HEAD `4b5aced` 的干净树复算里 `docker version` 超时 20 秒，docker 档 26 条用例
+  全部 `failed on setup with "subprocess.TimeoutExpired"`（`validate_rc=2`、`freshness_rc=1`），
+  而**同一棵树在主树里是绿的**——这类不对称只有换环境复算才看得见，也正是复算存在的理由。
+- 只补我撞到的那一个文件是不够的：`pg_server`／`s3_server`／`k8s_server`／`docker provider` 四份
+  `gate_reason()` 都是同一个形状（只看 `returncode != 0`，异常照穿）。抽成共用
+  `tests/docker_probe.py`（`TimeoutExpired`→rc 124 + `命令超时（20s）`，`OSError`→rc 127），
+  四档的 skip 文案顺带带上 docker 侧原因。
+- 判据按类别写：`tests/test_docker_gate_hardening.py` 四个模块 × 两个极性（卡住⇒给原因不抛、
+  健康⇒不许把"超时"写死），加 docker 档 `_usable_image()` 那一路的一支；共 9 支。
+- 真实复跑四档：`rc=0`、75 条通过（daemon 现在 13 ms 应答，健康路径的判定没被改宽）。
+- 记一笔纪律账：`N-45` 那次读者判据抓到了我自己吃掉的 `if __name__ == "__main__"`；这次是跨环境复算
+  抓到了只在另一台"机器"上才会出现的失败。两道都是上一轮建的，本轮还了债。
 
 
 ### 本轮新增的待收口项

@@ -22,6 +22,8 @@ import tempfile
 import time
 import uuid
 
+from tests.docker_probe import detail_of, docker_probe
+
 DEFAULT_IMAGE = "versity/versitygw:v1.8.0"
 GATE_SENTINEL = "S3_VALIDATION_PENDING"
 _READY_TIMEOUT_SECONDS = 90
@@ -53,10 +55,13 @@ def gate_reason() -> str | None:
     """可跑返回 None，否则返回不可跑的原因（供 skip 文案与 release gate 分类）。"""
     if shutil.which("docker") is None:
         return "docker CLI 不可用"
-    if _docker("version", timeout=20).returncode != 0:
-        return "docker daemon 不可达"
-    if _docker("image", "inspect", image_name(), timeout=20).returncode != 0:
-        return f"镜像 {image_name()} 未缓存（离线无法拉取）"
+    probe = docker_probe(_docker, "version")
+    if probe.returncode != 0:
+        return f"docker daemon 不可达（{detail_of(probe) or 'docker version 返回非零'}）"
+    inspect = docker_probe(_docker, "image", "inspect", image_name())
+    if inspect.returncode != 0:
+        return (f"镜像 {image_name()} 未缓存（离线无法拉取）"
+                + (f"；docker 侧原因：{detail_of(inspect)}" if detail_of(inspect) else ""))
     try:
         import boto3  # noqa: F401
     except ImportError:
