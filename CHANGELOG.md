@@ -904,7 +904,7 @@ docker 档 21 → 22，全套 531 → 532。
   `stats["skipped_no_capacity"]`。用例两头都在：`reserve=3`／2 张卡 ⇒ 池子 0 格 **且必须有 WARNING**
   （没有这条，配置写错的人只会看见"池子怎么老是空的"）；`reserve=0` 同形状照旧填满 2 格。
   先写测试时它确实红了（`assert []`）——三条前置断言全过，唯独日志为空，说明缺的就是信号本身。
-- 计数：本条切片新增常驻用例 6 支（容量段 5 支：不开装不下的格／卡够了必须开／共享预算／reserve 留一张／reserve=0 照旧填满；外加 over-reservation 可见信号 1 支），全套 551 → 557（passed 556 / skipped 1 / failed 0；两份计数面由 `docs_test_counts` 现算核对）。`make warm-capacity` 一并进 Makefile（与 `make warm-sla`／`make policy-bench` 同一形状：人工/CI 档，不进每轮 validate）。**。
+- 计数：本条切片新增常驻用例 6 支（容量段 5 支：不开装不下的格／卡够了必须开／共享预算／reserve 留一张／reserve=0 照旧填满；外加 over-reservation 可见信号 1 支），全套 551 → 557（passed 556 / skipped 1 / failed 0；两份计数面由 `docs_test_counts` 现算核对）。`make warm-capacity` 一并进 Makefile（与 `make warm-sla`／`make policy-bench` 同一形状：人工/CI 档，不进每轮 validate）。
 ### 一条 P0 安全规则此前只有 import 期的一句裸 if 在守（§7：不能轮换凭据 ⇒ 不许走 warm pool）
 
 - 触发点是上一条切片留下的问题：warm pool 只在"能换掉 runtime 密码"的 provider 上才安全。

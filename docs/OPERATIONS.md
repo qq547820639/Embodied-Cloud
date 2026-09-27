@@ -208,6 +208,14 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
   `uv sync --frozen --extra dev --extra postgres --extra s3`（由 `uv.lock` 造一份新 venv，别复用主树的）
   → `EMBODIEDCLOUD_KIND_BIN=<kind 路径> make validate` → `git diff --exit-code docs/VALIDATION.json docs/VALIDATION.md`
   （绿了但报告被改动＝提交里的读数不是这棵树算出来的）→ 收尾 `git worktree remove`。
+  自 §7.1 的分档起，这一步多了一层用途：**它就是"提交面换环境逐字节相同"的第二次实测**（另一台机器、
+  另一个 venv、另一套绝对路径）。本轮读数（HEAD `3917f5b`，574 例）：`uvsync_rc=0`、`validate_rc=0`、
+  `freshness_rc=0`，工作树侧 `app_from=/private/tmp/attest-head/app`、`prefix=` 是该树自己的 `.venv`，
+  两处的 `docs/VALIDATION.json` sha256 相同（`24a39df270…`）、`.md` 相同（`ceffc12b16…`），
+  而该树的本次跑读数是 `integration_docker PASS 26/26`（主树本轮另外两跑分别是 `PARTIAL 执行 25/26`
+  ——registry 通道抖，与四个依赖守护进程的档全 PENDING——`DOCKER_HOST` 被隔断）——
+  档位不同、提交面相同，正是 §7.1 想表达的那件事。kind 二进制在 `/Volumes/Extra/CodeProj/.toolcache/kind`
+  （不在 PATH 上；`tests/k8s_server.py` 的第二/三档发现逻辑会兜住它，但复算时显式给更稳）。
   本轮实测：`app_from=` 落在 worktree 内、`prefix=` 是 worktree 自己的 `.venv`、`make validate` 退 0、
   `544 passed / 1 skipped / 0 failed`、新鲜度那条 `git diff --exit-code` 无输出。
 - **`make amd64-probe` 现在带退出码**：第 6 步汇总 `sync_rc` 与 `arch_verdict`，任一不成立 `exit 1` 并点名是哪一半
