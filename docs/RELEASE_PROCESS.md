@@ -50,11 +50,12 @@ make release   # scripts/release.sh：校验 → build → 供应链 → 验证�
 1. `make lint` / `make typecheck` / `make test`（任一失败即中止并输出原因）
 2. `make build` 生成 wheel 与 sdist
 3. `make verify-lock` / `make sbom` / `make audit`（uv.lock 一致性、CycloneDX SBOM、漏洞审计）——本轮起 `make sbom` 带 `--extra postgres --extra s3`，导出的清单才覆盖得住部署真装的那两组依赖（改前 44 个组件里没有 psycopg/boto3，改后 51 个）
-4. `make validate` 重生成 `docs/VALIDATION.json` / `.md`（分级矩阵的唯一事实源；
-   无条件重跑 —— "版本一致就复用旧报告"会让工件比工作树少几条用例）
+4. `make validate` 重生成 `docs/VALIDATION.json` / `.md`（**可复现门禁面**）与
+   `dist/VALIDATION_RUN.json` / `.md`（**本次跑读数**，gitignored；无条件重跑 ——
+   "版本一致就复用旧报告"会让工件比工作树少几条用例）
 5. 校验 sdist 清洁度（不得含 `__pycache__` / `*.pyc` / cache / `test-*.db` / `.env` / `.venv`）
 6. 生成 `dist/checksums.txt`（wheel / sdist / sbom 的 SHA-256）
-7. 生成 `dist/VALIDATION_STATUS.md`（集成档表由 `docs/VALIDATION.json` 逐行生成，
+7. 生成 `dist/VALIDATION_STATUS.md`（集成档表由 `dist/VALIDATION_RUN.json` 逐行生成，
    不手抄；写完强制检查产物里不残留反引号或用例运行输出）
 8. 打印产物清单并**提示**人工执行 `git tag v<version>` 与 push（脚本本身不打 tag、不 push）
 

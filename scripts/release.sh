@@ -14,7 +14,7 @@ set -euo pipefail
 #   1. make lint && make typecheck && make test（任一失败中止并输出原因）
 #   2. make build 生成 dist/*.whl 与 dist/*.tar.gz
 #   2.4 make verify-lock / sbom / audit（uv.lock 一致性 + CycloneDX SBOM + 漏洞审计）
-#   2.44 make validate（重生成 docs/VALIDATION.json，分级矩阵的唯一事实源）
+#   2.44 make validate（重生成提交面 docs/VALIDATION.json 与本次跑读数 dist/VALIDATION_RUN.*）
 #   3. 生成 dist/checksums.txt（对 wheel / sdist / sbom.cdx.json 计算 sha256sum）
 #   4. 生成 dist/VALIDATION_STATUS.md（分级验证矩阵 + BLOCKED_EXTERNAL_DEPENDENCY 明细）
 #   5. 输出 release 产物清单，并提示 git tag（不自动打 tag、不 push）
@@ -90,8 +90,8 @@ step "4.2 make sbom + make audit"
 make sbom
 make audit
 
-# ---------- 2.44 分级验证矩阵的唯一事实源：docs/VALIDATION.json ----------
-step "4.3 make validate（重生成 docs/VALIDATION.json / .md）"
+# ---------- 2.44 分级验证矩阵：提交面（可复现）+ 本次跑读数（环境） ----------
+step "4.3 make validate（重生成 docs/VALIDATION.json / .md 与 dist/VALIDATION_RUN.*）"
 # 无条件重跑，不按"版本一致就复用"跳过：本轮实测过——发布链跑完后又加了一条判据用例，
 # 版本号没变，于是"版本一致"的判断让发布链复用了比工作树少一条用例的旧报告，
 # 而这正是 CI 的 `make validate && git diff --exit-code` 会红的形状。
@@ -99,7 +99,9 @@ make validate
 VALIDATION_ROWS="$("$PYTHON" - <<'PY'
 import json
 
-checks = json.load(open("docs/VALIDATION.json", encoding="utf-8"))["checks"]
+# 读 dist/VALIDATION_RUN.json 而不是 docs/VALIDATION.json：后者按设计只含可复现门禁，
+# integration_* 与 passed/skipped 这类环境读数已逐出提交面。
+checks = json.load(open("dist/VALIDATION_RUN.json", encoding="utf-8"))["checks"]
 rows = []
 for key in sorted(checks):
     if not key.startswith("integration_"):
@@ -107,13 +109,21 @@ for key in sorted(checks):
     cell = checks[key]
     note = str(cell.get("note", cell.get("count", ""))).replace("|", "/")
     rows.append(f"| {key} | {cell['status']} | {note} |")
-assert rows, "docs/VALIDATION.json 里没有任何 integration_* 档位行（判据会恒空）"
+assert rows, "dist/VALIDATION_RUN.json 里没有任何 integration_* 档位行（判据会恒空）"
 run = checks["test_run"]
-print(f"| test_run | {run['status']} | passed {run['passed']} / skipped {run['skipped']} / failed {run['failed']} |")
+collected = checks["test_collected"]["count"]
+print(
+    f"| test_run | {run['status']} | collected {collected} / failed {run['failed']}"
+    f" / passed {run['passed']} / skipped {run['skipped']} |"
+)
+print(f"| unexpected_skips | {checks['unexpected_skips']['status']} |"
+      f" {str(checks['unexpected_skips'].get('note', '')).replace('|', '/')} |")
+for name in run.get("skipped_names", []):
+    print(f"| skipped case | — | {name} |")
 print("\n".join(rows))
 PY
 )"
-say "已从 docs/VALIDATION.json 取到 $(printf '%s' "$VALIDATION_ROWS" | grep -c '^|') 行档位读数"
+say "已从 dist/VALIDATION_RUN.json 取到 $(printf '%s' "$VALIDATION_ROWS" | grep -c '^|') 行本次跑读数"
 
 # ---------- 2.5 release archive 清洁验证（§16） ----------
 step "2.5 校验 release archive 清洁度"
@@ -195,10 +205,10 @@ cat > dist/VALIDATION_STATUS.md <<EOF
 | 锁文件一致性 | make verify-lock | PASS（uv.lock 与 pyproject 一致） |
 | SBOM | make sbom | dist/sbom.cdx.json（CycloneDX 1.5） |
 | 依赖漏洞审计 | make audit | PASS（uv audit --locked，0 命中） |
-| PostgreSQL 真并发 | make test-pg | 见下方"集成档读数"（由 docs/VALIDATION.json 生成） |
+| PostgreSQL 真并发 | make test-pg | 见下方"本次跑读数"（由 dist/VALIDATION_RUN.json 生成） |
 | build | make build | PASS（退出码 0） |
 
-### 集成档读数（逐行取自 docs/VALIDATION.json，不在本脚本里手抄）
+### 集成档读数（逐行取自 dist/VALIDATION_RUN.json，不在本脚本里手抄）
 
 | 档位 | 状态 | 读数 |
 |---|---|---|

@@ -11,14 +11,22 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v10
+      - name: Install from the lockfile
+        # 两件事一起修：
+        # 1) 顺序 —— `make sbom` 的第三行用 `$(PYTHON)`=.venv/bin/python，而 .venv
+        #    原先要到后面那步 pip install 才存在，所以 sbom 这一步在干净 runner 上
+        #    必然先失败（读码证实，未在 runner 上跑过：本仓未推送）。装环境一律排第一。
+        # 2) 装法 —— 原来是 `pip install -e '.[dev]'`：只满足 pyproject 的 range，
+        #    ruff/mypy/pytest 的具体版本由 PyPI 当日最新决定，于是"lint/typecheck PASS"
+        #    这类写进提交面的读数会随 runner 的解析结果漂。`--frozen` 按 uv.lock 装，
+        #    且锁与 pyproject 不一致时直接失败，不静默重锁。
+        run: uv sync --frozen --all-extras
       - name: Lockfile consistency
         # uv.lock 与 pyproject.toml 不一致即红（实测：改一个 range 不重锁 → 退出码 1）
         run: make verify-lock
       - name: SBOM and vulnerability audit
         # 命中已知漏洞就红，而不是攒着：这是 `uv audit` 的实测行为（退出码 1）
         run: make sbom && make audit
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e '.[dev]'
       - name: Pull docker-tier test images
         # 必须在 `make validate` **之前**：VALIDATION.json 是 validate 的产物，
         # 镜像晚拉一步，档位就会被记成 PENDING 而后面的门禁读的是旧产物。
@@ -49,14 +57,17 @@ jobs:
       - name: OpenAPI freshness
         run: make api-docs && git diff --exit-code docs/openapi.json
       - name: Release validation freshness
+        # docs/VALIDATION.json 只含可复现门禁（换机器重跑必须逐字节相同），所以这条
+        # git diff 现在真的能跨环境成立；各集成档状态属环境读数，落 dist/ 不比对。
         run: make validate && git diff --exit-code docs/VALIDATION.json docs/VALIDATION.md
       - name: Docker-backed tiers really ran
         # runner 自带 docker daemon，PG / Docker provider / 对象存储三档都没有理由
         # 被跳过；被跳过即构建失败，而不是混在 skip 里静默通过。
+        # 读的是 **本次跑读数**（dist/VALIDATION_RUN.json）：提交面按设计不含 integration_*。
         run: |
           python - <<'PY'
           import json, sys
-          checks = json.load(open("docs/VALIDATION.json"))["checks"]
+          checks = json.load(open("dist/VALIDATION_RUN.json", encoding="utf-8"))["checks"]
           bad = {
               k: v for k, v in checks.items()
               if k.startswith("integration_") and k != "integration_k8s" and v["status"] != "PASS"

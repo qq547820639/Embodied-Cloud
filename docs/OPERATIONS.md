@@ -81,7 +81,28 @@
 ## 7. 验证档位与前置条件
 
 `make test` 一次跑全部档位；单档可点名单跑。缺前置条件的档位是**整档 skip +
-在 `docs/VALIDATION.json` 记 PENDING(原因)**，CI 对需要 docker 的档位要求 PASS。
+在 `dist/VALIDATION_RUN.json` 记 PENDING(原因)**（提交面 `docs/VALIDATION.json` 按设计
+不含档位读数，见 §7.1），CI 对需要 docker 的档位要求 PASS。
+
+### 7.1 两份报告：可复现面 vs 本次跑读数
+
+| 文件 | 进版本库 | 内容 | 谁读它 |
+|---|---|---|---|
+| `docs/VALIDATION.json` / `.md` | 是 | 只含**换机器重跑逐字节相同**的门禁：collected / failed / lint / typecheck / migration / build / 文档面一致性 | CI `git diff --exit-code`（新鲜度）、CURRENT_STATE 的 `Test` 行对账 |
+| `dist/VALIDATION_RUN.json` / `.md` | 否（gitignored） | 本次跑读数：各集成档状态与 note、passed/skipped、按用例名列出的 skip、skip 闭集判决 | CI 的 "Docker-backed tiers really ran"、`scripts/release.sh` 的档位表、人工排查 |
+
+**skip 闭集**（为什么"跳了几支"不再需要改文档）：一支用例可以按条件跳，但必须满足
+"所属模块在闭集里 + skip 文案含该模块的哨兵"。闭集由 `conditional_skip_universe()`
+从用例源码现取（`_const_str` 走 AST，不手抄）：六个集成档模块 + `test_gpu_pool_guard`。
+名单外的 skip → `unexpected_skips=FAIL` → 挡住发布。这样"通道今天通不通"只在读数里出现，
+而"某支新用例开始静默跳过"照样当场翻红。
+
+**这条分档是量出来的**：同一份树跑两次 `make validate`，第二次只把守护进程通道打断
+（`DOCKER_HOST=tcp://127.0.0.1:1`）。提交面两份文件的 sha256 **逐字节相同**，而本次跑读数从
+`passed=566 / skipped=2` 变成 `passed=498 / skipped=70`（依赖守护进程的四个档整档干净跳过），
+两次的闭集判决都是 PASS。分档之前，同样这两跑会改动提交面 6 个以上字段（`test_run.passed/skipped`
+＋四个 `integration_*` 的状态与 note），也就是 CI 那条 `git diff --exit-code` 会随机红。
+遮罩自身也带判据：`report_split` 要求声明的每个环境字段真在报告里、且遮完至少剩 4 项门禁。
 
 | 档位 | 命令 | 前置（本机实测） |
 |---|---|---|

@@ -28,7 +28,10 @@ def _load_validator():
 
 
 def test_docs_carry_exactly_one_test_count_token() -> None:
-    """形状判据：CHANGELOG 当前版本节与 CURRENT_STATE 各写且**只写一次**计数串。
+    """形状判据：CHANGELOG 当前版本节与 CURRENT_STATE 各写且**只写一次**计数面。
+
+    面上只留 `collected / failed` 两个可复现数（N-31）：passed/skipped 随环境抖，
+    把它们钉进文档就等于把"通道今天通不通"写进版本库。
 
     数值对账不在这里，而在 scripts/validate_release.py：pytest 阶段读到的
     docs/VALIDATION.json 必然是**上一次**产物，把值比较放这儿会造出不收敛的自引用
@@ -45,8 +48,31 @@ def test_docs_carry_exactly_one_test_count_token() -> None:
     }
     for name, block in blocks.items():
         found = validator.doc_count_tokens(block)
-        assert found, f"{name} 里没有 'collected N / passed N / skipped N / failed N' 计数串"
-        assert len(found) == 1, f"{name} 出现 {len(found)} 处计数串，只允许 1 处（多处必有一处会过期）"
+        assert found, f"{name} 里没有 'collected N / failed M' 计数面"
+        assert len(found) == 1, f"{name} 出现 {len(found)} 处计数面，只允许 1 处（多处必有一处会过期）"
+        assert validator.face_offenders(block) == [], f"{name}: {validator.face_offenders(block)}"
+
+
+def test_count_face_rejects_environment_numbers() -> None:
+    """反证判据：把 passed/skipped 写回计数面那一行，必须被同一把尺子点名。
+
+    只验"新形状过"是不够的 —— 旧形状（collected/passed/skipped/failed 四个数）
+    与新形状只差两个数，人的直觉会先写回去。
+    """
+    validator = _load_validator()
+    ok = "实测（collected 559 / failed 0）一致。"
+    assert validator.face_offenders(ok) == [], validator.face_offenders(ok)
+    # 把会抖的两个数写回面那一行 → 必须点名
+    mixed = "collected 559 / failed 0（passed 557 / skipped 2）"
+    offenders = validator.face_offenders(mixed)
+    assert offenders, "把随环境抖的 passed/skipped 写回计数面却没报"
+    assert any("passed" in line and "skipped" in line for line in offenders), offenders
+    # 旧的四元组形状当场认不出来（它不再是一张合法的面，值对账会报"0 处"）
+    old = "collected 559 / passed 557 / skipped 2 / failed 0"
+    assert validator.doc_count_tokens(old) == []
+    # 另起一行写不算（面 = 承载计数串的那一行；别处历史记述不动）
+    elsewhere = "collected 559 / failed 0\n另：本次跑 passed 557 / skipped 2 见 dist 报告"
+    assert validator.face_offenders(elsewhere) == [], validator.face_offenders(elsewhere)
 
 
 def test_doc_count_reconciliation_can_fire() -> None:
@@ -117,11 +143,16 @@ def test_report_carries_the_names_of_failing_cases(tmp_path) -> None:
 
 
 def test_release_script_owns_the_value_reconciliation() -> None:
-    """判据不许在"搬家"中丢失：值对账确实接在 validate 汇总之前。"""
+    """判据不许在"搬家"中丢失：值对账确实接在提交面组装之前。
+
+    锚点选报告字面量而不是某个局部变量名：上一版锚在 `software_failed = any(` 上，
+    汇总变量一改名判据就 ValueError（本轮真实撞到），而那正是它该防的搬家场景。
+    """
     source = Path("scripts/validate_release.py").read_text(encoding="utf-8")
-    assert "docs_test_counts" in source, "docs 计数串 ↔ 实测的对账判据被删了"
-    assert source.index("docs_counts_discrepancies(") < source.index("software_failed = any("), (
-        "对账必须发生在汇总之前，否则它的 FAIL 进不了 overall"
+    assert "docs_test_counts" in source, "docs 计数面 ↔ 实测的对账判据被删了"
+    anchor = '"checks": reproducible_checks(checks)'
+    assert source.index("docs_counts_discrepancies(") < source.index(anchor), (
+        "对账必须发生在组装提交面之前，否则它的 FAIL 进不了 overall"
     )
 
 

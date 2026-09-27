@@ -2,8 +2,40 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 559 / passed 557 / skipped 2 / failed 0（skip 的两支：`k8s_integration` 需 NVIDIA Device Plugin；`test_pinned_base_of_the_control_plane_recipe_is_fetchable` 这一跑撞上 ghcr 通道抖动——daemon 那条传输答 `not found`、第二条传输逐字节重算确认摘要存在，于是按设计自判 PENDING 而不是红。**这两个数是本次认证跑的读数，不是恒定形状**：skip 集合会随通道状态变，读它要按用例名读，不要只比总数）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 568 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
+
+### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
+- **缺陷不是"文档要常改"，是提交物在替环境说话**：`docs/VALIDATION.json` 进版本库，
+  CI 用 `make validate && git diff --exit-code docs/VALIDATION.*` 判新鲜 —— 这要求报告内容
+  是仓库代码的函数。实测不成立：同一棵树跑两次，一次 `skipped=1`、一次 `skipped=2`
+  （docker 档那条钉引用可取性的判据按三态分流，通道抖动时自判 PENDING），
+  `test_run.passed/skipped`、`integration_docker.status` 连 note 里的"执行 25/26"一起漂。
+- **拆法**：可复现门禁（collected／failed／lint／typecheck／migration／build／两份文档面判据）
+  留在 `docs/VALIDATION.json`；环境读数（六个 `integration_*` 及其 note、passed/skipped、
+  按用例名列出的 skip、闭集判决）改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）。
+  CI 的"Docker-backed tiers really ran"与 `scripts/release.sh` 的档位表随之改读后者。
+- **skip 不再是数字**：合法 skip = 所属模块在闭集内 + 文案含该模块哨兵；闭集由
+  `conditional_skip_universe()` 从用例源码 AST 现取（六个集成档模块 + `test_gpu_pool_guard`），
+  名单外一律 `unexpected_skips=FAIL`。文档面随之只写 `collected N / failed M`，
+  并把 `passed\s+\d` / `skipped\s+\d` 判为越界写法（`face_offenders`）——
+  环境翻一次不影响面，代码真变才红。遮罩自身也带判据：声明的环境字段必须真在报告里、
+  遮完至少剩 4 项门禁，否则 `report_split=FAIL`（防"遮罩把报告遮没"这种假合规）。
+- **顺手修掉两条让门禁不可信的旧账**：① CI 原先 `pip install -e '.[dev]'`，装的 ruff/mypy/pytest
+  版本由 PyPI 当日解析决定 —— 那"lint=PASS"写进提交面就不是代码的函数；改成
+  `uv sync --frozen --all-extras`。② 顺序：`make sbom` 第三行用 `.venv/bin/python`，
+  而 `.venv` 原先要到那之后才存在，干净 runner 上必然先失败（读码证实，未在 runner 上验过：
+  本仓未推送）。装环境一律排第一。
+- **门禁抓到我自己两次**：新增测试文件留下一句没用了的 `import pytest` 让 `lint=FAIL`；
+  而 `test_release_script_owns_the_value_reconciliation` 那条旧判据锚在 `software_failed = any(` 上，
+  汇总变量一改名它直接 `ValueError` —— 已把锚点换成报告字面量（判据该跟着语义走，不该跟着变量名走）。
+- 新常驻判据 9 支（`tests/test_validation_matrix.py` 8 + 计数面反证 1），门禁目录新开 G0.42／G0.43。
+
+### 本轮新增两条待收口项
+- `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
+  这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
+- `N-33`：`tests/test_gpu_pool_guard.py` 那两支现在带哨兵（缺余量时算合法跳过），
+  但更该做的是让 `rig` 自己保证余量、把跳过的分支改成断言 —— 哨兵只是把静默变成记账。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
 - **裁决依据是查来的，不是拍的**：读 AWS IoT Jobs 的任务生命周期页

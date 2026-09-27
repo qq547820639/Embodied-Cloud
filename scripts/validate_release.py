@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Release validation：自动运行全部软件 gate 并产出 docs/VALIDATION.json / VALIDATION.md。
+"""Release validation：自动运行全部软件 gate 并产出两份报告。
 
-Gate：test collected/passed/skipped/failed、lint、type、migration、build、
-GPU/K8s/Streaming/Robot 物理状态。CURRENT_STATE 引用本文件输出；CI 检查 freshness。
+- `docs/VALIDATION.{json,md}`（**提交物**）：只含可复现门禁 —— 内容是仓库代码的函数，
+  换机器重跑必须逐字节相同，CI 的 `git diff --exit-code` 才有意义。
+- `dist/VALIDATION_RUN.{json,md}`（**本次跑读数**，gitignored）：各集成档状态、
+  跳过哪几支等随环境（daemon、外网通道、已装二进制）而变的事实。
+
+分开存放的理由（N-31 实测）：同一棵树跑两次，一次 `skipped=1`、一次 `skipped=2`
+（registry 通道抖动让 docker 档一条自判 PENDING），旧版把两类读数混在一份提交物里，
+于是"外网今天通不通"会改动版本库，并把 CI 的新鲜度门禁变成随机红。
+
+Gate：test collected/failed、lint、type、migration、build、skip 闭集、
+GPU/K8s/Streaming/Robot 物理状态。CURRENT_STATE 引用本文件输出。
 
 用法：python scripts/validate_release.py
 """
@@ -16,6 +25,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable  # 当前解释器（venv）
+
+# 环境读数的落点。必须在 gitignored 的 dist/ 下（常驻判据 tests/test_validation_matrix.py
+# 钉住这一点），否则它又变回提交物，本轮的拆分就白做。
+RUN_REPORT_JSON = ROOT / "dist" / "VALIDATION_RUN.json"
+RUN_REPORT_MD = ROOT / "dist" / "VALIDATION_RUN.md"
+
+# 哪些 check 键属于环境读数（不进提交面）。`integration_` 前缀覆盖全部六档；
+# `unexpected_skips` 的判决取自本次跑的 skip 集合，同样属环境。
+ENV_CHECK_KEYS = ("unexpected_skips",)
+ENV_CHECK_PREFIXES = ("integration_",)
+# 哪些字段在"可复现的 check"里其实属环境读数（整条 check 留下、剥掉这几个字段）。
+ENV_FIELDS: dict[str, tuple[str, ...]] = {
+    "test_run": ("passed", "skipped", "skipped_names"),
+}
 
 
 def run(cmd: list[str], timeout: int = 900) -> tuple[int, str]:
@@ -38,11 +61,23 @@ def count_tests_junit(report_path: Path) -> dict:
     # pytest 产出 <testsuites><testsuite .../></testsuites>
     suite = root if root.tag == "testsuite" else root.find("testsuite")
     if suite is None:
-        return {"collected": 0, "passed": 0, "skipped": 0, "failed": 0, "failed_names": []}
+        return {"collected": 0, "passed": 0, "skipped": 0, "failed": 0,
+                "failed_names": [], "skipped_names": [], "skips": [], "test_names": []}
     failed_names = [
         f"{tc.get('classname') or ''}::{tc.get('name') or ''}"
         for tc in root.iter("testcase")
         if tc.find("failure") is not None or tc.find("error") is not None
+    ]
+    # skip 也按用例名留痕（总数不够）：总数只能告诉我"抖了几支"，名字才能告诉我
+    # "抖的是不是那支外网通道的判据"，也才能判"有没有第三支偷偷开始跳"。
+    skips = [
+        {
+            "id": f"{tc.get('classname') or ''}::{tc.get('name') or ''}",
+            "message": (tc.find("skipped").get("message") or ""),
+            "type": (tc.find("skipped").get("type") or ""),
+        }
+        for tc in root.iter("testcase")
+        if tc.find("skipped") is not None
     ]
     return {
         "collected": int(suite.get("tests", 0)),
@@ -53,6 +88,11 @@ def count_tests_junit(report_path: Path) -> dict:
         "skipped": int(suite.get("skipped", 0)),
         "failed": int(suite.get("failures", 0)) + int(suite.get("errors", 0)),
         "failed_names": failed_names,
+        "skipped_names": [s["id"] for s in skips],
+        "skips": skips,
+        "test_names": [
+            f"{tc.get('classname') or ''}::{tc.get('name') or ''}" for tc in root.iter("testcase")
+        ],
     }
 
 
@@ -177,6 +217,87 @@ def _integration_gates() -> dict[str, dict]:
     }
 
 
+# 不是"集成档"、但确实按条件跳过的模块：闭集的第二个来源。
+# test_gpu_pool_guard 的两支前提依赖全套共用的 GPU 池余量（见该文件 docstring），
+# 池被上游用例占光时它跳，属"这一跑没跑到"而不是"代码坏了"。给它哨兵而不是让它
+# 冒红，是为了不把随机红引进门禁；代价是这两支可能静默不跑 —— 所以哨兵必须被
+# 写进本次跑读数的 skip 名单（按用例名可见），并登记为待收口项（N-33：rig 应
+# 自己保证余量，跳过的分支该改成断言）。
+EXTRA_SKIP_UNIVERSE: tuple[tuple[str, str], ...] = (
+    ("tests/test_gpu_pool_guard.py", "GATE_SENTINEL"),
+)
+
+
+def _dotted(rel_path: str) -> str:
+    """tests/test_x.py → tests.test_x（JUnit 的 classname 用点号形式）。"""
+    return rel_path.removesuffix(".py").replace("/", ".")
+
+
+def conditional_skip_universe() -> dict[str, str]:
+    """允许跳过的闭集：{模块点号名: 该模块 skip 文案必须含的哨兵}。
+
+    哨兵一律由 AST 现取源码常量（_const_str），不许手抄 —— 手抄那份会在哨兵改名时
+    继续"看着对"，而闭集当场失效。
+    """
+    universe = {spec["module"]: spec["sentinel"] for spec in _integration_gates().values()}
+    for rel_path, const in EXTRA_SKIP_UNIVERSE:
+        universe[_dotted(rel_path)] = _const_str(rel_path, const)
+    return universe
+
+
+def skip_admission_offenders(universe: dict[str, str], skips: list[dict]) -> list[str]:
+    """本次跑的 skip 是否全在闭集内。纯函数，可喂夹具。"""
+    out: list[str] = []
+    for skip in skips:
+        case_id = str(skip.get("id", ""))
+        module = case_id.split("::")[0]
+        message = str(skip.get("message", ""))
+        sentinel = universe.get(module)
+        if sentinel is None:
+            out.append(f"{case_id}: 该模块不在条件跳过闭集内（skip 文案 {message[:60]!r}）")
+        elif sentinel not in message:
+            out.append(f"{case_id}: 文案未含本模块哨兵 {sentinel}，是普通 skip 不是缺件")
+    return out
+
+
+def _is_env_check(key: str) -> bool:
+    return key in ENV_CHECK_KEYS or key.startswith(ENV_CHECK_PREFIXES)
+
+
+def reproducible_checks(checks: dict) -> dict:
+    """提交面：剥掉环境读数后的报告。换机器重跑必须逐字节相同。"""
+    view: dict[str, dict] = {}
+    for key, value in checks.items():
+        if _is_env_check(key):
+            continue
+        drop = ENV_FIELDS.get(key, ())
+        view[key] = {k: v for k, v in value.items() if k not in drop} if drop else value
+    return view
+
+
+def mask_offenders(checks: dict) -> list[str]:
+    """遮罩自证：声明的环境字段必须真在报告里，且遮完还得剩得下可复现门禁。
+
+    没有这一条，"把某个字段划进环境读数"和"把报告删了"在效果上无法区分 ——
+    投影判据（两档对照）也就成了摆设。
+    """
+    out: list[str] = []
+    for key, fields in ENV_FIELDS.items():
+        entry = checks.get(key)
+        if entry is None:
+            out.append(f"遮罩声明的 check {key} 不在报告里（清单已过期）")
+            continue
+        missing = [f for f in fields if f not in entry]
+        if missing:
+            out.append(f"{key} 里没有环境字段 {missing}（遮罩指向不存在的字段）")
+    known = [k for k in checks if _is_env_check(k)]
+    if len(reproducible_checks(checks)) < 4:
+        out.append(f"可复现面只剩 {len(reproducible_checks(checks))} 项门禁，遮罩把报告遮没了")
+    if not known and any(k for k in checks if k == "test_run"):
+        out.append("报告里一个环境读数都没有：闭集/环境分档判据无事可做")
+    return out
+
+
 def main() -> int:
     checks: dict[str, dict] = {}
     gates = _integration_gates()
@@ -188,6 +309,7 @@ def main() -> int:
     dist.mkdir(exist_ok=True)
     junit = dist / "validate-junit.xml"
     code, _ = run([PYTHON, "-m", "pytest", "--junitxml", str(junit)])
+    universe = conditional_skip_universe()
     if junit.exists():
         counts = count_tests_junit(junit)
         checks["test_collected"] = {"status": "PASS", "count": counts["collected"]}
@@ -199,19 +321,32 @@ def main() -> int:
             # 报告里只放名字、不放 message：报告必须确定性（CI freshness 门禁比较
             # git diff），而失败消息里带时间/端口就每次不同。现场另打 stdout。
             "failed_names": counts["failed_names"],
+            "skipped_names": counts["skipped_names"],
         }
         checks.update({f"integration_{k}": v for k, v in integration_gate_statuses(junit, gates).items()})
+        offenders = skip_admission_offenders(universe, counts["skips"])
+        checks["unexpected_skips"] = {
+            "status": "FAIL" if offenders else "PASS",
+            "note": (
+                "; ".join(offenders)
+                if offenders
+                else f"本次跳过 {counts['skipped']} 支，全部落在闭集内（闭集 {len(universe)} 个模块）"
+            ),
+        }
         if counts["failed"]:
             print_failure_scene(junit)
     else:
         checks["test_collected"] = {"status": "FAIL", "count": 0}
         checks["test_run"] = {
-            "status": "FAIL", "passed": 0, "skipped": 0, "failed": 0, "failed_names": []
+            "status": "FAIL", "passed": 0, "skipped": 0, "failed": 0, "failed_names": [],
+            "skipped_names": [],
         }
         checks.update({
             f"integration_{k}": {"status": "NOT_RUN", "note": "pytest 未产出 JUnit 报告"}
             for k in gates
         })
+        # 没有 JUnit 就读不到 skip 名单；此时闭集判据无从判，如实记 NOT_RUN 而不是 PASS。
+        checks["unexpected_skips"] = {"status": "NOT_RUN", "note": "pytest 未产出 JUnit 报告"}
 
     # 3) lint / type / migration / build
     code, _ = run([PYTHON, "-m", "ruff", "check", "app", "tests", "edge_agent", "scripts"])
@@ -247,34 +382,52 @@ def main() -> int:
     docs_offenders = docs_counts_discrepancies(version, checks)
     checks["docs_test_counts"] = {
         "status": "FAIL" if docs_offenders else "PASS",
-        "note": "; ".join(docs_offenders) if docs_offenders else "CHANGELOG/CURRENT_STATE 计数串与本报告一致",
+        "note": "; ".join(docs_offenders) if docs_offenders else "CHANGELOG/CURRENT_STATE 计数面与本报告一致",
     }
     row_offenders = doc_row_order_discrepancies()
     checks["docs_row_order"] = {
         "status": "FAIL" if row_offenders else "PASS",
         "note": "; ".join(row_offenders) if row_offenders else "带编号的登记表行均按号递增且无重号",
     }
+    # 遮罩自证：环境读数清单过期（指向不存在的字段）或把可复现面遮没，都当场判红。
+    split_offenders = mask_offenders(checks)
+    checks["report_split"] = {
+        "status": "FAIL" if split_offenders else "PASS",
+        "note": "; ".join(split_offenders) if split_offenders else "环境读数清单与报告字段对得上",
+    }
 
-    # 6) 汇总
-    software_failed = any(
-        c["status"] == "FAIL" for c in checks.values()
-    )
-    overall = "FAIL" if software_failed else "PASS_WITH_PHYSICAL_PENDING"
-    # 注意：报告内容必须**确定性**（不含时间戳）——CI freshness 门禁是
+    # 6) 汇总：退出码看全量（环境读数红也一样挡发布），提交面的 overall 只看可复现项。
+    run_failed = any(c["status"] == "FAIL" for c in checks.values())
+    reproducible = reproducible_checks(checks)
+    overall = "FAIL" if any(c["status"] == "FAIL" for c in reproducible.values()) else "PASS_WITH_PHYSICAL_PENDING"
+    # 注意：提交面内容必须**确定性**（不含时间戳、不含环境读数）——CI freshness 门禁是
     # `make validate && git diff --exit-code docs/VALIDATION.*`，任何每次运行
-    # 都变化的内容（如生成时间）都会让门禁必然失败。生成时间不入报告。
+    # 都变化的内容（生成时间、本次跳了几支）都会让门禁随机红。生成时间不入报告。
+    # "checks" 必须字面经过 reproducible_checks( —— 常驻判据按这条字面接线开火。
     report = {
         "version": version,
         "overall": overall,
+        "checks": reproducible_checks(checks),
+        "environment_readings": "dist/VALIDATION_RUN.md（本次跑读数，不进版本库）",
+    }
+    run_report = {
+        "version": version,
+        "overall": "FAIL" if run_failed else "PASS_WITH_PHYSICAL_PENDING",
         "checks": checks,
+        "conditional_skip_universe": universe,
     }
 
     docs = ROOT / "docs"
     docs.mkdir(exist_ok=True)
     (docs / "VALIDATION.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     (docs / "VALIDATION.md").write_text(_render_md(report))
-    print(f"[validate] overall={overall} tests={checks['test_run']}")
-    return 0 if not software_failed else 1
+    RUN_REPORT_JSON.write_text(json.dumps(run_report, indent=2, ensure_ascii=False))
+    RUN_REPORT_MD.write_text(_render_md(run_report, title_suffix="（本次跑读数，不进版本库）"))
+    print(
+        f"[validate] overall={report['overall']} run_overall={run_report['overall']} "
+        f"tests={checks['test_run']} skips={checks['unexpected_skips']['status']}"
+    )
+    return 1 if run_failed else 0
 
 
 def _read_version() -> str:
@@ -285,16 +438,35 @@ def _read_version() -> str:
     return "unknown"
 
 
-# 文档引用实测计数时的唯一合法写法（四元组齐全、顺序固定；空白/换行放开，
-# 因为 markdown 正文换行是排版需要）。解析只有这一份实现：pytest 判据与下面的
-# 值对账共用，避免"两处各抄一份正则、其中一份悄悄过期"。
-DOC_COUNT_RE = re.compile(
-    r"collected\s+(\d+)\s*/\s*passed\s+(\d+)\s*/\s*skipped\s+(\d+)\s*/\s*failed\s+(\d+)"
-)
+# 文档引用实测计数时的唯一合法写法：**只写可复现的那两个数**（collected / failed），
+# 顺序固定、空白放开（markdown 正文换行是排版需要）。解析只有这一份实现：pytest 判据
+# 与下面的值对账共用，避免"两处各抄一份正则、其中一份悄悄过期"。
+#
+# passed/skipped 被逐出计数面是故意的（N-31）：它们 = collected − failed − 本次跳过数，
+# 而"本次跳过几支"随外网通道/守护进程状态变。实测同一棵树两次跑出 557/2 与 558/1，
+# 于是提交物跟着抖。它们属环境读数，落 dist/VALIDATION_RUN.md。
+DOC_COUNT_RE = re.compile(r"collected\s+(\d+)\s*/\s*failed\s+(\d+)")
+# 计数面上不许再出现的抖动数（只查承载计数面的那一行，别处的历史记述不动）。
+UNSTABLE_ON_FACE_RE = re.compile(r"(?:passed|skipped)\s+\d")
 
 
-def doc_count_tokens(text: str) -> list[tuple[int, int, int, int]]:
+def doc_count_tokens(text: str) -> list[tuple[int, int]]:
     return [tuple(int(x) for x in match) for match in DOC_COUNT_RE.findall(text)]
+
+
+def face_offenders(text: str) -> list[str]:
+    """承载计数面的那一行上的越界写法。纯函数，可喂夹具。"""
+    out: list[str] = []
+    for line in text.splitlines():
+        if not DOC_COUNT_RE.search(line):
+            continue
+        unstable = UNSTABLE_ON_FACE_RE.findall(line)
+        if unstable:
+            out.append(
+                f"计数面那行写了随环境抖的数（{sorted(set(unstable))}）——"
+                "passed/skipped 属本次跑读数，请改到 dist/VALIDATION_RUN.md 一侧"
+            )
+    return out
 
 
 # 带编号的登记表行：编号必须**按出现顺序单调递增且唯一**。
@@ -343,18 +515,13 @@ def changelog_section(text: str, version: str) -> str:
 
 
 def docs_counts_discrepancies(version: str, checks: dict) -> list[str]:
-    """CHANGELOG 当前版本节 / CURRENT_STATE 里的计数串必须等于本次实测。
+    """CHANGELOG 当前版本节 / CURRENT_STATE 里的计数面必须等于本次实测的可复现数。
 
     值对账只能发生在这里（报告刚算出来），不能放进 pytest 用例：pytest 看到的是
     上一次运行的报告，新加一条用例就会造出不收敛的自引用（本轮真实踩过）。
     """
     run = checks["test_run"]
-    expected = (
-        int(checks["test_collected"]["count"]),
-        int(run["passed"]),
-        int(run["skipped"]),
-        int(run["failed"]),
-    )
+    expected = (int(checks["test_collected"]["count"]), int(run["failed"]))
     sources = {
         "CHANGELOG 当前版本节": changelog_section(
             (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), version
@@ -363,17 +530,23 @@ def docs_counts_discrepancies(version: str, checks: dict) -> list[str]:
     }
     out: list[str] = []
     for name, text in sources.items():
+        out.extend(f"{name}: {o}" for o in face_offenders(text))
         found = doc_count_tokens(text)
         if len(found) != 1:
-            out.append(f"{name}: 计数串 {len(found)} 处（要求恰好 1 处；多处必有一处会过期）")
+            out.append(f"{name}: 计数面 {len(found)} 处（要求恰好 1 处；多处必有一处会过期）")
         elif found[0] != expected:
             out.append(f"{name}: 文档写 {found[0]}，实测 {expected}")
     return out
 
 
-def _render_md(report: dict) -> str:
+def _render_md(report: dict, title_suffix: str = "") -> str:
+    """渲染一份报告。同一把尺子渲两份：提交面（只有可复现项）与本次跑读数（全量）。
+
+    按 checks 里**实际存在的键**派生行，不写死清单 —— 写死会让"新增一档"和
+    "某档被剥出提交面"两种改动在 .md 上看不见。
+    """
     lines = [
-        "# VALIDATION — EmbodiedCloud",
+        f"# VALIDATION — EmbodiedCloud{title_suffix}",
         "",
         f"> 版本：{report['version']}（自动生成，勿手改）",
         "",
@@ -385,25 +558,36 @@ def _render_md(report: dict) -> str:
     c = report["checks"]
     lines.append(f"| Test collected | {c['test_collected']['status']} | {c['test_collected'].get('count', '')} |")
     tr = c["test_run"]
-    lines.append(
-        f"| Test run | {tr['status']} | passed={tr['passed']} skipped={tr['skipped']} failed={tr['failed']} |"
-    )
+    detail = f"failed={tr['failed']}"
+    for field in ("passed", "skipped"):
+        if field in tr:
+            detail += f" {field}={tr[field]}"
+    lines.append(f"| Test run | {tr['status']} | {detail} |")
     if names := tr.get("failed_names", []):
         # 失败必须可归因：一份只写 "failed: 1" 的报告等于没有报告。
         lines[-1] += f" {' · '.join(f'`{n}`' for n in names)} |"
     elif tr["failed"]:
         lines[-1] += " （JUnit 未给出用例名） |"
+    if "skipped_names" in tr:
+        # skip 按用例名留痕：总数只能说明"抖了几支"，名字才能说明"抖的是哪一支"。
+        lines.append(f"| Test skipped | — | {' · '.join(f'`{n}`' for n in tr['skipped_names']) or '（无）'} |")
     for key in ("lint", "typecheck", "migration", "build"):
-        lines.append(f"| {key} | {c[key]['status']} | |")
-    # 集成档按 checks 里实际存在的键派生，避免"新增一档忘了加进渲染表"
+        if key in c:
+            lines.append(f"| {key} | {c[key]['status']} | {c[key].get('note', '')} |")
     for key in sorted(k[len("integration_"):] for k in c if k.startswith("integration_")):
         item = c[f"integration_{key}"]
         lines.append(f"| Integration {key} | {item['status']} | {item.get('note', '')} |")
+    for key in ("unexpected_skips", "docs_test_counts", "docs_row_order", "report_split"):
+        if key in c:
+            lines.append(f"| {key} | {c[key]['status']} | {c[key].get('note', '')} |")
     for key in ("gpu", "streaming", "robot"):
         item = c[f"physical_{key}"]
         lines.append(f"| Physical {key} | {item['status']} | {item.get('note', '')} |")
     lines.append("")
-    lines.append("> 由 `python scripts/validate_release.py` 生成；CI 校验 freshness（重新生成无 diff）。")
+    lines.append(
+        "> 由 `python scripts/validate_release.py` 生成。提交面只放**换机器重跑逐字节相同**的"
+        "门禁；各集成档状态与本次跳过哪几支属环境读数，见 `dist/VALIDATION_RUN.md`（gitignored）。"
+    )
     return "\n".join(lines)
 
 
