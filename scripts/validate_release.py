@@ -490,6 +490,103 @@ def dangling_reference_offenders(texts: dict[str, str], catalog: dict[str, set[s
     return out
 
 
+
+# 文档里的两种指针：`文件:行号` 与 `宿主.md §节`。它们都是长期演化后才断掉的那种
+# （文件还在但行号早不对了；章节被合并/重编号但引用还指旧号），所以判据是"能不能落到实物上"。
+# 边界（有意不做）：散文里的自由路径不核——普查显示未解析的 5 条全是示例/外部脚本
+# （`tmp/probe.py`、GPU 主机上的 `./isaac-sim.compatibility_check.sh` 等），
+# 为它们开豁免名单会让判据变成一堆例外；路径存在性留给一次性普查，不进常驻门禁。
+DOC_FILELINE_RE = re.compile(r"([\w./-]+\.(?:py|md|sh|sql|toml|json)):(\d+)")
+DOC_ANCHOR_RE = re.compile(r"([\w./-]+\.md)\s*§\s*(\d+(?:\.\d+)?)")
+DOC_SCAN_DIRS = ("app", "edge_agent", "scripts", "tests", "docs", "infra", "alembic")
+DOC_SCAN_SUFFIXES = {".py", ".md", ".sh", ".sql", ".toml", ".json", ".yaml", ".yml", ".ts"}
+
+
+def doc_reference_offenders(
+    texts: dict[str, str], line_counts: dict[str, int], sections: dict[str, set[str]]
+) -> list[str]:
+    """纯函数：两种指针逐条核；没文本或一条指针都没扫到 ⇒ 恒真，也算偏离。
+
+    自由路径的存在性**不做**：普查显示未解析的那几条全是示例路径或 GPU 主机上的外部脚本，
+    为它们开豁免名单只会让判据变成一堆例外；路径存在性留给一次性普查脚本。
+    """
+    if not texts:
+        return ["没有一份文档被扫：这条判据无事可做（与恒真同形）"]
+    out: list[str] = []
+    hits = 0
+    for doc, text in sorted(texts.items()):
+        for fname, line in DOC_FILELINE_RE.findall(text):
+            hits += 1
+            total = line_counts.get(fname)
+            if total is None:
+                total = line_counts.get(f"docs/{fname}")
+            if total is None:
+                total = next((v for k, v in line_counts.items() if k.endswith("/" + fname)), None)
+            if total is None:
+                out.append(f"{doc}: 指针 {fname}:{line} 指向的文件不存在")
+            elif int(line) > total:
+                out.append(f"{doc}: {fname}:{line} 超出该文件长度 {total} 行")
+        for host, sec in DOC_ANCHOR_RE.findall(text):
+            hits += 1
+            base = host.split("/")[-1]
+            if base not in sections:
+                out.append(f"{doc}: 指针 {host} §{sec} 的宿主文档不存在")
+            elif sec not in sections[base]:
+                out.append(f"{doc}: 指针 {host} §{sec} 指向的章节不存在")
+    if not hits:
+        out.append("文档里一条 `文件:行号` 或 `宿主 §节` 指针都没扫到：分母可疑，不按通过处理")
+    return out
+
+
+def _doc_pointer_texts() -> dict[str, str]:
+    out: dict[str, str] = {}
+    candidates = [
+        *sorted((ROOT / "docs").glob("*.md")), ROOT / "README.md", ROOT / "DELIVERY.md", ROOT / "CHANGELOG.md"
+    ]
+    for path in candidates:
+        if path.exists():
+            out[path.relative_to(ROOT).as_posix()] = path.read_text(encoding="utf-8", errors="replace")
+    return out
+
+
+def _doc_line_counts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for directory in DOC_SCAN_DIRS:
+        base = ROOT / directory
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*")):
+            if path.is_file() and path.suffix in DOC_SCAN_SUFFIXES and "__pycache__" not in str(path):
+                counts[path.relative_to(ROOT).as_posix()] = len(
+                    path.read_text(encoding="utf-8", errors="replace").splitlines()
+                )
+    for path in [*sorted(ROOT.glob("*.md")), ROOT / "Makefile"]:
+        if path.is_file():
+            counts[path.name] = len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+    return counts
+
+
+def _doc_section_index() -> dict[str, set[str]]:
+    index: dict[str, set[str]] = {}
+    for path in sorted((ROOT / "docs").glob("*.md")):
+        body = path.read_text(encoding="utf-8", errors="replace")
+        index[path.name] = set(re.findall(r"^#+\s*(\d+(?:\.\d+)?)", body, re.M))
+    return index
+
+
+def dangling_doc_reference_offenders() -> list[str]:
+    return doc_reference_offenders(_doc_pointer_texts(), _doc_line_counts(), _doc_section_index())
+
+
+def doc_reference_stats() -> dict[str, int]:
+    texts, line_counts = _doc_pointer_texts(), _doc_line_counts()
+    paths = anchors = 0
+    for text in texts.values():
+        paths += len(DOC_FILELINE_RE.findall(text))
+        anchors += len(DOC_ANCHOR_RE.findall(text))
+    return {"docs": len(texts), "fileline": paths, "anchors": anchors, "files": len(line_counts)}
+
+
 def reproducible_checks(checks: dict) -> dict:
     """提交面：剥掉环境读数后的报告。换机器重跑必须逐字节相同。"""
     view: dict[str, dict] = {}
@@ -626,6 +723,13 @@ def main() -> int:
     checks["report_split"] = {
         "status": "FAIL" if split_offenders else "PASS",
         "note": "; ".join(split_offenders) if split_offenders else "环境读数清单与报告字段对得上",
+    }
+    # 文档指针（`文件:行号`、`宿主.md §节`）要落得到实物：文件在、行没越界、章节还在。
+    doc_ref_offenders = dangling_doc_reference_offenders()
+    doc_ref_note = "文档里的行号指针与章节锚点都落在实物上（自由路径的存在性留给一次性普查，见函数注释）"
+    checks["doc_references"] = {
+        "status": "FAIL" if doc_ref_offenders else "PASS",
+        "note": "; ".join(doc_ref_offenders) if doc_ref_offenders else doc_ref_note,
     }
     # 操作指针（变量名 / make 目标 / extra）必须能在仓内找到出处：文档与档位原因一起扫。
     ref_offenders = dangling_reference_offenders(pointer_bearing_texts(), reference_catalog())
@@ -902,7 +1006,7 @@ def _render_md(report: dict, title_suffix: str = "") -> str:
         lines.append(f"| Integration {key} | {item['status']} | {item.get('note', '')} |")
     for key in (
         "unexpected_skips", "docs_test_counts", "docs_row_order",
-        "report_split", "docs_state_rows", "pending_reasons", "reason_references",
+        "report_split", "docs_state_rows", "pending_reasons", "reason_references", "doc_references",
     ):
         if key in c:
             lines.append(f"| {key} | {c[key]['status']} | {c[key].get('note', '')} |")

@@ -414,7 +414,7 @@ sequenceDiagram
 **不一致/脱节点**：
 1. `ARCHITECTURE.md` 版本落后（0.2.0），Provider 协议签名未同步 `wait_ready`/`rotate_credentials`/`reconcile`。
 2. `SECURITY.md` 声称容器「非 root」已实现（Docker 镜像 `USER 1234:1234` ✓）；但 Docker provider 的 `--network host` + 0o777 卷在 ADR 中明确标注为「仅限可信单机」，生产 K8s 未复制该假设 ✓。
-3. 边缘 checksum 上报协议（CURRENT_STATE §10）与 `deployments.py` 实际认证口径不一致（见 P1-9）。
+3. 边缘 checksum 上报协议（该状态文档已重组为 §1–§5，现见 CURRENT_STATE.md §4）与 `deployments.py` 实际认证口径不一致（见 P1-9）。
 
 ---
 

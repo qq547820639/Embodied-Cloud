@@ -4,7 +4,7 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 635
+      "count": 638
     },
     "test_run": {
       "status": "PASS",
@@ -48,6 +48,10 @@
     "report_split": {
       "status": "PASS",
       "note": "环境读数清单与报告字段对得上"
+    },
+    "doc_references": {
+      "status": "PASS",
+      "note": "文档里的行号指针与章节锚点都落在实物上（自由路径的存在性留给一次性普查，见函数注释）"
     },
     "reason_references": {
       "status": "PASS",

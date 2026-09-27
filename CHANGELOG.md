@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 635 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 638 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -308,6 +308,19 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   门禁 G0.62，计数面 633→635。
 - 记账脚本又自伤一次：把新函数插进循环体内导致 `B023`（闭包捕住循环变量），
   改法是把 `resolve()` 提到循环外、把两个字典当参数传——lint 这次替我发现了结构问题，不只是风格问题。
+
+### 文档硬指针（行号与章节）现在有人核了（N-53）
+- 先普查再立门：23 份文档里 58 处 `文件:行号`、4 处 `宿主.md §节`，其中一处真断——
+  `docs/code-walkthrough-2026-08-13.md:417` 指向状态文档当时的第 10 节，而那份文档后来重组为 §1–§5。
+- 四处 prose 先修好：悬空章节改指现存的 §4；三处"把上游仓库文件写成本仓路径形状"的写法
+  （trivy 入门安装文档、其 SBOM 页行号、`docs/VALIDATION.json/.md` 这种缩写）改成不会让人误以为本仓有该文件的写法。
+- 新门禁 `doc_references`：纯函数逐条核（行不越界、宿主在、章节在），两类恒真形状也算偏离，
+  分母阈值（行号指针 ≥50、章节指针 ≥3）进判据防"分母缩水后空转"。
+- 有意划的边界：自由路径的存在性不进门禁——普查显示未解析的 5 条全是示例路径或 GPU 主机上的外部脚本
+  （如那份兼容性检查脚本），为它们开豁免只会让判据变成例外清单。这条边界写进函数 docstring，
+  并由接线判据要求"边界说明在位"，防止将来有人默默扩面或悄悄删掉说明。
+- 判据 3 支、门禁 G0.63、登记表 N-53；计数面 635→638。
+
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
@@ -694,7 +707,7 @@ docker 档 21 → 22，全套 531 → 532。
   SBOM 模式不需要再下载任何东西）今天拿不到字节：`docker pull` 走守护进程配置里的镜像站
   `docker.1panel.live` 时 TLS 握手超时（上一轮它是这台机器唯一通的那条）、`ghcr.io` 拨号超时、
   GitHub release 下载在宿主 `curl` 与容器内 `urllib` 两处都不通。另一候选（trivy）在自己的
-  `docs/getting-started/installation.md:12-16` 里**列了三个官方注册表**，其中
+  上游那份《getting-started 安装》文档第 12–16 行**列了三个官方注册表**（不是本仓路径），其中
   `public.ecr.aws/aquasecurity/trivy`（同一文件第 16 行）当场可拉，且第 22 行明文支持
   "挂容器引擎 socket 扫镜像"这种接法。六维逐项出处：License 两份都从
   `raw.githubusercontent.com/.../LICENSE` 读到 Apache-2.0 正文；活跃度取
@@ -704,7 +717,7 @@ docker 档 21 → 22，全套 531 → 532。
   逐件 sigstore）。第三个候选 `docker build --sbom/--attest` 本机直接不可用
   （`docker buildx version` → `docker: unknown command: docker buildx`）。
   **一处自我更正**：先前把"trivy 运行时要下载漏洞库"记成它的安全风险——真跑之后 trivy 自己打印
-  「`--format cyclonedx` disables security scanning」（与它 `sbom.md:203` 一致），那条主张撤回。
+  「`--format cyclonedx` disables security scanning」（与它 SBOM 页第 203 行一致），那条主张撤回。
 - **钉的 direction 单独核过**：用 ECR Public 的匿名令牌 + `Accept: …image.index.v1+json` 取回
   manifest body（3772 B，`application/vnd.oci.image.index.v1+json`），逐字节重算 sha256 得
   `62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`，与 `docker pull` 打印的
@@ -1443,7 +1456,7 @@ postgres 18/18、docker 20/20、browser 11/11、**object_store 20/20**、
   enc: 密文解密失败 fail closed。
 
 ### Process
-- scripts/validate_release.py 自动生成 docs/VALIDATION.json/.md（CI freshness 门禁）。
+- scripts/validate_release.py 自动生成 docs/VALIDATION.json 与 docs/VALIDATION.md（CI freshness 门禁）。
 - 版本统一 0.3.0（pyproject/app/Makefile/CHANGELOG/OpenAPI 单一来源）。
 - Release 清洁验证（archive 不含 __pycache__/pyc/test db/.env）。
 

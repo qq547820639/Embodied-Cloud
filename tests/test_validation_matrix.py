@@ -649,3 +649,47 @@ def test_env_read_resolution_is_transitive_but_not_fooled_by_cycles() -> None:
     assert "EMBODIEDCLOUD_TWO_HOP" in read, "两跳间接读没认出来"
     assert "EMBODIEDCLOUD_AFTER_CYCLE" in read, "环旁边的正常读点被带没了"
     assert len([n for n in read if n.startswith("EMBODIEDCLOUD_LOOP")]) == 0, read
+
+
+def test_document_pointers_resolve_to_real_lines_and_sections() -> None:
+    """文档里的 `文件:行号` 与 `宿主.md §节` 两种指针必须落到实物上。
+
+    形状是长期演化后才会露出来的那种：文件还在、行号早就不对了；章节被合并/删号了、
+    引用还指着旧编号。两种都在真仓里被这条判据抓到过（写门之前先普查：58 处行号指针
+    与 26 处章节指针，其中 1 处 `CURRENT_STATE §10` 已随文档重组而失效）。
+    """
+    validator = _load_validator()
+    existing = {"app/x.py": 2, "docs/B.md": 9, "scripts/tool.py": 40}
+    sections = {"B.md": {"1", "2", "2.1"}, "ARCHITECTURE.md": {"7", "8"}}
+    good = {"docs/A.md": "见 scripts/tool.py:12 与 app/x.py:2；另见 B.md §2.1、ARCHITECTURE.md §8"}
+    assert validator.doc_reference_offenders(good, existing, sections) == []
+    bad = {
+        "docs/A.md": (
+            "见 app/x.py:3；再看 docs/B.md §7；还有 C.md §1；最后是 nope.py:4"
+        ),
+    }
+    offenders = validator.doc_reference_offenders(bad, existing, sections)
+    joined = "\n".join(offenders)
+    assert len(offenders) == 4, offenders
+    assert "app/x.py:3 超出该文件长度 2 行" in joined, offenders
+    assert "docs/B.md §7" in joined.replace(" ", "") or "B.md §7" in joined, offenders
+    assert "C.md" in joined and "nope.py" in joined, offenders
+    # 恒真形状：没文本、或文本里一条指针都没有 ⇒ 不算通过
+    assert validator.doc_reference_offenders({}, existing, sections)
+    assert validator.doc_reference_offenders({"docs/A.md": "没有任何指针"}, existing, sections)
+
+
+def test_the_repo_docs_have_no_dangling_pointers() -> None:
+    """真面：仓内文档现在 0 条悬空指针——是先普查、确认形状可信，才立的门。"""
+    validator = _load_validator()
+    assert validator.dangling_doc_reference_offenders() == []
+    stats = validator.doc_reference_stats()
+    assert stats["fileline"] >= 50 and stats["anchors"] >= 3, f"分母太小，判据近乎空转：{stats}"
+
+
+def test_doc_reference_gate_is_wired_into_the_summary() -> None:
+    src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
+    assert "dangling_doc_reference_offenders(" in src and '"doc_references"' in src
+    assert src.index("dangling_doc_reference_offenders(") < src.index('"checks": reproducible_checks(checks)')
+    # 边界也要写下来，免得后人以为这条管所有路径引用
+    assert "不做" in src[src.index("def doc_reference_offenders") : src.index("def doc_reference_offenders") + 1200]
