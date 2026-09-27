@@ -26,6 +26,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable  # 当前解释器（venv）
 
+# 本文件既可 `make validate` 跑，也可被常驻判据按路径 importlib 加载（那时 scripts/ 不在
+# sys.path 上）——构建时间口径必须还是同一份实现，所以这里显式把 scripts/ 挂进来。
+_SCRIPTS = str(ROOT / "scripts")
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+
+from build_env import epoch_env  # noqa: E402
+
 # 环境读数的落点。必须在 gitignored 的 dist/ 下（常驻判据 tests/test_validation_matrix.py
 # 钉住这一点），否则它又变回提交物，本轮的拆分就白做。
 RUN_REPORT_JSON = ROOT / "dist" / "VALIDATION_RUN.json"
@@ -48,20 +56,13 @@ def run(cmd: list[str], timeout: int = 900, env: dict[str, str] | None = None) -
 
 
 def build_env() -> dict[str, str]:
-    """构建用的环境：把 `SOURCE_DATE_EPOCH` 钉到 HEAD 提交时间。
+    """构建用的环境：`SOURCE_DATE_EPOCH` 钉到 HEAD 提交时间。
 
-    口径与 Makefile 里那一条一致（同一个 git 格式串）。之所以两处都要写：
-    `python scripts/validate_release.py` 是能直接跑的（本文件 docstring 就那么教），
-    只靠 make 的 export 会让"同一条 build=PASS"随调用方式不同而产物不同。
+    口径不在本文件里（见 scripts/build_env.py 的模块注释）：Makefile 与 validate
+    两处都得走同一个 `epoch_env()`，`make validate` 会 export 一份、直接跑本脚本时
+    由它补上同一条兜底 —— 两条路径的产物必须是同一秒。
     """
-    env = dict(os.environ)
-    if not env.get("SOURCE_DATE_EPOCH"):
-        # git 由 PATH 解析（S607）；参数是本脚本写死的常量，无用户输入
-        stamp = subprocess.run(
-            ["git", "log", "-1", "--format=%ct"], cwd=ROOT, text=True, capture_output=True, timeout=60,  # noqa: S607
-        )
-        env["SOURCE_DATE_EPOCH"] = stamp.stdout.strip() or "0"
-    return env
+    return epoch_env(dict(os.environ))
 
 
 def count_tests_junit(report_path: Path) -> dict:

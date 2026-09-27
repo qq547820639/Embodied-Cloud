@@ -104,6 +104,16 @@
 ＋四个 `integration_*` 的状态与 note），也就是 CI 那条 `git diff --exit-code` 会随机红。
 遮罩自身也带判据：`report_split` 要求声明的每个环境字段真在报告里、且遮完至少剩 4 项门禁。
 
+### 7.2 `make verify-artifacts`：checksum 里哪一行可复算，由探针说了算
+
+`dist/checksums.txt` 记 wheel / sdist / sbom 的 SHA-256。第三方拿到那行 sha 能不能自己重建出同样的字节？
+`make verify-artifacts` 每类产物各建两次（每次一份新目录，避免读到上一次的残留）比 sha，全等才写
+`recomputable=yes` 进 `dist/checksums.manifest`；发布链里它排在 checksums **之前**，主张与实测不一致
+（说反了、清单缺项、有项没测）退出码非 0。本轮读数：`wheel=yes`（时间基准取 HEAD 提交时间，
+`SOURCE_DATE_EPOCH=1790482819` 下两建同为 `4259babd17…`）、`sdist=no`（`41dda386f2…` vs `174db2b484…`）。
+两个方向的偏离都要人来翻：上游哪天把 sdist 的时间夹住了，清单还写着 `no` 同样会红——那不是故障，
+是在催你把主张改成实测。
+
 | 档位 | 命令 | 前置（本机实测） |
 |---|---|---|
 | PostgreSQL 真并发 | `make test-pg` | docker daemon + `postgres:16-alpine` 缓存 + `.[postgres]` |

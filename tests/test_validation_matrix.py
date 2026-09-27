@@ -335,8 +335,18 @@ def test_build_call_sites_pin_the_epoch_in_makefile_and_the_gate() -> None:
     )
     assert make.count("%ct") == 1, f"Makefile 里 git 时间口径出现 {make.count('%ct')} 次，取值口径不唯一"
     assert make.index("SOURCE_DATE_EPOCH ?= ") < make.index("build:"), "export 必须早于 build 目标"
-    assert '"SOURCE_DATE_EPOCH"' in src and "%ct" in src, (
-        "validate 直接跑（不走 make）时没自己钉 epoch：同一条 build=PASS 会因调用方式不同而不同"
+    # Python 侧的口径搬进了 scripts/build_env.py（validate 与探针共用一份实现）；
+    # Makefile 那一条是另一种语言，只能按"两条命令逐字相同"对账——否则一边改成 %cI
+    # （带时区的 ISO 时间）就再也对不上了，而两边都"看起来在钉时间"。
+    assert "from build_env import epoch_env" in src and "epoch_env(" in src, (
+        "validate 不再走共享时间口径：两条路径会各算各的秒"
+    )
+    helper = (ROOT / "scripts" / "build_env.py").read_text(encoding="utf-8")
+    mk_cmd = re.search(r"\$\(shell git log (\S+) (\S+)", make)
+    py_cmd = re.search(r'\["git", "log", "([^"]+)", "([^"]+)"\]', helper)
+    assert mk_cmd and py_cmd, f"读不到两侧的命令：make={mk_cmd} python={py_cmd}"
+    assert mk_cmd.groups() == py_cmd.groups(), (
+        f"两侧口径不同：make {mk_cmd.groups()} vs python {py_cmd.groups()}"
     )
     # 反证：摘掉 export，判据必须翻红
     assert not re.search(r"^export SOURCE_DATE_EPOCH$", make.replace("export SOURCE_DATE_EPOCH\n", ""), re.MULTILINE)

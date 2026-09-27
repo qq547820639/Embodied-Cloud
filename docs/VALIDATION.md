@@ -6,7 +6,7 @@
 
 | Gate | 状态 | 明细 |
 |---|---|---|
-| Test collected | PASS | 574 |
+| Test collected | PASS | 582 |
 | Test run | PASS | failed=0 |
 | lint | PASS |  |
 | typecheck | PASS |  |

@@ -149,6 +149,12 @@ else
   say "警告: 未找到 *.tar.gz，跳过 archive 清洁度检查" >&2
 fi
 
+# ---------- 2.9 产物可复算性探针（先于 checksums） ----------
+step "make verify-artifacts（每类产物各建两次；sha 全等才对第三方声明 recomputable=yes）"
+# 排在 checksums 之前：那行 sha 一旦发出去就成了主张，主张必须是被核过的而不是事后补的。
+# 探针自己写 dist/checksums.manifest；主张与实测不一致时退出码非 0，发布链在这里断。
+make verify-artifacts
+
 # ---------- 3. dist/checksums.txt ----------
 step "生成 dist/checksums.txt"
 hash_cmd="sha256sum"

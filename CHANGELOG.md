@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 574 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 582 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -61,6 +61,27 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   防「只要池里有在飞的格就永远不开格」那种假合规）。
 - **一条如实的边界**：`make warm-capacity` 的两遍之间有 drain（worker 先跑完才开第二遍），
   所以取证台读不出这个形状；这轮的证据只来自常驻用例。门禁目录新开 G0.45。
+
+### 产物 sha 从装饰变成有牙的主张（N-36）
+- **缺口**：`dist/checksums.txt` 记 wheel / sdist 的 SHA-256，但没有任何东西核过"第三方能不能重建出同一份字节"。
+  N-34 把时间钉住之后，wheel 已可复算、sdist 仍漂 —— 如果只把这句话写在文档里，它就还是主张。
+- **做法**：`scripts/artifact_reproducibility.py`（`make verify-artifacts`）每类产物各建两次（每次一份新目录，
+  避免读到上一次的残留），sha 全等才写 `recomputable=yes`；`check()` 把"清单声明 ↔ 本轮实测"双向对账：
+  把不可复算的说成可复算＝假承诺，上游修好后清单还写着 no＝过期悲观，两种偏离都红。
+  排在 `dist/checksums.txt` **之前**执行，主张先被核过再被发布。
+- **一手读数**（同一棵树，`SOURCE_DATE_EPOCH=1790482819`）：`wheel 4259babd17 == 4259babd17`、
+  `sdist 41dda386f2 != 174db2b484` ⇒ 清单 `wheel=yes / sdist=no`，探针退出码 0。
+- **换不换后端？量过再答**：同一口径下 `uv build --no-build-isolation`（setuptools 同后端）sdist 仍漂
+  （`70f43f10…` vs `8fd483bb…`）；hatchling 也漂（`cdd04043…` vs `d136bc11…`）；
+  **flit_core 两者都定**（tar `0dd4912e…` 两次相同）——但它只认"与 `project.name` 同名的单个模块/包"，
+  本仓发行的是 `app*` + `edge_agent*` 两个顶层包，不是一处改名能迁的模型 ⇒ 不换后端，改成让主张可被推翻。
+- **时间口径收成一份**：`git log -1 --format=%ct` 原先在 Makefile 与 validate 各写一遍，靠文本判据兜着
+  （把重复当事实用）；现在抽到 `scripts/build_env.py::epoch_env`，常驻判据钉"`%ct` 在 `scripts/` 下只出现一次"
+  ＋"Makefile 那条 shell 与它逐字相同"。语义照写清：**时间基准取 HEAD 提交时间 ⇒ 同一个 commit 可复算，
+  换 commit（哪怕只改文档）sha 会变**。
+- **探针第一次真跑就抓到我自己的 bug**：清单按文件名索引、探针按类别聚合，两个键空间直接对账，
+  每轮报"主张缺席 + 清单里有、本轮没测"；补了显式的 `by_filename()` 翻译并给它配反证
+  （交叉对账必然报 4 条）。新常驻判据 8 支，门禁目录 G0.46。
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
