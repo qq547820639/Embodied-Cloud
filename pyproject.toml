@@ -98,6 +98,10 @@ ignore = ["BLE001", "S101", "RUF001", "RUF002", "RUF003"]
 [tool.ruff.lint.per-file-ignores]
 # S105: 测试中的固定测试数据（password/token）用于断言脱敏行为，非真实凭据。
 "tests/*" = ["S105"]
+# 取证台在 import app/tests 之前必须先把仓库根挂上 sys.path（常驻判据
+# tests/test_warm_pool_labs.py 要求"直接 python scripts/… 也要能跑"），
+# 于是它的模块级 import 必然跟在那条语句之后 —— 这是形状要求，不是随手加的豁免。
+"scripts/warm_pool_capacity_lab.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.12"

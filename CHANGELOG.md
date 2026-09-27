@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 582 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 586 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -82,6 +82,23 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - **探针第一次真跑就抓到我自己的 bug**：清单按文件名索引、探针按类别聚合，两个键空间直接对账，
   每轮报"主张缺席 + 清单里有、本轮没测"；补了显式的 `by_filename()` 翻译并给它配反证
   （交叉对账必然报 4 条）。新常驻判据 8 支，门禁目录 G0.46。
+
+### 两张取证台补上常驻读者，顺带把 N-35 的形状搬到台面上（N-37）
+- **动机**：`make warm-sla`（N-28 的读数出处）与 `make warm-capacity`（N-29 的读数出处）被文档与登记表反复引用，
+  但**没有任何常驻用例跑过它们**。文档引用一个坏掉的台子，比没有台子更糟。
+- **补读者当场撞出两个真缺陷**：
+  ① 直接 `python scripts/warm_pool_capacity_lab.py` 就 `ModuleNotFoundError: No module named 'tests'`
+  ——只有 `make warm-capacity` 的 `-m scripts.…` 形状活着；台子自己把仓库根挂上 `sys.path`，
+  判据两种形状都跑；
+  ② SLA 台把"这次交付走的是 claim 而不是新建""服务端直方图有没有留下样本""READY 少了一格没有"
+  三条读数**只 print 不记 rc**，量的根本不是 claim 也照样退 0 —— 现在折进 rc，
+  并且配一支必开对照 `WARM_SLA_POOL_SIZE=0 ⇒ overall=FAIL 且退出码非 0`。
+- **N-35 的第二处读数**：容量台新增"两遍之间不排空 worker"的形状（`drain_between=False`），
+  跨遍窗口第一次在台子上可见。摘掉跨遍预留实测 **建过 14 行 / 舰队 8 张卡**，装上 8 行 / 8 卡；
+  两种形状都要求 `provision_failed == 0`、`warm_tombstones == 0`，生产默认 size=1 在 drained 形状
+  必须 `ready == requested_slots`（闸门不许误伤）。这条把 N-35 行里"取证台读不出这个形状"那句更正掉了。
+- 常驻判据 4 支（`tests/test_warm_pool_labs.py`），门禁目录 G0.47；
+  `pyproject.toml` 给容量台加了一条写明理由的 `E402` 豁免（它的 sys.path 引导必须早于 import）。
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到

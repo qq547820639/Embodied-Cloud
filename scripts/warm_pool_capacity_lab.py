@@ -20,10 +20,20 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+
+# 本台子有两种活法：`make warm-capacity` 走 `-m scripts.…`（仓库根在 sys.path 上），
+# 而人照着源码注释直接 `python scripts/warm_pool_capacity_lab.py` 时 sys.path[0] 是 scripts/，
+# `import tests.…` 会当场 ModuleNotFoundError（本轮实测过）。常驻判据
+# tests/test_warm_pool_labs.py::test_capacity_lab_runs_from_both_entry_points 两种写法都跑，
+# 所以这里自己把仓库根挂上，不把"能跑"绑在某一种调用形状上。
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
@@ -81,7 +91,20 @@ def _drain(worker: OperationWorker, ticks: int = 40) -> int:
     return ticks
 
 
-def run_size(size: int, rounds: int = 4, db_name: str = "warm-capacity", reserve: int = 0) -> dict:
+def run_size(
+    size: int,
+    rounds: int = 4,
+    db_name: str = "warm-capacity",
+    reserve: int = 0,
+    drain_between: bool = True,
+) -> dict:
+    """一种形状的读数。
+
+    `drain_between=True`（原有形状）：两遍 maintain 之间把 worker 排空，量的是
+    "池追上目标之后与舰队的关系"。
+    `drain_between=False`（积压形状，N-35 才需要）：两遍 maintain 之间**不**排空，
+    于是补位仍在队列里、卡还没离开 AVAILABLE —— 这正是闸门只算一遍账时会超卖的形状。
+    """
     path = ROOT / f"{db_name}-{size}-{uuid.uuid4().hex[:6]}.db"
     engine = create_engine(f"sqlite:///{path}")
     Base.metadata.create_all(engine)
@@ -104,6 +127,9 @@ def run_size(size: int, rounds: int = 4, db_name: str = "warm-capacity", reserve
             total_cards = len(FLEET)
             for _ in range(rounds):
                 manager.maintain(db)
+                if not drain_between:
+                    manager.maintain(db)  # 第二遍：补位还在队列里，卡仍 AVAILABLE
+                    break
                 _drain(OperationWorker(Factory, orchestrator))
                 manager.maintain(db)  # 收割 PREWARMING → READY/FAILED
                 _drain(OperationWorker(Factory, orchestrator))  # 清理 FAILED 的 DESTROY
@@ -183,7 +209,9 @@ def run_size(size: int, rounds: int = 4, db_name: str = "warm-capacity", reserve
             # 交互式请求：一次只问一个、问完就释放，否则测的是"5 个并发能不能同时塞进 8 张卡"
             # 而不是"池占着卡的时候用户起不起得来"（第一版就是这个错，读数 3/5 与池无关）。
             interactive = []
-            for template in templates:
+            # 积压形状里不测交互式：那时卡还没被真占住（补位仍在队列里），
+            # "用户照样起得来"是假读数，不如不报。
+            for template in (templates if drain_between else []):
                 probe = WorkspaceOrchestrator(Factory, provider, workspace_root)
                 try:
                     ws = probe.create(
@@ -204,6 +232,7 @@ def run_size(size: int, rounds: int = 4, db_name: str = "warm-capacity", reserve
                 except Exception as exc:
                     interactive.append({"template": template.id, "ok": False, "why": str(exc)[:70]})
             return {
+                "shape": "drained" if drain_between else "backlog",
                 "warm_pool_size": size,
                 "reserve_slots": reserve,
                 "enabled_templates": len(templates),
@@ -239,17 +268,23 @@ def main() -> int:
         reserves = reserves * len(sizes)
     assert len(reserves) == len(sizes), f"--reserve 要给每个 size 一个数：{reserves} vs {sizes}"
     rows = [run_size(s, reserve=r) for s, r in zip(sizes, reserves, strict=True)]
+    # 第二种形状：两遍 maintain 之间**不**排空 worker。N-35 那类"闸门只算一遍账"的
+    # 超卖只在这一段窗口里露出来（原先这台子两遍之间都 drain，等于替被测者关上了窗口）。
+    backlog = [
+        run_size(s, rounds=1, reserve=r, drain_between=False)
+        for s, r in zip(sizes, reserves, strict=True)
+    ]
     if args.json:
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        print(json.dumps(rows + backlog, ensure_ascii=False, indent=2))
         return 0
     header = (
-        f"{'size':>4} {'预留':>4} {'需求位':>6} {'卡数':>4} {'READY':>6} {'建过的行':>8} "
+        f"{'形状':>8} {'size':>4} {'预留':>4} {'需求位':>6} {'卡数':>4} {'READY':>6} {'建过的行':>8} "
         f"{'tombstone':>9} {'provision失败':>13} {'剩余空卡':>8} {'交互可起':>8}"
     )
     print(header)
-    for r in rows:
+    for r in rows + backlog:
         print(
-            f"{r['warm_pool_size']:>4} {r['reserve_slots']:>4} {r['requested_slots']:>6} "
+            f"{r['shape']:>8} {r['warm_pool_size']:>4} {r['reserve_slots']:>4} {r['requested_slots']:>6} "
             f"{r['fleet_cards']:>4} "
             f"{r['ready']:>6} {r['warm_rows_created']:>8} {r['warm_tombstones']:>9} "
             f"{r['provision_failed']:>13} {r['free_cards_after']:>8} "

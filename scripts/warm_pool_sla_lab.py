@@ -47,6 +47,17 @@ def _metric_line(text: str, name: str, needle: str = 'template_id="cartpole"') -
     return f"(没有 {name} 的 cartpole 行)"
 
 
+def _metric_value(text: str, name: str, needle: str = 'template_id="cartpole"') -> float | None:
+    """取指标行的数值；行不存在或不是数字都返回 None（调用方按读数失效处理）。"""
+    line = _metric_line(text, name, needle)
+    if line.startswith("(没有"):
+        return None
+    try:
+        return float(line.rsplit(None, 1)[-1])
+    except ValueError:
+        return None
+
+
 def _ready_count() -> int:
     with SessionFactory() as db:
         return sum(m.get(WarmPoolState.READY.value, 0) for m in warm_pool.pool_metrics(db).values())
@@ -101,7 +112,8 @@ def main() -> int:
         rc |= 0 if over == 422 else 1
 
         print("== 2) 一次真 claim：客户端计时 vs 服务端直方图")
-        print(f"   补池后 READY = {_fill_pool()}")
+        ready_before = _fill_pool()
+        print(f"   补池后 READY = {ready_before}")
         import time
 
         started = time.monotonic()
@@ -117,11 +129,20 @@ def main() -> int:
             f"，客户端 {client_ms:.1f} ms，交付行 name={body.get('name')} status={body.get('status')}"
         )
         hit = created.status_code == 201 and str(body.get("name", "")).startswith("warm-")
-        print(f"   走的是 claim 而不是新建：{'是' if hit else '否（读数请当环境异常处理）'}")
         metrics = client.get("/metrics").text
-        print(f"   {_metric_line(metrics, 'warm_pool_claim_seconds_count')}")
+        samples = _metric_value(metrics, "warm_pool_claim_seconds_count")
+        ready_after = _ready_count()
+        # 三条读数一起记进 rc：走没走 claim、服务端有没有留下这次 claim 的样本、
+        # 池子是不是真的少了一格。原先只 print 不记账，于是"这次量的根本不是 claim"
+        # 也能打着 PASS 退 0 —— 一台取证台的 rc 必须承载它自己报出的数。
+        claim_ok = hit and samples is not None and samples >= 1 and ready_after == ready_before - 1
+        print(f"   走的是 claim 而不是新建：{'是' if hit else '否'}")
+        print(f"   {_metric_line(metrics, 'warm_pool_claim_seconds_count')}"
+              f"（本次 claim 至少要有一格样本）")
         print(f"   {_metric_line(metrics, 'warm_pool_claim_seconds_sum')}")
-        print(f"   剩余 READY = {_ready_count()}")
+        print(f"   READY {ready_before} → {ready_after}（交付一格应少一格）")
+        print(f"   这一段判据：{'OK' if claim_ok else 'FAIL'}")
+        rc |= 0 if claim_ok else 1
 
         print(f"== 3) 冷启动基准 iterations={BENCHMARK_MAX_ITERATIONS}（admin）")
         bench = client.get(
