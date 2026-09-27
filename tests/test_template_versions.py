@@ -538,3 +538,32 @@ def test_record_digest_then_create_pins_it(monkeypatch, tmp_path):
 
     orchestrator._start(wid)
     assert DIG_A in " ".join(provider.runs[0]), f"docker argv 里没有 digest：{provider.runs[0]}"
+
+
+def test_advertised_vram_equals_what_the_allocator_demands() -> None:
+    """`Template` 的两列显存不许各说各话：UI 宣传的那一列必须是分配器真的会要求的那一列。
+
+    `gpu_requirement_gb` 由 `scheduler.allocate` 挑卡用；`recommended_vram_gb` 是展示列
+    （`app/static/app.js` 的卡片上写的就是它）。本仓没有写模板的 API，两列都只由
+    `app/seed.py` 填 —— 所以判据落在**落库后的行**上（不是 spec 字典：字典里少写一个键时，
+    默认值会让两列各自落到 16，只有真行才反映模型默认）。第二层判据管住消费方：
+    容量逻辑只许读前者，读回展示列就红。
+    """
+    with Factory() as db:
+        seed_templates(db)
+        rows = list(db.execute(select(Template.id, Template.gpu_requirement_gb, Template.recommended_vram_gb)))
+        assert len(rows) >= 5, f"seed 的模板数少了，本判据的分母不可信：{len(rows)}"
+        bad = [(i, got, shown) for i, got, shown in rows if int(got) != int(shown)]
+        assert not bad, f"这些模板对用户宣传的显存与分配器实际要求不同：{bad}"
+
+    warmpool = Path("app/services/warmpool.py").read_text(encoding="utf-8")
+    # 判据走 AST 而不是全文搜串：上一版按文本判"文件里不许出现这个词"，结果被
+    # 我自己解释这一列的注释挡了（注释里当然会提到那个列名）。
+    attrs = {node.attr for node in ast.walk(ast.parse(warmpool)) if isinstance(node, ast.Attribute)}
+    assert "recommended_vram_gb" not in attrs, (
+        "池的容量逻辑又在读展示列：闸门会按一个分配器不会遵守的数放行/拦截"
+    )
+    mutated = warmpool.replace("int(template.gpu_requirement_gb)", "int(template.recommended_vram_gb)", 1)
+    assert mutated != warmpool
+    back = {n.attr for n in ast.walk(ast.parse(mutated)) if isinstance(n, ast.Attribute)}
+    assert "recommended_vram_gb" in back, "AST 判据读不到被改回去的读法：这条是恒真的"

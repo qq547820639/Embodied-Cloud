@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 590 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 595 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -118,6 +118,21 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 顺带修掉一处自己造成的语法断裂：给 `validate_release.py` 插函数时把
   `def doc_row_order_discrepancies()` 的换行吃掉，`py_compile` 当场拒绝 —— 记账脚本改仓库代码时
   "改完立刻编译/加载一次"这一步不能省（本轮第三次被自家工具抓到，前两数是 lint 与探针）。
+
+### 启动指标分族、容量闸门改读分配器那一列（N-39／N-40）
+- **两件事同源：池的闸门和运维的告警都在读一个"给人看的数"**。`Template` 上有两列显存 ——
+  `gpu_requirement_gb`（挑卡用）与 `recommended_vram_gb`（UI 卡片显示），池的补位闸门与
+  在飞预留都读了后者；而面向用户的启动指标也不区分"用户按下的启动"与"池自己开的格"。
+- **一手读数**：1 张卡、size=1，交互请求先抢走卡、再让 worker 跑池内那一格 ——
+  `workspace_launch_total` 增量 **+2**，池内失败还落在 `workspace_launch_failed_total`；
+  而 `docs/OPERATIONS.md` 对这条指标的告警口径是"增量 >0 持续 10min"。
+  闸门侧：真需求 24 / 展示 8 / 一张 8 GiB 卡时改前 `created: 1`，即开出一格必然 `No GPU available` 的空转。
+- **改法**：指标按 `warm_pool_state` 分族（`warm_pool_prewarm_total/_failed_total/_seconds`，
+  判据两头都断言）；闸门两处改读 `gpu_requirement_gb`（正反两支 + seed 落库行两列相等 + 消费方 AST 判据）。
+- **`/metrics` 清单机器可查了**：`docs/ARCHITECTURE.md` §8 从缩写式（`workspace_launch_total/failed/seconds`）
+  改成逐个全名，新判据拿 `app/metrics.py` 的 AST 声明逐项对账 —— 一上线就抓到 11 个族没写进文档。
+- 自纠两处：AST 判据第一版把函数名写成 `node.func.name`（`ast.Name` 只有 `.id`）当场 `AttributeError`；
+  "文件里不许出现这个列名"的文本判据被我自己解释它的注释挡了，改成走 AST 属性集合。
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到

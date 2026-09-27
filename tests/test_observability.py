@@ -5,9 +5,11 @@
 - 响应头携带 X-Request-Id。
 """
 
+import ast
 import io
 import json
 import logging
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -111,3 +113,27 @@ def test_request_id_header():
         assert resp.status_code == 200
         assert "X-Request-Id" in resp.headers
         assert resp.headers["X-Request-Id"]
+
+
+def test_every_prometheus_metric_family_is_documented() -> None:
+    """`app/metrics.py` 里声明的每一个指标族，都必须写在架构文档 §8 的清单里。
+
+    §8 原先写的是缩写（"workspace_launch_total/failed/seconds"），这种写法既机器查不了、
+    也会在新增一族时悄悄漏掉 —— 本轮加 warm_pool_prewarm_* 三族时就是这样：
+    代码有了、文档与告警口径没有。改成逐个全名核对。
+    """
+    tree = ast.parse(Path("app/metrics.py").read_text(encoding="utf-8"))
+    names = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"Counter", "Gauge", "Histogram"}
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    }
+    assert len(names) >= 12, f"从代码里只解析出 {len(names)} 个指标族，判据的分母不可信：{sorted(names)}"
+    doc = Path("docs/ARCHITECTURE.md").read_text(encoding="utf-8")
+    section = doc.split("## 8. 可观测性", 1)[1].split("\n## ", 1)[0]
+    missing = sorted(name for name in names if name not in section)
+    assert not missing, f"这些指标族没写进 §8：{missing}"

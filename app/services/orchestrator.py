@@ -185,13 +185,10 @@ class WorkspaceOrchestrator:
         workspace.error_message = None
         db.commit()
         # §25：launch 指标（含时长观测）
-        from ..metrics import (
-            record_workspace_launch_duration,
-            record_workspace_launch_failure,
-            record_workspace_launch_start,
-        )
+        from ..metrics import record_launch_duration, record_launch_failure, record_launch_start
 
-        record_workspace_launch_start(template.id, workspace.provider)
+        # 分族：池内补位不是用户按下的启动（N-39，理由见 app/metrics.py 的注释）
+        record_launch_start(workspace, template.id, workspace.provider)
         launch_started = time.monotonic()
         try:
             # 1) 原子分配 GPU（GpuScheduler 是唯一 GPU reservation 决策入口）
@@ -260,10 +257,10 @@ class WorkspaceOrchestrator:
             workspace.status = WorkspaceStatus.RUNNING.value
             workspace.started_at = utcnow()
             workspace.stopped_at = None
-            record_workspace_launch_duration(template.id, time.monotonic() - launch_started)
+            record_launch_duration(workspace, template.id, time.monotonic() - launch_started)
         except Exception as exc:
             # 盲捕获是有意设计：provider/scheduler 边界任意异常不得泄漏到 API（ADR 0002）
-            record_workspace_launch_failure(template.id, workspace.provider)
+            record_launch_failure(workspace, template.id, workspace.provider)
             self._fail(db, workspace, str(exc), terminal=_failure_is_terminal(operation))
             raise
         db.commit()

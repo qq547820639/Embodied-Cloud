@@ -26,7 +26,8 @@
 
 | 指标 | 告警建议 |
 |---|---|
-| workspace_launch_failed_total 增量 | >0 持续 10min |
+| workspace_launch_failed_total 增量 | >0 持续 10min（**只含用户按下的启动**：池内补位的失败记在 `warm_pool_prewarm_failed_total`，见 N-39） |
+| warm_pool_prewarm_failed_total 增量 | 持续 >0 说明池在反复开"注定失败"的格（容量不够或 `warm_pool_size` 与舰队不匹配），不是用户故障 |
 | workspace_running / gpu_allocated 失衡 | allocated > running + 5 |
 | gpu UNHEALTHY 数量 | >0 |
 | API 5xx 率 | >1% 持续 10min |

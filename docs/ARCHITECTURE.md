@@ -166,9 +166,19 @@ TLS 网关。
 
 ## 8. 可观测性
 
-- `/metrics` Prometheus 格式（workspace_launch_total/failed/seconds、workspace_running、
-  gpu_allocated、gpu_seconds、template_launch_total/failure_total、stream_session_total/
-  failure_total、warm_pool_ready/claim_total/claim_failed）
+- `/metrics` Prometheus 格式。逐个全名列出（`tests/test_observability.py` 会把这份清单与
+  `app/metrics.py` 里声明的族逐项对账，缩写式写法机器查不了）：
+  - 面向用户的启动：`workspace_launch_total`、`workspace_launch_failed_total`、
+    `workspace_launch_seconds`、`template_launch_total`、`template_failure_total`
+  - 池/资源水位：`workspace_running`、`gpu_allocated`、`gpu_seconds_total`、
+    `warm_pool_ready`
+  - warm pool 领取：`warm_pool_claim_total`、`warm_pool_claim_failed`、`warm_pool_claim_seconds`
+  - warm pool 自身补位（N-39，与上面的"用户启动"分族）：`warm_pool_prewarm_total`、
+    `warm_pool_prewarm_failed_total`、`warm_pool_prewarm_seconds`
+  - 流媒体：`stream_session_total`、`stream_failure_total`
+- 为什么池内补位要单独一族：`warm_pool_state` 非空的 runtime 是控制面自己开的格，它与交互式
+  请求抢同一个原子分配器、输掉是设计内的行为；记进 `workspace_launch_*` 会同时算错
+  用户启动量、失败率与 `workspace_launch_seconds` 的 P50/P95（后两个正是告警与 SLA 的读数面）。
 - JSON 结构化日志 + request_id 中间件（X-Request-Id 响应头）
 - 前端 `/api/health` 版本 pill + provider 状态。
 

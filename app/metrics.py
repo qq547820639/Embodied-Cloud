@@ -6,6 +6,8 @@ workspace_running / gpu_allocated / gpu_seconds / template_launch_total /
 template_failure_total / stream_session_total / stream_failure_total
 """
 
+from typing import Any
+
 from prometheus_client import Counter, Gauge, Histogram
 
 WORKSPACE_LAUNCH_TOTAL = Counter(
@@ -77,6 +79,27 @@ WARM_POOL_CLAIM_SECONDS = Histogram(
     ["template_id"],
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 15, 30, 60),
 )
+# 池内那一格自己的启动族（N-39）。warm pool 的补位是内部行为，它也会失败——与交互式
+# 请求抢同一个原子分配器时谁先到谁得，输掉那格只是浪费一次尝试。把这些记进
+# workspace_launch_* 会同时算错三件事：用户启动量、启动失败率（docs/OPERATIONS.md
+# 对 workspace_launch_failed_total 的告警口径是"增量 >0 持续 10min"）、
+# 以及 workspace_launch_seconds 的 P50/P95（PRODUCT_SPEC 的 SLA 判据用的就是它）。
+WARM_POOL_PREWARM_TOTAL = Counter(
+    "warm_pool_prewarm_total",
+    "Total provisioning attempts made by the warm pool itself",
+    ["template_id"],
+)
+WARM_POOL_PREWARM_FAILED_TOTAL = Counter(
+    "warm_pool_prewarm_failed_total",
+    "Total warm pool provisioning attempts that failed",
+    ["template_id"],
+)
+WARM_POOL_PREWARM_SECONDS = Histogram(
+    "warm_pool_prewarm_seconds",
+    "Duration of warm pool provisioning attempts",
+    ["template_id"],
+    buckets=(0.1, 1, 5, 10, 15, 30, 60, 120, 300),
+)
 
 
 def record_workspace_launch_start(template_id: str, provider: str) -> None:
@@ -99,3 +122,37 @@ def record_warm_pool_claim_duration(template_id: str, seconds: float) -> None:
 
 def record_gpu_seconds(seconds: int) -> None:
     GPU_SECONDS.inc(seconds)
+
+
+def is_pool_runtime(workspace: Any) -> bool:
+    """这一格是不是 warm pool 自己开的（而不是用户按下的启动）。
+
+    只认一个字段：池内 runtime 一定带 `warm_pool_state`（PREWARMING/READY/DRAINING…）。
+    不用 `user_id is None` 判 —— 交互式请求也可以无归属（取证台的 probe 就是），
+    那样会把用户的启动错分进池的族，两族同时算错。
+    """
+    return getattr(workspace, "warm_pool_state", None) is not None
+
+
+def record_launch_start(workspace: Any, template_id: str, provider: str) -> None:
+    """一次 provision 开始：按"谁发起的"分族计数。"""
+    if is_pool_runtime(workspace):
+        WARM_POOL_PREWARM_TOTAL.labels(template_id=template_id).inc()
+        return
+    record_workspace_launch_start(template_id, provider)
+
+
+def record_launch_failure(workspace: Any, template_id: str, provider: str) -> None:
+    if is_pool_runtime(workspace):
+        WARM_POOL_PREWARM_FAILED_TOTAL.labels(template_id=template_id).inc()
+        return
+    record_workspace_launch_failure(template_id, provider)
+
+
+def record_launch_duration(workspace: Any, template_id: str, seconds: float) -> None:
+    """耗时观测同样分族：`workspace_launch_seconds` 的 P50/P95 是 SLA 判据的读数面，
+    池内补位的耗时不是用户感受到的启动时间。"""
+    if is_pool_runtime(workspace):
+        WARM_POOL_PREWARM_SECONDS.labels(template_id=template_id).observe(seconds)
+        return
+    record_workspace_launch_duration(template_id, seconds)

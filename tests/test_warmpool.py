@@ -427,12 +427,22 @@ def _warm_rows(db, template_id: str) -> int:
     )
 
 
+def _vram(db, template_id: str, gib: int) -> None:
+    """两列一起设：分配器读 gpu_requirement_gb，展示列 recommended_vram_gb 只给人看。
+
+    只设展示列是本轮抓到的缺陷形状本身（池闸门当时读的就是它），所以夹具必须
+    按"真需求"设，另设一列只为顺手覆盖"两列一致"这一常见情形。
+    """
+    row = db.get(Template, template_id)
+    assert row is not None
+    row.gpu_requirement_gb = gib
+    row.recommended_vram_gb = gib
+
+
 def _two_templates(db, small_gb: int = 8, big_gb: int = 24) -> None:
     for tid, gib in (("small", small_gb), ("big", big_gb)):
         _make_template(db, tid)
-        row = db.get(Template, tid)
-        assert row is not None
-        row.recommended_vram_gb = gib
+        _vram(db, tid, gib)
     db.commit()
 
 
@@ -488,7 +498,7 @@ def test_over_reservation_is_reported_not_silently_emptying_the_pool(db_factory,
 
     with db_factory() as db:
         _make_template(db, "cartpole")
-        db.get(Template, "cartpole").recommended_vram_gb = 8
+        _vram(db, "cartpole", 8)
         _seed_cards(db, [48, 48])
         db.commit()
         manager = _make_manager(db_factory, warm_pool_size=2, warm_pool_reserve_slots=3)
@@ -503,7 +513,7 @@ def test_over_reservation_is_reported_not_silently_emptying_the_pool(db_factory,
 def test_reserve_slot_holds_one_card_back_for_interactive(db_factory):
     with db_factory() as db:
         _make_template(db, "cartpole")
-        db.get(Template, "cartpole").recommended_vram_gb = 8
+        _vram(db, "cartpole", 8)
         _seed_cards(db, [48, 48])
         db.commit()
         manager = _make_manager(db_factory, warm_pool_size=2, warm_pool_reserve_slots=1)
@@ -571,9 +581,113 @@ def test_reserve_zero_keeps_the_old_behind_no_headroom(db_factory):
     """
     with db_factory() as db:
         _make_template(db, "cartpole")
-        db.get(Template, "cartpole").recommended_vram_gb = 8
+        _vram(db, "cartpole", 8)
         _seed_cards(db, [48, 48])
         db.commit()
         manager = _make_manager(db_factory, warm_pool_size=2, warm_pool_reserve_slots=0)
         manager.maintain(db)
         assert _warm_rows(db, "cartpole") == 2
+
+
+def test_pool_runtimes_do_not_pollute_the_user_facing_launch_metrics(db_factory):
+    """池内那一格的启动与失败，不许混进面向用户的启动指标族。
+
+    形状：1 张卡 + 8 GiB 模板；池先开一格（PROVISION 只在队列里，卡还没占上），
+    交互请求随后把这张卡拿走 —— 真分配器是行锁的，谁先到谁得（用户优先，这是对的）。
+    但池里那一格接下来注定失败，而失败今天记进 `workspace_launch_failed_total`，
+    而 `docs/OPERATIONS.md` 的告警口径写着"该指标增量 >0 持续 10min"——
+    设计内的容量竞争于是会给运维报一次"用户启动在失败"。
+    """
+    from prometheus_client import REGISTRY
+
+    labels = {"template_id": "cartpole", "provider": "mock"}
+
+    def counter(name: str) -> float:
+        return REGISTRY.get_sample_value(name, labels) or 0.0
+
+    def hist_count() -> float:
+        return (
+            REGISTRY.get_sample_value("workspace_launch_seconds_count", {"template_id": "cartpole"}) or 0.0
+        )
+
+    def pool_counter(name: str) -> float:
+        return REGISTRY.get_sample_value(name, {"template_id": "cartpole"}) or 0.0
+
+    with db_factory() as db:
+        _make_template(db, "cartpole")
+        card = db.get(Template, "cartpole")
+        # 两列都要设：分配器读 gpu_requirement_gb，池闸门读 recommended_vram_gb（这个分裂本身
+        # 由 tests/test_observability.py 的对账判据管，见 N-40）
+        card.gpu_requirement_gb = 8
+        card.recommended_vram_gb = 8
+        _seed_cards(db, [8])
+        db.commit()
+        manager = _make_manager(db_factory, warm_pool_size=1)
+        start0 = counter("workspace_launch_total")
+        fail0 = counter("workspace_launch_failed_total")
+        hist0 = hist_count()
+        prewarm0 = pool_counter("warm_pool_prewarm_total")
+        prewarm_fail0 = pool_counter("warm_pool_prewarm_failed_total")
+
+        manager.maintain(db)  # 池开一格并异步入队（故意不 drain）
+        template = db.get(Template, "cartpole")
+        interactive = manager.orchestrator.create(
+            db, template, name="interactive", user_id=None, organization_id=None
+        )
+        manager.orchestrator._start(interactive.id)  # 与取证台同一形状（内部方法，测试里直接用）
+        assert counter("workspace_launch_total") - start0 == 1, "用户自己那次启动没被计进面向用户的指标"
+        assert hist_count() - hist0 == 1, "用户那次启动没进耗时直方图"
+
+        # 现在才让 worker 跑：池里那一格去抢已被交互请求占走的卡
+        worker = OperationWorker(db_factory, manager.orchestrator)
+        worker.tick_once()
+        assert counter("workspace_launch_total") - start0 == 1, (
+            "池内 runtime 的开格被计进 workspace_launch_total："
+            f"实测 +{counter('workspace_launch_total') - start0}（含池内那次），"
+            "运维看见的是用户启动量凭空多一格"
+        )
+        assert counter("workspace_launch_failed_total") - fail0 == 0, (
+            f"池内那一格失败被记进 workspace_launch_failed_total +"
+            f"{counter('workspace_launch_failed_total') - fail0}："
+            "docs/OPERATIONS.md 对这条指标的告警口径是增量>0，设计内的容量竞争会 page 人"
+        )
+        assert pool_counter("warm_pool_prewarm_total") - prewarm0 == 1, (
+            "池内启动没有自己的计数：修了混算也读不到池的行为"
+        )
+        assert pool_counter("warm_pool_prewarm_failed_total") - prewarm_fail0 >= 1, "池内失败没落进池自己的指标族"
+
+
+def test_the_capacity_gate_reads_the_field_the_allocator_demands(db_factory):
+    """闸门预扣的显存必须来自**分配器真正用的那一列**，不是给人看的那一列。
+
+    `Template` 上有两列：`gpu_requirement_gb`（`scheduler.allocate` 用它挑卡）与
+    `recommended_vram_gb`（展示列）。池闸门原先读后者 —— 两列一旦不一致，闸门就在按
+    一个分配器不会遵守的数放行：展示列偏小时开出注定失败的空转格。
+    """
+    with db_factory() as db:
+        _make_template(db, "cartpole")
+        _vram(db, "cartpole", 8)
+        db.get(Template, "cartpole").gpu_requirement_gb = 24  # 真需求 24，宣传 8
+        _seed_cards(db, [8])
+        db.commit()
+        stats = _make_manager(db_factory, warm_pool_size=1).maintain(db)
+        assert stats["created"] == 0 and stats["skipped_no_capacity"] == 1, (
+            f"闸门按展示列放行：开出一格必然 No GPU available 的空转 {stats}"
+        )
+
+
+def test_the_capacity_gate_does_not_misfire_on_the_allocators_column(db_factory):
+    """上面那条的反向对照：展示列偏大（24）而真需求只有 8 时必须照开。
+
+    没有这一支，上一条的 0 可以来自"闸门永远不开格"。
+    """
+    with db_factory() as db:
+        _make_template(db, "cartpole")
+        _vram(db, "cartpole", 24)
+        db.get(Template, "cartpole").gpu_requirement_gb = 8
+        _seed_cards(db, [8])
+        db.commit()
+        stats = _make_manager(db_factory, warm_pool_size=1).maintain(db)
+        assert stats["created"] == 1 and stats["skipped_no_capacity"] == 0, (
+            f"闸门按展示列误伤了一个真装得下的格 {stats}"
+        )

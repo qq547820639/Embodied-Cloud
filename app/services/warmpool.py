@@ -134,7 +134,9 @@ class WarmPoolManager:
             #   → 池占满 8 张，交互 0/5 起得来）。默认 0＝不预留，行为与改造前一致。
             # 补位是异步入队的（PROVISION 之后才真占卡），所以这里要自己把「本轮已开的格」
             # 和「上一轮还在 PREWARMING 的格」一起从可用量里扣掉，否则同一轮会把同一张卡许诺两次。
-            required = int(template.recommended_vram_gb)
+            # 读分配器真正用来挑卡的那一列（不是展示列 recommended_vram_gb，理由见
+            # `_unbooked_inflight_gib` 的 docstring 与 tests/test_warmpool.py 的闸门判据）
+            required = int(template.gpu_requirement_gb)
             for _slot in range(fillable):
                 pick = next((g for g in free_gib if g >= required), None)
                 if pick is None:
@@ -482,11 +484,15 @@ class WarmPoolManager:
         判定与 `missing` 用的是同一批池位（PREWARMING，或旧语义下无归属的
         CREATED/QUEUED），再叠一条 `gpu_id IS NULL`：worker 真跑过 PROVISION 的格
         已经有卡了，那张卡也不在 `AVAILABLE` 里，不该被扣第二次。
+
+        显存取 `gpu_requirement_gb`（`scheduler.allocate` 真正用来挑卡的那一列），
+        不是 `recommended_vram_gb`（那是给人看的展示列）——两列一旦不一致，
+        按展示列算账会开出注定失败的格或误伤明明装得下的格。
         """
         from sqlalchemy import and_, or_
 
         rows = db.execute(
-            select(Template.recommended_vram_gb)
+            select(Template.gpu_requirement_gb)
             .join(Workspace, Workspace.template_id == Template.id)
             .where(
                 Workspace.deleted_at.is_(None),
