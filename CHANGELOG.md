@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 711 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 723 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702→711，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77。
+- 计数面 665→678→686→693→701→702→711→723，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -809,6 +809,65 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   登记为 N-79。
 - 计数面 702→711，门禁 G0.77。
 
+### 预热池认领撤销那一路的放卡，改由 provider 认账（N-80，闭登记项 N-69）
+- 缺陷（N-69 登记于 N-63 那一轮；本轮由子代理实施、我在主线独立复跑与复算）：`claim` 的
+  credential-rotation 失败补偿分支把 `provider.destroy` 的异常收成一行 `logger.error` 就继续往下
+  —— 照样 `scheduler.release`、照样清 `container_name`、照样写 `status=FAILED`。容器还在吃
+  `--gpus device=N`，卡却回了池子。这是「释放由命令返回码背书而不是由 runtime 事实背书」的第四处
+  （N-63 stop 重试、N-77 reconcile 节点不一致、本轮 warm pool；provision 失败那一路＝N-67 仍未动）。
+- 三处失明逐条对上：① `_cleanup_failed` 只选 `warm_pool_state == FAILED`
+  （`app/services/warmpool.py:236-268`）⇒ 现已扩成 `in_([FAILED, DRAINING])`，
+  模块 docstring 承诺的 `READY/其他 → DRAINING → FAILED` 那一跳第一次有了驱动者（`:6-8` 注记）；
+  ② `reconcile_all` 按 status 跳过 STOPPED/FAILED（`app/services/orchestrator.py:524-527`）⇒
+  不放行那一档**不写终态**，所以还看得见；③ `recover_stuck_gpu_allocations`
+  （`app/services/scheduler.py:271-283`）只保护 {PROVISIONING, RUNNING, STOPPING} ⇒
+  正因如此不能写 FAILED，写了就等于把刚立的准入判据绕过去（新模块里用真函数两档证了这一点，
+  含"改成 FAILED 立刻被放卡"的反证）。
+- 改法：撤销分支清账分两根轴。归属与凭据（user_id/organization_id/password/ide_url）两极都收回；
+  资源那一轴只在 `self.orchestrator._release_admitted(workspace, command_succeeded=...)` 认账后才
+  `scheduler.release` + 清寻址字段 + 写 FAILED；不认账就 `error_message` 同时写下触发点、provider
+  亲口的回话（`_observed_runtime_state`，只做诊断不参与判决）与 destroy 的错误串，状态原地不动，
+  收敛交给 ① 那条 DRAINING 档 → durable DESTROY 真再叫一次 `provider.destroy`。
+  `billing.release_hold` 保持无条件：交付没发生就不该继续圈额度（计费轴），资源退不退是另一根轴。
+- 我对自己任务书的一处自我更正（子代理读码反驳，我复算后接受）：原书写的是无条件传
+  `command_succeeded=False`。读 `app/services/providers/mock.py:71-73`（mock 的 `reconcile` 恒回
+  UNKNOWN）与 `tests/test_warmpool_claim.py:373` 的 `CleanupTrackingProvider(MockProvider)` 后确认：
+  写死 False 会让「destroy 成功 + provider UNKNOWN」这一档永不放卡（把卡死钉在一张没人用的卡上），
+  并翻掉两支常驻绿用例。现按 `_stop_cleanup` 既有的两个消费点同形接线（`orchestrator.py:366` 成功档
+  传 True、`:370` 报错档传 False），并把这一分歧常驻钉成
+  `tests/test_warmpool_claim_admission.py::test_claim_abort_releases_the_mock_demo_slot_where_nothing_is_observable`。
+- 判据 `tests/test_warmpool_claim_admission.py`（11 个 def / 收集 12 例，参数化那一支两档）＋重判的
+  `tests/test_warmpool_claim.py::test_warm_pool_rotation_failure_only_when_admitted`：
+  报错＋alive／报错＋unknown 两档都断「分配行还在、卡仍 ALLOCATED、不写终态、container_name 保留」；
+  报错但 provider 说 MISSING、destroy 成功、mock UNKNOWN 演示档三档都断「照旧放卡并收敛」；
+  两支收敛档断 DRAINING 被扫到且重试真的再叫 destroy、provider 改口后放卡置终态；
+  结构判据按 AST 断「撤销分支里的 `scheduler.release` 落在准入谓词之下」，配一份合成不守卫形状
+  （两臂都绿的开火控制）与一份真源码变异（锚点门）；扫池选择集同样有合成反证。
+- 我在主线独立复算（`git show HEAD:app/services/warmpool.py` 就地换面，跑完按 sha 还原）：
+  新模块 `FF...FFF.FFF`（12 例里 8 开火），一手读数
+  `destroy 抛错、provider 说的是 alive，卡却被放回池子里了（一卡双跑）`
+  `{'alloc': False, 'gpu_free': True} != {'alloc': True, 'gpu_free': False}`／
+  `DRAINING 不在扫池子的选择集里（改前形状）：{'destroyed': 0, …}`／
+  `{'claim': 1, 'judgments': 0, 'releases': 1, 'guarded_releases': 0}`；
+  既有 `test_warmpool_claim.py` 16 支在改前全绿（它钉的是"无条件放卡"，改前当然满足）。
+  如实标注开火集合里的两支（真源码变异那两支）报的是 `锚点不是恰好一处（0）` ——
+  那是落地门在说"改前源码里没有这段锚点"，不是尺子看见缺陷；尺子的牙在合成控制那一支上，
+  而它两臂都绿。合规三档（provider 说 MISSING／destroy 成功／mock 演示档）两臂都绿，是护栏不是反证。
+- 被我这两轮改到的一处连带更正（协租户式改动的必然代价）：子代理的任务书与代码注释都写着
+  「清了 `container_name` 就永远停不掉，因为 `DockerProvider.stop` 只按这一列找容器」——
+  那是 N-78 之前的事实；`_name()` 落地后 stop 会回退到约定名，后果降级为"这一格对应哪个容器的事实
+  被抹掉、重试只能靠推断"。已把 `warmpool.py:413-416` 与测试 docstring 两处按现状改写，
+  并把行号指针重解到 `docker.py:305-307`（stop）与 `:60-68`（`_name`）。
+- 邻面（我自己跑）：新模块＋`test_warmpool_claim`／`test_warmpool`／`test_streaming_lifecycle`／
+  `test_durable_ops`／`test_worker`／`test_provision_rollback`／`test_stop_release_admission`
+  合跑 98 支 rc=0；`ruff check app tests` All checks passed；`mypy app` Success（41 files）。
+- 未证实：真 docker/k8s 守护进程下的两极没跑（本轮禁容器；常驻用例用的是自述 runtime 事实的替身，
+  mock 只会说 UNKNOWN —— 属机制限制）；`recover_stuck_gpu_allocations` 与本次 commit 在同一事务里
+  的真实交错窗口没有常驻并发用例（那一半仍在 `tests/test_postgres_concurrency.py` 的档位里）；
+  `error_message` 拼接后的长度不截断是按 `app/models.py` 的 `Text` 列判定的，非实测。
+  本轮**没有**新开登记项（并发窗口属既有 PG 档，不重复立项）。
+- 计数面 711→723，门禁 G0.78。
+
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
@@ -823,17 +882,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   不当顺手改。注意它会把 `tests/test_stop_release_admission.py` 里 `admitted_uses == 2`
   那一格顶到 3——接同一条判据时必须同步改判那条常驻断言，不能让它悄悄变宽。
 - ~~`N-68`：reconcile 的节点不一致分支把卡放了，却没停那个 pod（同类第三实例）~~ —— **已由 N-77 闭合**：该分支改走 `_stop_cleanup`（`app/services/orchestrator.py:556-575`），认账了才置 FAILED；provider 仍自述 ALIVE 时保持 RUNNING 不写终态、卡不回池，下一轮接着停。判据 `tests/test_k8s_node_truth.py` 的夹具改成有状态（`stop` 计数＋`reconcile` 随停没停改口），诚实档读 `stop_calls == 1`／撒谎档读 `failed == 0`＋`Gpu` 仍 ALLOCATED＋第二趟 `stop_calls == 2`；接线棘轮 `reconcile_consumers` 1→2 并把反向对照改成 2/1/0 三档。改前就地换面复算 `...FF.........FF...`（19 支里 4 开火），一手读数 `节点不一致没有去停那个 pod（stop_calls=0）`。
-- `N-69`：**warm pool 认领失败那一路把销毁失败只记日志，然后照样放卡并写成终态**（第四实例，
-  且三重不可见）。`app/services/warmpool.py:346-351`：`provider.destroy` 抛错被 :348-349
-  收成 `logger.error` 后**继续往下**执行 `scheduler.release`；:352-353 对 release 的失败同样
-  只 rollback 继续；随后 :354 写 `warm_pool_state = DRAINING`、:359 清 `container_name`、
-  :363 写 FAILED。三重不可见：① `_cleanup_failed` 只挑 `warm_pool_state == FAILED`
-  （`warmpool.py:231-236`，条件在 :234），DRAINING 这一行永远不会被补发 DESTROY；② `reconcile_all` :519 跳过 FAILED；
-  ③ `recover_stuck_gpu_allocations`（`scheduler.py:274-280`）只保护非终态。加上 :359 清了
-  名字，`DockerProvider.stop`（`providers/docker.py:277`）此后对它彻底空转。生产入口：
-  `app/routers/workspaces.py:55` `warm_pool.claim(...)`。常驻侧
-  `tests/test_warmpool_claim.py:403` 只断 `provider.destroy_calls >= 1`（数调用不断结果），
-  夹具的 `destroy` 根本不会失败，也报不出 runtime 状态。
+- ~~`N-69`：warm pool 认领失败那一路把销毁失败只记日志，然后照样放卡并写成终态（第四实例，且三重不可见）~~ —— **已由 N-80 闭合**：撤销分支的放卡改由 `orchestrator._release_admitted` 认账（报错档只认 MISSING、成功档不再是 ALIVE；与 `_stop_cleanup` 的 `:366`/`:370` 同形），不认账时不放卡、不清 `container_name`、不写终态，`_cleanup_failed` 选择集扩成 `in_([FAILED, DRAINING])`（`app/services/warmpool.py:236-268`）使 DRAINING 那一格有了重试驱动者，`billing.release_hold` 保持无条件（计费轴与资源轴分家）。判据 `tests/test_warmpool_claim_admission.py`（11 def／收集 12 例）＋重判的 `test_warmpool_claim.py::test_warm_pool_rotation_failure_only_when_admitted`；我主线换面复算 `FF...FFF.FFF`（8 开火），一手读数「destroy 抛错、provider 说的是 alive，卡却被放回池子里了」（`alloc/gpu_free` 三键全反）。原任务书里「清列等于永远停不掉」的机制已被 N-78 降级，两处文字按现状改写。
 - ~~`N-70`：`DockerProvider.reconcile` 用 DB 列推断「容器不存在」，而同一个 provider 的 destroy 会按命名约定把名字推出来 ⇒ 假缺席~~ —— **已由 N-78 闭合**：容器名推导收成一处 `DockerProvider._name()`（start/stop/destroy/inspect/logs/wait_ready/exec/pull_artifact 同源），`inspect` 失败按 stderr 分 absent／unknown（本机实测两形状同为 rc=1：`error: no such object` vs `Cannot connect to the Docker daemon at …`），`reconcile` 把 unknown 读成 UNKNOWN ⇒ `_release_admitted(command_succeeded=False)` 在 daemon 不可达时拒绝放卡；`KubernetesProvider.start/stop` 的空列静默空转同批改掉。判据 `tests/test_provider_absence_evidence.py` 8 支（含真引擎档 `tests/test_docker_provider_integration.py::test_reconcile_asks_the_engine_when_the_name_column_is_empty`）；改前单元档 `F.FFFF..`（5 开火）、真引擎档红在「空列被当成缺席：引擎说这个容器在跑」。
 - `N-72`：**可用额为 0 时仍允许开机**（出厂默认档）。`billing.check_launch_eligible` 只挡  `available < 0`（`app/services/billing.py:~80`），而 `app/config.py:56` 出厂默认  `billing_enforce_preauthorization=False` ⇒ 零余额成员可以启动，钱在第一次结算时变成负数、  靠配额 monitor 兜。这是应然问题（要不要把 0 也挡掉／出厂是否该开预授权），不是实现 bug，  N-71 的判据已把两档现状钉住：预授权开启时 0 余额必须被拒。
 - `N-75`：**`gpu_seconds_total` 在 stop 重放里加两次**（N-74 量出来的一半）。`_finalize_stop`

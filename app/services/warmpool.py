@@ -4,6 +4,8 @@
     PREWARMING → READY（预热完成，无最终用户归属、无用户数据）
     READY → CLAIMING（原子抢占）→ CLAIMED（attach user → RUNNING）
     READY/其他 → DRAINING（退出池）→ FAILED
+      （DRAINING 不是只写不读的过渡态：`_cleanup_failed` 会把 DRAINING 与 FAILED 一起
+       补入队 DESTROY，provider 不认账退役的那一格因此有重试的驱动者）
 
 - READY 的 warm runtime：没有 user ownership、没有 project data
 - claim 是原子操作（UPDATE ... WHERE warm_pool_state='ready'，SQLite/PostgreSQL
@@ -59,6 +61,19 @@ _TERMINAL_STATUSES = {
     WorkspaceStatus.STOPPED.value,
     WorkspaceStatus.DELETED.value,
 }
+
+
+def _observed_runtime_state(provider: object, workspace: Workspace) -> str:
+    """给「没放行」那一档的 `error_message` 用的诊断读数。
+
+    它**不参与判决**：放不放卡只由 `orchestrator._release_admitted` 一处决定（见 claim 的
+    撤销分支）。这里多问一次只为把"provider 当时到底说了什么"落进库里那条原因；观测本身
+    抛错也不许把补偿路径带崩，所以兜成字符串。
+    """
+    try:
+        return str(provider.reconcile(workspace))  # type: ignore[attr-defined]
+    except Exception as exc:  # pragma: no cover - 诊断面，不影响判决
+        return f"unobservable ({exc})"
 
 
 class WarmPoolManager:
@@ -219,23 +234,33 @@ class WarmPoolManager:
             )
 
     def _cleanup_failed(self, db: Session, template_id: str, stats: dict[str, int]) -> None:
-        """为已 FAILED 且无 active operation 的 warm workspace 补入队 DESTROY。
+        """为「FAILED 或 DRAINING（退出池）」且无 active operation 的 warm workspace 补入队 DESTROY。
 
         收割把 PREWARMING 收敛为 FAILED 后，这里入队 durable DESTROY operation
         异步清理（释放占位/资源、tombstone）。若 PROVISION operation 仍 active
         （RETRYING 未到终态），DB 唯一约束会拒绝 DESTROY 入队——本轮先跳过，
         下轮重试，保证 FAILED 池位最终被清理、不残留累积。
+
+        DRAINING 也在选择集里，而且这一档才是它的驱动者：claim 撤销时若释放准入
+        没放行，runtime 还在吃卡，那一格留在 DRAINING + 非终态。改前这里只读 FAILED，
+        于是 DRAINING 行**永远等不到一次补偿 DESTROY**（reconcile_all 也看不见它留下的
+        孤儿卡），docstring 承诺的 `READY/其他 → DRAINING（退出池）→ FAILED` 那一跳
+        没有任何代码走。入队之后由 `orchestrator.destroy` 真再叫一次 `provider.destroy`：
+        它本身就是「provider 不认账就抛、GPU 不放、不置 DELETED」的形状，
+        所以重试会一直叫到 runtime 真的退役为止。
         """
         from .worker import enqueue_operation
 
-        failed = db.scalars(
+        retiring = db.scalars(
             select(Workspace).where(
                 Workspace.template_id == template_id,
-                Workspace.warm_pool_state == WarmPoolState.FAILED.value,
+                Workspace.warm_pool_state.in_(
+                    [WarmPoolState.FAILED.value, WarmPoolState.DRAINING.value]
+                ),
                 Workspace.deleted_at.is_(None),
             )
         ).all()
-        for workspace in failed:
+        for workspace in retiring:
             if self.orchestrator._has_active_operation(db, workspace.id):
                 continue
             op = enqueue_operation(self.session_factory, workspace.id, OperationType.DESTROY)
@@ -336,39 +361,80 @@ class WarmPoolManager:
         if not rotated:
             # 轮换失败：不得把 workspace 交给用户（旧密码仍可登录 = 不能发布）。
             # §7（P0）完整补偿，保证 0 orphan：
-            #   streaming terminate → provider.destroy(runtime) → GPU release →
+            #   streaming terminate → provider.destroy(runtime) → 【释放准入】→ GPU release →
             #   清凭据/owner/端口 → DRAINING/FAILED。调用方 fallback 正常 provision。
+            # 释放准入（N-63 家族的第四处接线，前三处见 orchestrator 的 stop/destroy/reconcile）：
+            # 卡能不能回池，只由 provider 亲口的 runtime 事实决定，不由 destroy 的返回码决定。
+            # 判据全场只有 `orchestrator._release_admitted` 一份，这里消费它，不重抄比较式。
             WARM_POOL_CLAIM_FAILED.inc()
             try:
                 self.orchestrator.streaming.terminate_for_workspace(db, workspace.id)
             except Exception:
                 db.rollback()
+            destroy_error: str | None = None
             try:
                 self.orchestrator.provider.destroy(workspace)  # runtime 容器/Pod（幂等）
             except Exception as exc:
+                destroy_error = str(exc)
                 logger.error("warm pool claim cleanup: runtime destroy failed: %s", exc)
-            try:
-                self.orchestrator.scheduler.release(db, workspace.id)  # GPU（幂等）
-            except Exception:
-                db.rollback()
+            # 两极共同的清账：归属与凭据一律收回（无论卡放不放，旧密码都不许滞留）。
             workspace.warm_pool_state = WarmPoolState.DRAINING.value
             workspace.user_id = None
             workspace.organization_id = None
             workspace.password = None
             workspace.ide_url = None
-            workspace.container_name = None
-            workspace.ide_port = None
-            workspace.signal_port = None
-            workspace.media_port = None
-            workspace.status = WorkspaceStatus.FAILED.value
-            workspace.error_message = "warm pool claim failed: credential rotation not supported"
+            # `command_succeeded` 传的是这一次 destroy 到底成没成 —— 与 orchestrator 里
+            # 同一把判据的两个既有消费点同形（`_stop_cleanup` 的成功档
+            # app/services/orchestrator.py:366、报错档 :370）。判据本体（:385-403）：
+            # - 命令成功：provider 不再自述 ALIVE 即放行。UNKNOWN 是"没有可观测 runtime"
+            #   那一档（mock，providers/mock.py:72-74），演示路径必须停得下来；
+            # - 命令报错：只认 provider 亲口的 MISSING（K8s 对已删 Deployment 的 404 走这极）。
+            gpu_released = False
+            if self.orchestrator._release_admitted(
+                workspace, command_succeeded=destroy_error is None
+            ):
+                # 放行：runtime 已被 provider 认账退役（含 destroy 抛错但 provider 说 MISSING 的
+                # 那一极 —— K8s 对已删 Deployment 的 404 就是这一档）。既有完整行为保持：
+                # 放卡 + 清寻址字段 + 终态 FAILED。
+                try:
+                    self.orchestrator.scheduler.release(db, workspace.id)  # GPU（幂等）
+                    gpu_released = True
+                except Exception:
+                    db.rollback()
+                workspace.container_name = None
+                workspace.ide_port = None
+                workspace.signal_port = None
+                workspace.media_port = None
+                workspace.status = WorkspaceStatus.FAILED.value
+                workspace.error_message = "warm pool claim failed: credential rotation not supported"
+            else:
+                # 不放行：destroy 没成功，而 provider 也没说 runtime 没了（仍 ALIVE，或 UNKNOWN
+                # 到无法判定）。这时放卡就是「一卡双跑」：容器还在吃 --gpus device=N。
+                # 所以：不放卡、**不清 container_name**（N-78 之后 `DockerProvider.stop` 会回退到
+                # 约定名 `ec-{id[:12]}`，清了它容器并非停不掉；但这一列是"这一格对应哪个容器"的
+                # 事实本体 —— 抹掉之后 reconcile/inspect/logs/destroy 的重试与取证都只能按约定名
+                # 重新推断，等于把已知的东西主动变成猜测）、不写终态 ——
+                # `recover_stuck_gpu_allocations`（scheduler.py:272-280）只保护
+                # {PROVISIONING, RUNNING, STOPPING}，写成 FAILED 会被它按孤儿把卡强制放掉，
+                # 本函数的准入判据等于被绕过。状态原地不动，收敛交给
+                # `_cleanup_failed` 的 DRAINING 档 → durable DESTROY 重试（会真再叫一次
+                # provider.destroy）。
+                observed = _observed_runtime_state(self.orchestrator.provider, workspace)
+                workspace.error_message = (
+                    "warm pool claim failed: credential rotation not supported; "
+                    f"GPU not released: provider reports runtime {observed} "
+                    f"and the runtime was not retired ({destroy_error or 'destroy reported success'})"
+                )
             db.commit()
-            # §18：交付失败 → 刚才圈住的额度退回（此处已 commit，release 自带提交）
+            # 额度：**无条件**退。用户没拿到交付就不该被继续圈住启动额度，这是计费轴；
+            # 资源（卡/容器）退不退是另一根轴，由上面的准入判据与 DESTROY 重试负责。
+            # 用「不退额度」去补偿「没放卡」会把两根轴搅在一起。
             if billing is not None:
                 billing.release_hold(db, workspace.id, reason="warm pool claim aborted")
             logger.warning(
-                "warm pool claim aborted for %s: credential rotation failed (runtime+GPU released)",
+                "warm pool claim aborted for %s: credential rotation failed (gpu released=%s)",
                 claimed_id[:8],
+                gpu_released,
             )
             return None
         workspace.warm_pool_state = WarmPoolState.CLAIMED.value

@@ -385,7 +385,12 @@ class CleanupTrackingProvider(MockProvider):
 
 
 def test_warm_pool_rotation_failure_cleans_runtime():
-    """§7（P0）：rotation 失败必须销毁 runtime（0 orphan container/pod）。"""
+    """§7（P0）：rotation 失败必须销毁 runtime（0 orphan container/pod）。
+
+    覆盖的是"destroy 命令成功"那一档（provider 认账退役 ⇒ 寻址字段可以清、状态可以写终态）；
+    destroy 报错而 provider 仍说活着的那一档**不许**清 `container_name`，
+    判据与两极见 tests/test_warmpool_claim_admission.py。
+    """
     provider = CleanupTrackingProvider()
     orchestrator = WorkspaceOrchestrator(
         Factory, provider, Path("/tmp/test-warm-leak1")  # noqa: S108
@@ -406,8 +411,19 @@ def test_warm_pool_rotation_failure_cleans_runtime():
         assert ws.status == WorkspaceStatus.FAILED.value
 
 
-def test_warm_pool_rotation_failure_releases_gpu():
-    """§7（P0）：rotation 失败必须释放 GPU（0 orphan GPU allocation）。"""
+def test_warm_pool_rotation_failure_releases_gpu_only_when_admitted():
+    """§7（P0）：rotation 失败时 GPU 回不回池，看 provider 认不认账，不看 destroy 的返回码。
+
+    **这一支改前钉的是缺陷形状**：它只断"没有 allocation、卡回 AVAILABLE"，而夹具
+    `CleanupTrackingProvider.destroy` 从不失败、`reconcile` 只会说 UNKNOWN（mock），
+    也就是"撤销必然放卡"被当成了期望 —— 放卡这件事在改前是无条件的，怎么改代码它都绿。
+    现在把它收回到它真正覆盖的那一档：**destroy 命令成功**（`command_succeeded=True`）
+    且 provider 不再自述 ALIVE（这里是 UNKNOWN，"没有可观测 runtime"那一档）⇒ 准入放行，
+    放卡 + FAILED。"必须不交付"的原始意图由 `provider.rotate_credentials` 返回 False +
+    上面的 DRAINING 断言继续钉住。
+    另两档（destroy 报错但 provider 说 MISSING ⇒ 仍须放卡；报错且说 ALIVE/UNKNOWN ⇒ 不许放卡）
+    连同 DRAINING 档的重试收敛，常驻在 tests/test_warmpool_claim_admission.py。
+    """
     from app.models import GpuAllocation as GA
 
     provider = CleanupTrackingProvider()
@@ -422,6 +438,8 @@ def test_warm_pool_rotation_failure_releases_gpu():
         _make_user(db, "user-1")
         ws = _warm_pool(db, manager)
         manager.claim(db, "cartpole", db.get(User, "user-1"), credential_cipher=CIPHER)
+        # 这一档的准入前提：destroy 命令本身成功了（改前对这一判据毫无线索）
+        assert provider.destroy_calls == 1
         # GPU 释放：无 allocation、GPU 回 AVAILABLE
         assert db.scalar(select(GA).where(GA.workspace_id == ws.id)) is None
         gpu = db.scalar(select(Gpu))
