@@ -48,13 +48,13 @@ make release   # scripts/release.sh：校验 → build → 供应链 → 验证�
 
 `scripts/release.sh` 实际执行（按脚本内 `==========` 步骤名读，编号只是排版）：
 1. `make lint` / `make typecheck` / `make test`（任一失败即中止并输出原因）
-2. `make build` 生成 wheel 与 sdist
+2. `make build` 生成 wheel 与 sdist（`python -m build --no-isolation`：构建后端取 `uv.lock` 里的 setuptools，不经 PyPI 现解析；`SOURCE_DATE_EPOCH` 由 Makefile 缺省成 HEAD 提交时间 ⇒ 同一个 commit 重建出的 wheel 逐字节相同，sdist 目前仍带打包时刻，见 CURRENT_STATE N-34）
 3. `make verify-lock` / `make sbom` / `make audit`（uv.lock 一致性、CycloneDX SBOM、漏洞审计）——本轮起 `make sbom` 带 `--extra postgres --extra s3`，导出的清单才覆盖得住部署真装的那两组依赖（改前 44 个组件里没有 psycopg/boto3，改后 51 个）
 4. `make validate` 重生成 `docs/VALIDATION.json` / `.md`（**可复现门禁面**）与
    `dist/VALIDATION_RUN.json` / `.md`（**本次跑读数**，gitignored；无条件重跑 ——
    "版本一致就复用旧报告"会让工件比工作树少几条用例）
 5. 校验 sdist 清洁度（不得含 `__pycache__` / `*.pyc` / cache / `test-*.db` / `.env` / `.venv`）
-6. 生成 `dist/checksums.txt`（wheel / sdist / sbom 的 SHA-256）
+6. 生成 `dist/checksums.txt`（wheel / sdist / sbom 的 SHA-256）。口径：**wheel 那一行可被第三方复算**（同一 commit + 同一份锁 ⇒ 同 sha），**sdist 那一行是本次构建的记录**，重建对不上是已知未闭项而非异常
 7. 生成 `dist/VALIDATION_STATUS.md`（集成档表由 `dist/VALIDATION_RUN.json` 逐行生成，
    不手抄；写完强制检查产物里不残留反引号或用例运行输出）
 8. 打印产物清单并**提示**人工执行 `git tag v<version>` 与 push（脚本本身不打 tag、不 push）

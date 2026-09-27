@@ -41,10 +41,27 @@ ENV_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def run(cmd: list[str], timeout: int = 900) -> tuple[int, str]:
+def run(cmd: list[str], timeout: int = 900, env: dict[str, str] | None = None) -> tuple[int, str]:
     # S603: cmd 由本脚本受控常量构造（[sys.executable, "-m", pytest/ruff/mypy/...]），无用户输入
-    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout)  # noqa: S603
+    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout, env=env)  # noqa: S603
     return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def build_env() -> dict[str, str]:
+    """构建用的环境：把 `SOURCE_DATE_EPOCH` 钉到 HEAD 提交时间。
+
+    口径与 Makefile 里那一条一致（同一个 git 格式串）。之所以两处都要写：
+    `python scripts/validate_release.py` 是能直接跑的（本文件 docstring 就那么教），
+    只靠 make 的 export 会让"同一条 build=PASS"随调用方式不同而产物不同。
+    """
+    env = dict(os.environ)
+    if not env.get("SOURCE_DATE_EPOCH"):
+        # git 由 PATH 解析（S607）；参数是本脚本写死的常量，无用户输入
+        stamp = subprocess.run(
+            ["git", "log", "-1", "--format=%ct"], cwd=ROOT, text=True, capture_output=True, timeout=60,  # noqa: S607
+        )
+        env["SOURCE_DATE_EPOCH"] = stamp.stdout.strip() or "0"
+    return env
 
 
 def count_tests_junit(report_path: Path) -> dict:
@@ -233,6 +250,34 @@ def _dotted(rel_path: str) -> str:
     return rel_path.removesuffix(".py").replace("/", ".")
 
 
+def require_name(spec: str) -> str:
+    """PEP 508 条目取包名：'setuptools>=75' → 'setuptools'（比较符/extras/环境标记一律截断）。"""
+    return re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].strip().lower().replace("_", "-")
+
+
+def optional_extra(pyproject_text: str, name: str) -> list[str]:
+    import tomllib
+
+    return tomllib.loads(pyproject_text)["project"]["optional-dependencies"].get(name, [])
+
+
+def locked_version(lock_text: str, name: str) -> str | None:
+    """从 uv.lock 取某个包被锁住的版本（不能按行找：每个包都有 version 行）。"""
+    for block in lock_text.split("[[package]]"):
+        if re.search(rf'^name = "{re.escape(name)}"$', block, re.MULTILINE):
+            found = re.search(r'^version = "([^"]+)"', block, re.MULTILINE)
+            return found.group(1) if found else None
+    return None
+
+
+def spec_satisfied(spec: str, version: str) -> bool:
+    """锁住的版本是否满足那条 requires 区间（判据交给 packaging，不自研比较器）。"""
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    return Version(version) in SpecifierSet(re.sub(r"^[A-Za-z0-9._-]+", "", spec))
+
+
 def conditional_skip_universe() -> dict[str, str]:
     """允许跳过的闭集：{模块点号名: 该模块 skip 文案必须含的哨兵}。
 
@@ -366,7 +411,9 @@ def main() -> int:
         )
         checks["migration"] = {"status": "PASS" if result.returncode == 0 else "FAIL"}
 
-    code, _ = run([PYTHON, "-m", "build"])
+    # 构建后端来自锁（--no-isolation），产物时间来自 HEAD 提交（SOURCE_DATE_EPOCH），
+    # 两条判据见 tests/test_validation_matrix.py
+    code, _ = run([PYTHON, "-m", "build", "--no-isolation"], env=build_env())
     checks["build"] = {"status": "PASS" if code == 0 else "FAIL"}
 
     # 4) 物理 gate：仍缺硬件的档保持 NOT_RUN（不假装 PASS，也不倒推原因）。

@@ -16,6 +16,8 @@
 """
 
 import importlib.util
+import os
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,3 +228,116 @@ def test_environment_tier_readers_point_at_the_run_report() -> None:
         assert "integration_" in text, f"{label} 里没有档位判据（本判据会恒真）"
     # 反向对照：把 run 文件路径改掉，判据必须翻红
     assert "VALIDATION_RUN.json" not in ci.replace("VALIDATION_RUN.json", "VALIDATION.json")
+
+
+def _build_requires(pyproject_text: str) -> list[str]:
+    """`[build-system].requires` 的原始条目（一条正则太脆，按节解析）。"""
+    import tomllib
+
+    return tomllib.loads(pyproject_text)["build-system"]["requires"]
+
+
+def test_build_gate_does_not_resolve_its_backend_from_the_network() -> None:
+    """`build=PASS` 写进提交面，那构建后端的来源也必须是锁，不能是 PyPI 当日最新。
+
+    实测缺口：`[build-system].requires = ["setuptools>=75"]`，而 `uv.lock` 里
+    **根本没有 setuptools**（`importlib.util.find_spec("setuptools")` 在锁造的 venv 里
+    读回 ABSENT）⇒ `python -m build` 的默认隔离环境每次都要联网解析 `>=75` 的上界，
+    装到哪个版本由 PyPI 当天决定。这一格与 lint/typecheck 同性质：读数不是代码的函数。
+    """
+    validator = _load_validator()
+    src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
+    assert '"-m", "build", "--no-isolation"' in src, (
+        "validate 仍在隔离环境里现取构建后端：build=PASS 不是仓库代码的函数"
+    )
+    # 反证：摘掉旗标，同一把尺子必须翻红（而不是"看着像没变"）
+    reverted = src.replace('"-m", "build", "--no-isolation"', '"-m", "build"')
+    assert reverted != src and '"-m", "build", "--no-isolation"' not in reverted
+
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    requires = _build_requires(pyproject)
+    assert requires, "build-system.requires 解析出来是空的，本判据会恒真"
+    dev = validator.optional_extra(pyproject, "dev")
+    for spec in requires:
+        name = validator.require_name(spec)
+        assert any(name == validator.require_name(entry) for entry in dev), (
+            f"构建后端 {spec} 不在 dev extra 里：它没被 uv.lock 覆盖，`--no-isolation` 会当场 ImportError"
+        )
+    # 锁里必须真的有这个包，且锁住的版本满足 build-system 的区间
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    for spec in requires:
+        name = validator.require_name(spec)
+        version = validator.locked_version(lock, name)
+        assert version, f"uv.lock 里没有 {name}：构建后端不在锁上"
+        assert validator.spec_satisfied(spec, version), f"{name} 锁在 {version}，不满足 {spec}"
+
+
+def test_make_build_and_the_release_gate_use_the_same_invocation() -> None:
+    """`make build` 与 validate 的 build 步必须是同一种装法。
+
+    真工件由 `make build` 产出（release.sh 第 4/5 步调它），validate 只是量一次；
+    两处各写一份参数，漂移的永远是"被发布的那一份"——与 `make lint`/`make typecheck`
+    那条既有判据同一个道理。
+    """
+    make = (ROOT / "Makefile").read_text(encoding="utf-8")
+    src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
+    mk = re.search(r"^build:\n\t\$\(PYTHON\) -m build(.*)$", make, re.MULTILINE)
+    assert mk, "Makefile 里 build 目标的形状变了，本判据读不到参数"
+    call = re.search(r'\[PYTHON, "-m", "build"([^\]]*)\]', src)
+    assert call, "validate 里的 build 调用形状变了"
+    make_flags = {t for t in mk.group(1).split() if t.startswith("--")}
+    gate_flags = set(re.findall(r'"(--[^"]+)"', call.group(1)))
+    assert make_flags, "Makefile 的 build 参数集合为空（判据会恒真）"
+    assert make_flags == gate_flags, f"make={sorted(make_flags)} gate={sorted(gate_flags)}"
+
+
+def _build_wheel(outdir: Path, epoch: str) -> str:
+    """真跑一次 `python -m build --no-isolation`，返回 wheel 的 sha256。"""
+    import hashlib
+    import subprocess
+    import sys
+
+    env = dict(os.environ, SOURCE_DATE_EPOCH=epoch)
+    res = subprocess.run(  # noqa: S603 受控常量参数（本机 venv 的 build 模块）
+        [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(outdir)],
+        cwd=ROOT, text=True, capture_output=True, env=env, timeout=300,
+    )
+    assert res.returncode == 0, res.stdout[-400:] + res.stderr[-400:]
+    wheels = sorted(outdir.glob("*.whl"))
+    assert len(wheels) == 1, wheels
+    return hashlib.sha256(wheels[0].read_bytes()).hexdigest()
+
+
+def test_pinned_source_date_epoch_makes_the_wheel_recomputable(tmp_path) -> None:
+    """同一份树、同一个 SOURCE_DATE_EPOCH ⇒ wheel 必须逐字节相同；不钉就得不同。
+
+    动机是实测：`make build` 两次产出的 wheel sha256 不同（zip 条目带打包时刻），
+    于是 `dist/checksums.txt` 里那行 sha 只能当"某一次构建的记录"，不能被第三方
+    复算。钉住 `SOURCE_DATE_EPOCH` 之后 wheel 可复算（sdist 仍不可，见 CURRENT_STATE
+    的 N-34：setuptools 的 sdist 不把生成条目 PKG-INFO/目录的 mtime 夹到该值）。
+    """
+    a = _build_wheel(tmp_path / "a", "1700000000")
+    b = _build_wheel(tmp_path / "b", "1700000000")
+    assert a == b, "钉了 epoch 两次构建还是不同 ⇒ 另有未夹住的时间源，本判据的前提不成立"
+
+    # 必开对照：换一个 epoch，sha 必须变（否则上面那条相等是恒真）
+    c = _build_wheel(tmp_path / "c", "1600000000")
+    assert c != a, "换 epoch 后 wheel 没变 ⇒ 时间戳根本没进产物，上一条相等不证明任何事"
+
+
+def test_build_call_sites_pin_the_epoch_in_makefile_and_the_gate() -> None:
+    """两个构建调用点都得钉 epoch，且取值口径一致（与 lint/typecheck 目标那条同一手法）。"""
+    make = (ROOT / "Makefile").read_text(encoding="utf-8")
+    src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
+    assert "SOURCE_DATE_EPOCH ?= " in make, "Makefile 不再提供 SOURCE_DATE_EPOCH 缺省值"
+    assert re.search(r"^export SOURCE_DATE_EPOCH$", make, re.MULTILINE), (
+        "Makefile 定义了却没 export：build 那一步拿不到，产物仍带打包时刻"
+    )
+    assert make.count("%ct") == 1, f"Makefile 里 git 时间口径出现 {make.count('%ct')} 次，取值口径不唯一"
+    assert make.index("SOURCE_DATE_EPOCH ?= ") < make.index("build:"), "export 必须早于 build 目标"
+    assert '"SOURCE_DATE_EPOCH"' in src and "%ct" in src, (
+        "validate 直接跑（不走 make）时没自己钉 epoch：同一条 build=PASS 会因调用方式不同而不同"
+    )
+    # 反证：摘掉 export，判据必须翻红
+    assert not re.search(r"^export SOURCE_DATE_EPOCH$", make.replace("export SOURCE_DATE_EPOCH\n", ""), re.MULTILINE)
+

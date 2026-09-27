@@ -18,6 +18,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  # 构建后端与判据用的版本区间，都必须在锁上：`python -m build --no-isolation` 用
+  # 环境里的 setuptools 打包（否则隔离环境每次现向 PyPI 解析 [build-system].requires，
+  # "build=PASS" 就成了当天的网络读数）。名字须与 [build-system].requires 一致，
+  # 由 tests/test_validation_matrix.py 的常驻判据对账。
+  "setuptools>=75",
+  # 判据要判"锁住的版本满不满足一条 requires 区间"，这件事交给 packaging 实现，不自研。
+  "packaging>=24,<27",
   # 9.0.3 修掉 tmpdir 处理漏洞（CVE-2025-71176，`uv audit` 实测命中）
   "pytest>=9.0.3,<10",
   "httpx>=0.27,<1",

@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 568 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 572 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -31,7 +31,27 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   汇总变量一改名它直接 `ValueError` —— 已把锚点换成报告字面量（判据该跟着语义走，不该跟着变量名走）。
 - 新常驻判据 9 支（`tests/test_validation_matrix.py` 8 + 计数面反证 1），门禁目录新开 G0.42／G0.43。
 
-### 本轮新增两条待收口项
+### 构建后端上锁、产物时间上 HEAD 提交（同一条"可复现"往下推一层）
+- **量出来的缺口**：`[build-system].requires = ["setuptools>=75"]`，而 `uv.lock` 里**根本没有 setuptools**
+  （锁造的 venv 里 `importlib.util.find_spec("setuptools")` 读回 `ABSENT`）⇒ `python -m build` 的默认
+  隔离环境只能每次向 PyPI 现解析 `>=75`。于是提交面里 `build=PASS` 与 lint/typecheck 同性质：
+  它记录的是"当天 PyPI 有什么"，不是仓库代码。**注意别把它读成"今天已经不一致"**：
+  当天两条路径的 `Generator: setuptools (84.0.0)` 是同一个数，缺陷是"无法证明可复现"，不是"已经漂"。
+- **改法**：`setuptools>=75`（与 `build-system.requires` 同名同区间，由常驻判据对账）进 `dev` extra →
+  `uv lock` 锁到 84.0.0；`make build` 与 validate 的构建步统一改 `python -m build --no-isolation`。
+  实证换装法不改工件：同一份树各跑一次，两个 wheel 解包后 `diff -r` **零差异**（文件清单与大小也逐项相等），
+  差异只在容器的 zip 头。判据要判"锁住的版本满不满足那条区间"，这件事交给 `packaging`（PEP 440 的规范实现），
+  不自研比较器，故 `packaging` 也一并进 `dev` extra（直接 import 就得直接声明）。
+- **产物时间**：`make build` 连跑两次，改前 wheel sha 不同、改后同为 `2992a47ac5…` ——
+  `SOURCE_DATE_EPOCH` 由 Makefile 缺省成 HEAD 提交时间并 `export`，validate 直接跑时用同一条 git 口径兜底。
+  **sdist 仍不可复算**：`f0dad9e2…` 对 `90e84be2…`。逐字节定位到 tar 头：顶层目录、`PKG-INFO` 与各子目录的
+  `mtime` 记的是打包那一秒（pax 记录里还带小数），setuptools 84 没有把它们夹到 `SOURCE_DATE_EPOCH`；
+  解包后内容零差异，所以 `dist/checksums.txt` 里 sdist 那行只能当"某一次构建的记录"。登记为 N-34 未闭的一半。
+
+### 本轮新增的待收口项
+- `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
+  `SOURCE_DATE_EPOCH`，逐字节定位见上一节）。wheel 已可复算；sdist 那一半要么给 `dist/checksums.txt`
+  加"这是构建记录、不是复算承诺"的口径说明，要么换 `uv build`/后处理再验一次。
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
 - `N-33`：`tests/test_gpu_pool_guard.py` 那两支现在带哨兵（缺余量时算合法跳过），

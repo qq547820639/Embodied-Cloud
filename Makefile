@@ -1,6 +1,11 @@
 PYTHON ?= .venv/bin/python
 UV ?= uv
 VERSION ?= 0.7.0
+# 构建产物的时间基准：zip/tar 条目默认带"打包那一刻"，于是 dist/checksums.txt 里的
+# sha256 只是某一次构建的记录，第三方重建对不上。取 HEAD 提交时间 ⇒ 同一个 commit
+# 构建出的 wheel 逐字节相同（实测；sdist 仍不完全可复算，见 CURRENT_STATE N-34）。
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
+export SOURCE_DATE_EPOCH
 
 .PHONY: install dev test test-pg test-docker test-browser test-s3 test-k8s-control-plane policy-bench warm-sla warm-capacity \
         lint typecheck build smoke clean check demo amd64-probe \
@@ -67,7 +72,7 @@ typecheck:
 	$(PYTHON) -m mypy app edge_agent
 
 build:
-	$(PYTHON) -m build
+	$(PYTHON) -m build --no-isolation
 
 smoke:
 	./scripts/smoke_api.sh
