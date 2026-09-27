@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 659 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 665 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -481,8 +481,28 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   ⇒ 分布本身跨 2 倍，1500s 是**较大那个读数**的 2.4 倍。
 - 计数面 653→659；N-34 与 G0.44/G0.46 里"sdist 不可复算"的陈述本轮按事实标注/更正。
 
+### G1–G4 那五支物理验收脚本，从今天起有常驻读者（N-62）
+- 它们是物理待验那一整块的执行入口（`preflight_gpu_host.sh`／`gpu_acceptance.sh`／
+  `isaac_sim_smoke.sh`／`isaac_lab_cartpole_smoke.sh`／`franka_smoke.sh`，合计 287 行），
+  而本机没有 NVIDIA 设备 ⇒ 从来不进 `make validate`。已有的两条相关判据都不碰执行：
+  `make lint` 里的 `bash -n` 只看语法，`test_supply_chain` 那条只看"脚本里引用的镜像串与
+  Dockerfile 钉死的那份逐字相等"。本轮之前没有任何一支常驻用例 exec 过它们。
+- 新增 `tests/test_gpu_gate_scripts.py`（6 支）：PATH 替身 docker／nvidia-smi／ss／ldconfig
+  造三种宿主（全装／容器失败／缺件），逐支核"退出码与打印的判决是否一致"。
+  替身跑在**净 PATH**（替身目录 + `/usr/bin:/bin`）上——沿用宿主 PATH 会得到一种假缺件档：本机真装着 docker。
+- 两处自我更正，都写进判据不留 hindsight：
+  ① 动手前我以为 `rc=$?` 会取到 `tee` 的 0 从而把失败说成通过；实测在 `set -euo pipefail` 在场时不成立，
+  单独摘掉 `pipefail` 也不成立——**两处一起坏**才造得出"G2 PASS + 退 0"。判据因此钉组合后果，不钉单行存在。
+  ② 缺席断言最初写成"文本里不许出现 PASS"，被脚本自己那句"不得在本机冒充 PASS"挡了（合规脚本判红）；
+  改成按每支脚本自己的判决串判（`SUCCESS_MARKER`）。
+- 副本注入三臂自证：`pipefail` 与 `PIPESTATUS[0]` 同坏 ⇒ 假绿被抓；缺件档 `exit 2`→`exit 0` ⇒ 假通过被抓；
+  空改写先被 assert 挡掉。预检另钉住"失败总结走 stderr、逐样 MISSING 走 stdout"。
+- 物理档本身仍 `PHYSICAL_*_PENDING`：本轮闭上的是"没有硬件时这些脚本会不会骗人"那一格。
+- 同轮把 N-61（要不要换成 hatchling 后端）用实测结案，不 parked。
+- 计数面 659→665，门禁 G0.71。
+
 ### 本轮新增的待收口项
-- `N-61`：**要不要把构建后端从 setuptools 换成 hatchling**（本轮量出来的选项，不是猜的）。换过去的收益是 sdist 原生可复算——本仓自研的 `scripts/sdist_normalize.py` 与它的两处消费位可以整体删掉；代价是 `[build-system]` 与 `uv.lock`、`dev` extra 三处对齐（常驻判据 G0.44 正管着这件事）、wheel 侧 `recomputable=yes` 那条 sha 要重钉基线，以及 `[tool.hatch.build.targets.*]` 要显式声明两个顶层包。一手依据：hatchling 1.32.4 的 sdist 在 `SOURCE_DATE_EPOCH` 固定下两建（间隔 3s）逐字节相同（`15a58edaa443`），且它的 sdist builder 自己钉了成员 mtime/uid/gid 与 gzip mtime。本轮不换：口径已定、判据已在；换后端单独一轮做，并留两建对照。
+- `N-61`：~~要不要把构建后端从 setuptools 换成 hatchling`**【N-62 结案：不换】** 本机在 `git worktree` 副本上真跑过：hatchling 1.32.4 两建 wheel 同为 `629d6ff7e24f`（它自己就钉 tar 成员 mtime/uid/gid 与 gzip mtime，读安装到本机 venv 的源文件核对过）；与 setuptools 的 wheel 差异只有三处——成员 55 对 56（少 `dist-info/top_level.txt`，全仓 grep 零读者）、`Requires-Dist` 只差 PEP 508 的引号风格（22 条语义同集）、`WHEEL` 的 Generator 行。净收益只是删掉 `scripts/sdist_normalize.py`（约 100 行，6 支判据与两处消费位都已落门禁），代价是 `uv.lock` 重解析、`dev` extra 对齐、wheel 侧 `recomputable` 基线重钉与所有引用产物 sha 的文档面重扫⇒ 不抵。再议的触发条件：自研归一哪天失效，或后端侧出现**别的**产品收益。
 ~~`N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
   `SOURCE_DATE_EPOCH`，逐字节定位见上一节）。wheel 已可复算；sdist 那一半要么给 `dist/checksums.txt`
   加"这是构建记录、不是复算承诺"的口径说明，要么换 `uv build`/后处理再验一次。（**已由 N-60 走"后处理"这一支闭合**：`scripts/sdist_normalize.py`，实测两建同 sha；口径改为"那行 sha 是归一后产物的 sha"）~~

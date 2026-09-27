@@ -4,7 +4,7 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 659
+      "count": 665
     },
     "test_run": {
       "status": "PASS",
