@@ -489,3 +489,69 @@ def test_successful_claim_records_claim_latency():
         # 池已空 → None，且读数不动（"没抢到"不是一次快 claim）
         assert manager.claim(db, "cartpole", user, credential_cipher=CIPHER) is None
         assert samples() == before + 1, "池空的 None 返回被记成了一次 claim 样本"
+
+def test_claim_refuses_up_front_when_the_provider_cannot_rotate():
+    """§7 的 P0 规则要在 claim 入口就挡住，而不是"占了格 → 轮换失败 → 拆掉 runtime"再兜回来。
+
+    用的是**真的 DockerProvider**（它的 `rotate_credentials` 是纯 `return False`，不碰守护进程），
+    不是上面那批用例里的假 provider——要判的是生产上那个 provider 真在场时的形状。
+    改造前的真实后果不是泄露凭据（补偿路径确实拆了 runtime、清了密码），而是：
+    每次 claim 都占掉一格 READY、拆掉一个真 runtime、走一遍 billing 圈额/退额，
+    再告诉调用方"没有 warm 可用"——而这件事在入口一句判断就能免掉。
+    """
+    from app.config import Settings as S
+    from app.services.providers.docker import DockerProvider
+
+    with Factory() as db:
+        _make_template(db)
+        _seed_gpu(db)
+        ws = _warm_pool(db, _make_manager(Factory))
+        before = (ws.warm_pool_state, ws.status, ws.user_id, ws.container_name, ws.password)
+
+        docker_orchestrator = WorkspaceOrchestrator(
+            Factory,
+            DockerProvider(S(workspace_root=Path("/tmp/test-warm-docker"))),  # noqa: S108
+            Path("/tmp/test-warm-docker"),  # noqa: S108
+        )
+        docker_manager = WarmPoolManager(
+            Factory,
+            docker_orchestrator,
+            SimpleNamespace(warm_pool_enabled=True, warm_pool_size=1, warm_pool_reserve_slots=0),
+        )
+        user = _make_user(db, "user-docker")
+        assert docker_manager.claim(db, "cartpole", user, credential_cipher=CIPHER) is None
+        db.expunge_all()
+        row = db.get(Workspace, ws.id)
+        after = (row.warm_pool_state, row.status, row.user_id, row.container_name, row.password)
+        assert after == before, (
+            f"claim 没在入口挡住：仍然占了格并拆掉 runtime\n  before={before}\n  after ={after}"
+        )
+
+
+def test_provider_constraint_is_testable_at_the_composition_root():
+    """§7 那句"provider 不支持轮换 ⇒ warm pool 禁用"以前是 import 期的裸 if，没有任何常驻读者。
+
+    挪进 `apply_provider_constraints` 之后三档各自可证：不支持轮换必须关掉；
+    支持轮换的不许动；已经关着的保持关（这一档证明它不是"永远写 False"那种假合规）。
+    """
+    from app.deps import apply_provider_constraints
+
+    class NoRotate:
+        name = "docker-like"
+        supports_credential_rotation = False
+
+    class Rotates:
+        name = "k8s-like"
+        supports_credential_rotation = True
+
+    off = SimpleNamespace(warm_pool_enabled=True)
+    apply_provider_constraints(off, NoRotate())
+    assert off.warm_pool_enabled is False, "不支持轮换的 provider 没能禁用 warm pool"
+
+    keep = SimpleNamespace(warm_pool_enabled=True)
+    apply_provider_constraints(keep, Rotates())
+    assert keep.warm_pool_enabled is True, "支持轮换的 provider 被误关了"
+
+    already = SimpleNamespace(warm_pool_enabled=False)
+    apply_provider_constraints(already, NoRotate())
+    assert already.warm_pool_enabled is False

@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 557 / passed 556 / skipped 1 / failed 0（唯一 skip 是 k8s_integration，需 NVIDIA Device Plugin）。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 559 / passed 557 / skipped 2 / failed 0（skip 的两支：`k8s_integration` 需 NVIDIA Device Plugin；`test_pinned_base_of_the_control_plane_recipe_is_fetchable` 这一跑撞上 ghcr 通道抖动——daemon 那条传输答 `not found`、第二条传输逐字节重算确认摘要存在，于是按设计自判 PENDING 而不是红。**这两个数是本次认证跑的读数，不是恒定形状**：skip 集合会随通道状态变，读它要按用例名读，不要只比总数）。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
@@ -839,6 +839,24 @@ docker 档 21 → 22，全套 531 → 532。
   （没有这条，配置写错的人只会看见"池子怎么老是空的"）；`reserve=0` 同形状照旧填满 2 格。
   先写测试时它确实红了（`assert []`）——三条前置断言全过，唯独日志为空，说明缺的就是信号本身。
 - 计数：本条切片新增常驻用例 6 支（容量段 5 支：不开装不下的格／卡够了必须开／共享预算／reserve 留一张／reserve=0 照旧填满；外加 over-reservation 可见信号 1 支），全套 551 → 557（passed 556 / skipped 1 / failed 0；两份计数面由 `docs_test_counts` 现算核对）。`make warm-capacity` 一并进 Makefile（与 `make warm-sla`／`make policy-bench` 同一形状：人工/CI 档，不进每轮 validate）。**。
+### 一条 P0 安全规则此前只有 import 期的一句裸 if 在守（§7：不能轮换凭据 ⇒ 不许走 warm pool）
+
+- 触发点是上一条切片留下的问题：warm pool 只在"能换掉 runtime 密码"的 provider 上才安全。
+  规则写在 `app/deps.py` 装配段（import 期 `if ... : settings.warm_pool_enabled = False`），
+  `WarmPoolManager.claim()` 自己**只看** `warm_pool_enabled`；而 `tests/conftest.py` 把 provider
+  钉成 mock ⇒ **没有任何常驻用例能证那句在生效**。全仓 grep `supports_credential_rotation`
+  在生产侧只有 provider 定义与 deps 那一句。
+- 改前的真实后果不是泄露凭据，而是**白烧**：误开的 claim 会占掉一格 READY →
+  `rotate_credentials()` 返回 False → 补偿拆 runtime → 账圈了又退 → 才返回 None。
+  第一版用例就红在这里：断言"返回 None"改前也通过，加上"那一格的五项状态必须原样不动"才暴露出
+  `state/status/user_id/container_name/password` 全被改掉（判据要挑能区分的那一条，不是挑能过的那一条）。
+- **两处补齐**：装配期约束抽成 `apply_provider_constraints(settings, provider)`（行为逐字不变，
+  只是变成有常驻读者的函数，三档断言含"已关→保持关"防它退化成"永远写 False"）；
+  `claim()` 入口加第二道闸，不依赖装配期那句一定在场。测试用真 `DockerProvider`（它的
+  `rotate_credentials` 是纯 `return False`，不碰守护进程）而不是假 provider。
+- `docs/SECURITY.md` §5 补了这条规则——此前它只出现在 `docs/ARCHITECTURE.md` 的 provider 接口注释里，
+  一份"谁都不核"的安全约束。
+- 计数：本条新增 2 支常驻用例（装配期约束三档 ＋ 真 DockerProvider 的入口拒绝），557 → 559。这一跑的 skip 从 1 变 2 是**通道抖动**而不是代码红：`test_pinned_base_ref…is_fetchable` 按设计在三态分流里选了 PENDING（daemon 传输答 not found、第二条传输逐字节确认摘要在）——上一轮为这条形状写的分支今天第一次在真实抖动下生效，读 skip 要按用例名读，只比总数会把环境事件当成覆盖率变化。
 ## 0.6.0 — 2026-09-26（把"没执行过的后端"逐个跑起来）
 
 `docs/VALIDATION.json`（`make validate` 生成）：collected 462 / passed 461 /

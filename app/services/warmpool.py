@@ -251,6 +251,17 @@ class WarmPoolManager:
         """
         if not self.settings.warm_pool_enabled:
             return None
+        # §7 的兜底：入口先看 provider 能不能轮换。不能轮换时走到下面只会是
+        # "占一格 READY → rotate 失败 → 拆 runtime → 退额度 → 返回 None"，
+        # 白烧一个真 runtime 与一轮账（compose root 那句禁用是同一规则的第一道，
+        # 但它是 import 期副作用，不该是唯一的一道）。
+        if not self.orchestrator.provider.supports_credential_rotation:
+            WARM_POOL_CLAIM_FAILED.inc()
+            logger.warning(
+                "warm pool claim refused: provider %r cannot rotate credentials",
+                self.orchestrator.provider.name,
+            )
+            return None
         claim_started = time.monotonic()
         # 原子抢占：UPDATE 后检查受影响行数；并发下至多一个事务成功
         claimed_id = db.scalar(

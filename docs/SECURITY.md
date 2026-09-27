@@ -45,6 +45,15 @@ Reliability > Reproducibility > **Security** > Observability > DX > Performance 
   非 admin 403；参数走 `Query(ge=1, le=…)` 且**上限与服务侧夹紧共用同一份定义**
   （`BENCHMARK_MAX_ITERATIONS`）；跑完自己回收。常驻在 `tests/test_warmpool_http_surface.py`。
 - 隔离测试：`tests/test_isolation.py` 必须保持全绿。
+- **不能轮换凭据的 provider 不许走 warm pool**（§7 P0）。warm runtime 的初始密码不属于任何用户，
+  交付前必须换掉；换不掉（Docker：运行中容器的 env 不可变，`docker.py:422` 直接 `return False`）
+  就意味着"把别人知道密码的 runtime 交给新用户"。两道闸：compose root 在装配期把
+  `warm_pool_enabled` 关掉并留 WARNING（`app/deps.py:apply_provider_constraints`），
+  `WarmPoolManager.claim()` 入口再挡一次（`warmpool.py`），不依赖"装配期那句一定生效"。
+  常驻读数是 `tests/test_warmpool_claim.py` 的两支：真 `DockerProvider` 在场时 claim 返回 None
+  **且 READY 那一格原样不动**（改前它会被占掉、runtime 被拆、账圈了又退），
+  以及装配期约束三档（不支持轮换→关；支持→不动；已关→保持关）。
+
 
 ## 6. 容器安全基线（Docker/K8s Provider）
 

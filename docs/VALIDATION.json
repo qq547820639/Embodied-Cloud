@@ -4,12 +4,12 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 557
+      "count": 559
     },
     "test_run": {
       "status": "PASS",
-      "passed": 556,
-      "skipped": 1,
+      "passed": 557,
+      "skipped": 2,
       "failed": 0,
       "failed_names": []
     },
@@ -22,8 +22,8 @@
       "note": "21/21 用例在真实后端上执行"
     },
     "integration_docker": {
-      "status": "PASS",
-      "note": "26/26 用例在真实后端上执行"
+      "status": "PARTIAL",
+      "note": "执行 25/26，跳过 1（哨兵 DOCKER_VALIDATION_PENDING 命中 1）"
     },
     "integration_browser": {
       "status": "PASS",

@@ -3,6 +3,7 @@
 所有 router 从本模块取：settings / engine / session / 认证依赖 / 服务对象。
 """
 
+import logging
 from collections.abc import Callable
 from typing import Annotated
 
@@ -101,15 +102,21 @@ worker = OperationWorker(
         (OperationWorker.PERIODIC_HOLD_SWEEP_EVERY, orchestrator.release_expired_holds),
     ],
 )
-# §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用
-if settings.warm_pool_enabled and not provider.supports_credential_rotation:
-    import logging
-
+# §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用。
+# 抽成函数是为了让它有常驻读者：以前这是 import 期的一句裸 if，谁都证不了它在生效
+# （tests/test_warmpool_claim.py::test_provider_constraint_is_testable_at_the_composition_root）。
+def apply_provider_constraints(settings: Settings, provider: object) -> None:
+    if not settings.warm_pool_enabled or provider.supports_credential_rotation:  # type: ignore[attr-defined]
+        return
     logging.getLogger("embodiedcloud").warning(
         "warm pool disabled: provider %r does not support credential rotation "
-        "(would leak old credentials on claim)", provider.name,
+        "(would leak old credentials on claim)",
+        provider.name,  # type: ignore[attr-defined]
     )
     settings.warm_pool_enabled = False
+
+
+apply_provider_constraints(settings, provider)
 warm_pool = WarmPoolManager(SessionFactory, orchestrator, settings)
 edge_service = EdgeService(SessionFactory)
 # deployment 服务统一在此装配（组合根），router 不再自建第二套 DI。
