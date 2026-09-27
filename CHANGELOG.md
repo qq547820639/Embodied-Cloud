@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 572 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 574 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -47,6 +47,20 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   **sdist 仍不可复算**：`f0dad9e2…` 对 `90e84be2…`。逐字节定位到 tar 头：顶层目录、`PKG-INFO` 与各子目录的
   `mtime` 记的是打包那一秒（pax 记录里还带小数），setuptools 84 没有把它们夹到 `SOURCE_DATE_EPOCH`；
   解包后内容零差异，所以 `dist/checksums.txt` 里 sdist 那行只能当"某一次构建的记录"。登记为 N-34 未闭的一半。
+
+### 预热池的容量闸门补上「跨遍」这一半（N-35 闭合）
+- **闸门只算了一遍的账**：`maintain()` 用一份共享的 AVAILABLE 显存多重集逐格预扣（N-29），
+  但补位是异步入队的 —— 格开了，`gpu_id` 要等 worker 跑完 PROVISION 才写上、卡才离开 AVAILABLE。
+  两遍 maintain 落在「入队之后、执行之前」这段窗口里时，第二遍看到的空闲集合与第一遍逐位相同，
+  于是 1 张卡 / 2 个模板 / size=1 会开出 **2 格**（常驻用例的原文读数）。`missing` 那侧一直是对的
+  （PREWARMING 计入 `ready+prewarming+legacy`），漏的是容量侧 —— 同一条不变量的两根轴只钉了一根。
+- **改法**：进入补位循环前，先给每个「还会去占卡、但卡还没占上」的池位（与 `missing` 同一批池位谓词
+  ∧ `gpu_id IS NULL`）按 best_fit 扣一张卡；扣完仍有余量才开新格。
+- **两头都钉**：`test_in_flight_slot_holds_its_card_across_passes`（改前红：2 格 / 1 张卡）与
+  `test_a_card_released_between_passes_still_gets_filled`（两遍之间真多出一张空闲卡 ⇒ 第二遍必须照开，
+  防「只要池里有在飞的格就永远不开格」那种假合规）。
+- **一条如实的边界**：`make warm-capacity` 的两遍之间有 drain（worker 先跑完才开第二遍），
+  所以取证台读不出这个形状；这轮的证据只来自常驻用例。门禁目录新开 G0.45。
 
 ### 本轮新增的待收口项
 - `N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到

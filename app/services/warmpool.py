@@ -109,6 +109,13 @@ class WarmPoolManager:
         # 一份**共享**的空闲卡多重集：闸门必须跨模板算账，按模板各算各的会重复许诺同一张卡
         # （实测：8 张卡、5 个模板、size=2 时逐模板判"有没有够用的卡"全部通过，仍然开出 10 格）。
         free_gib = sorted(self._free_capacities_gib(db))
+        # 在飞但还没占到卡的格先扣容量：PROVISION 是异步入队的，GPU 行要等 worker 真跑
+        # 起来才变 ALLOCATED，这段窗口里 AVAILABLE 集合看起来与上一遍一模一样，
+        # 于是另一张模板会把同一张卡再领一次（一格注定失败 → 收割 → DESTROY 的空转）。
+        for need in self._unbooked_inflight_gib(db):
+            held = next((g for g in free_gib if g >= need), None)
+            if held is not None:
+                free_gib.remove(held)
         warned_over_reserve = False
         for template in templates:
             ready = self._count_state(db, template.id, WarmPoolState.READY)
@@ -469,6 +476,35 @@ class WarmPoolManager:
         return time.monotonic() - start_time  # 超时兜底
 
     # ------------------------------------------------------------------
+    def _unbooked_inflight_gib(self, db: Session) -> list[int]:
+        """池里「还会去占卡、但卡还没占上」的格各需要多大显存（GiB），一格一项。
+
+        判定与 `missing` 用的是同一批池位（PREWARMING，或旧语义下无归属的
+        CREATED/QUEUED），再叠一条 `gpu_id IS NULL`：worker 真跑过 PROVISION 的格
+        已经有卡了，那张卡也不在 `AVAILABLE` 里，不该被扣第二次。
+        """
+        from sqlalchemy import and_, or_
+
+        rows = db.execute(
+            select(Template.recommended_vram_gb)
+            .join(Workspace, Workspace.template_id == Template.id)
+            .where(
+                Workspace.deleted_at.is_(None),
+                Workspace.gpu_id.is_(None),
+                or_(
+                    Workspace.warm_pool_state == WarmPoolState.PREWARMING.value,
+                    and_(
+                        Workspace.warm_pool_state.is_(None),
+                        Workspace.user_id.is_(None),
+                        Workspace.status.in_(
+                            [WorkspaceStatus.CREATED.value, WorkspaceStatus.QUEUED.value]
+                        ),
+                    ),
+                ),
+            )
+        ).all()
+        return [int(gib) for (gib,) in rows]
+
     def _count_state(self, db: Session, template_id: str, state: WarmPoolState) -> int:
         from sqlalchemy import func
 

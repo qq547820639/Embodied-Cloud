@@ -511,6 +511,59 @@ def test_reserve_slot_holds_one_card_back_for_interactive(db_factory):
         assert _warm_rows(db, "cartpole") == 1, "reserve=1 没把一张卡留给交互请求"
 
 
+def test_in_flight_slot_holds_its_card_across_passes(db_factory):
+    """上一轮还 queued 的格，它将来要占的那张卡不许在下一轮被许诺给别人。
+
+    `maintain` 是异步入队的：格开了，GPU 行却要等 worker 真跑 PROVISION 才变 ALLOCATED。
+    于是在"开了格 → worker 还没跑"这段窗口里，第二遍 maintain 看到的空闲多重集与第一遍
+    一模一样，另一张模板会把同一张卡再领一次 —— 两格里必有一格注定失败（收割 → DESTROY
+    的空转，正是闸门存在的理由）。这条测的是**跨遍**，不是同一遍内的共享多重集
+    （那由 `test_fill_is_a_shared_budget_across_templates` 钉）。
+    """
+    with db_factory() as db:
+        _two_templates(db, small_gb=8, big_gb=8)
+        _seed_cards(db, [8])  # 一张卡、两个模板、size=1 ⇒ 全场只能有一格
+        manager = _make_manager(db_factory, warm_pool_size=1)
+        manager.maintain(db)
+        assert _warm_rows(db, "small") + _warm_rows(db, "big") == 1, "第一遍就开重了"
+        stats = manager.maintain(db)  # worker 一格都还没跑
+        granted = _warm_rows(db, "small") + _warm_rows(db, "big")
+        assert granted == 1, (
+            f"两遍之间同一张卡被许诺了两次：{granted} 格 / 1 张卡 —— "
+            "PREWARMING 的格没占容量，闸门却把它当不存在"
+        )
+        assert stats["skipped_no_capacity"] == 1, stats
+
+
+def test_a_card_released_between_passes_still_gets_filled(db_factory):
+    """反向对照：预留只扣"在飞的格"那么多，真有余量时第二遍必须照开。
+
+    没有这一支，上一条的 1 可以来自"只要有 PREWARMING 就永远不开格"这种假合规。
+    """
+    with db_factory() as db:
+        _two_templates(db, small_gb=8, big_gb=8)
+        _seed_cards(db, [8])
+        manager = _make_manager(db_factory, warm_pool_size=1)
+        manager.maintain(db)  # 一格在飞，占掉那张 8 GiB
+        with db_factory() as extra:
+            extra.add(
+                Gpu(
+                    id="cap-gpu-late",
+                    gpu_uuid="cap-uuid-late",
+                    host_id="cap-host",
+                    model="cap-late",
+                    memory_total=8 * 1024,
+                    gpu_index=99,
+                    status=GpuStatus.AVAILABLE.value,
+                )
+            )
+            extra.commit()
+        stats = manager.maintain(db)
+        granted = _warm_rows(db, "small") + _warm_rows(db, "big")
+        assert granted == 2, f"多出一张真空闲的卡却没被开格用掉：{granted} 格 / 2 张卡（{stats}）"
+        assert stats["skipped_no_capacity"] == 0, stats
+
+
 def test_reserve_zero_keeps_the_old_behind_no_headroom(db_factory):
     """规则二的「不许误开火」：同一形状下 reserve=0 必须照旧填满 2 格。
 
