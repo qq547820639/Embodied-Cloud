@@ -1,7 +1,7 @@
 """runtime 失踪那一档要把串流会话一起终结（N-116）。
 
 一手核实过的形状：`_stop_cleanup`（STOP 与"节点不一致"两档共用，`orchestrator.py:448`）
-与 DESTROY（`:611`）都调 `streaming.terminate_for_workspace`，唯独 reconcile 的
+与 DESTROY（`:618`）都调 `streaming.terminate_for_workspace`，唯独 reconcile 的
 MISSING 档不调——它结算、放卡、写 `FAILED`、记 `stopped_at`，却把
 `streaming_sessions` 留成 `connected`，workspace 的 signal/media 端口也不清。
 后果是两张表互相打脸（与 N-82 同族）：`GET /api/workspaces/{id}` 说这一格已经死了，

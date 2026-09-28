@@ -580,13 +580,20 @@ class WorkspaceOrchestrator:
         return booked, after - before
 
     def _finalize_stop(self, db: Session, workspace: Workspace) -> None:
-        """结算运行段 + 释放 GPU + STOPPED（幂等；reconcile 与 stop 共用）。"""
+        """终结串流会话 + 结算运行段 + 释放 GPU + STOPPED（幂等；reconcile 与 stop 共用）。"""
         now = utcnow()
         # 只结算：抬 `gpu_seconds_total` 由 `_settle_run_delta` 自己负责（N-89），
         # 这样 destroy／reconcile→FAILED 那两条同样入账的路径不会漏计。
         self._settle_run_delta(db, workspace)
         # 释放 GPU（stop 后释放；幂等）
         self.scheduler.release(db, workspace.id)
+        # 写 STOPPED 之前把这一格的串流会话与端口收掉（N-117）。本函数原先是全仓唯一
+        # 「写终态却不自己终结」的位点：配对证据在调用链上（`_stop_cleanup:448`、reconcile
+        # 的 STOPPING 档 `:830` 都先终结过），而 `stop():421` 的幂等补做档只重跑本函数——
+        # 一旦某趟 `_stop_cleanup` 的终结先抛错（它与 provider.stop 同在 `:446-452` 那个 try，
+        # except 不 rollback），STOPPED 就与仍为 connected 的会话一起提交，之后每次重试都补不回来。
+        # 该调用只动库、无活动会话时返回 0、重复调用同结果，所以与上面那两处并存不是重复劳动。
+        self.streaming.terminate_for_workspace(db, workspace.id)
         workspace.status = WorkspaceStatus.STOPPED.value
         workspace.stopped_at = now
         workspace.started_at = None
