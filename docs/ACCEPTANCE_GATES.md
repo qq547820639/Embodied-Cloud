@@ -120,6 +120,7 @@
 | G0.109 账面指针一律写成仓内全路径，缩写与歧义都判违规 | `pytest tests/test_validation_matrix.py` | 真语料四桶读数 缩写 0／歧义 0／已限定 ≥150／外部 ≥1；合成语料四极各判各的（含长行号边界）；门禁本体确实把这条并进 offenders | PASS（常驻） |
 | G0.110 池子的余量与分配器吃同一条可见性证据 | `pytest tests/test_warmpool_capacity_visibility.py` | 唯一够用的卡挂在失联节点 ⇒ `created=0` 且零行 workspace；节点重报后同一格照开；两台都在线时不开火；AST 钉“借同一条谓词、函数体内无 `GpuHost`”，并有“重抄一份／根本没有规则”两态反证 | PASS（常驻） |
 | G0.111 缺席降级要能归位，人工判决不跟着归位 | `pytest tests/test_gpu_drain_provenance.py` | 少报⇒`draining`、重报⇒`available` 且真能分配出去；`drained`／`unhealthy`／`allocated` 三档在同样的两次重报里一动不动；占用中的卡 `/drain` 回 409 并点名状态、被拒的请求不改任何东西；provenance 登记册钉“DRAINED 只有 `mark_drained`、DRAINING 只有 `sync_host`”，归位必须排在 `status == DRAINING` 谓词之下（配没守卫／守卫错判决／别的枚举三态反证） | PASS（常驻） |
+| G0.112 管理员的下架意图独立成列，占用中的卡也判得动 | `pytest tests/test_gpu_drain_provenance.py` | 占用中 `/drain` 回 204 且 `GET /api/gpus` 读得到 `drain_requested_at`、`status` 仍是 allocated；释放后落成 drained 而非 available；提前撤意图则回到 available；`/undrain` 不抬 `draining`／`unhealthy`；意图列的写入者只能是 `mark_drained`＋`mark_undrained`（合成反证：自动路径归位时顺手置 NULL 必须被点名） | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

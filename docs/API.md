@@ -131,7 +131,8 @@
 | GET | `/api/gpus` | GPU inventory |
 | GET | `/api/gpus/hosts` | 主机列表 |
 | POST | `/api/gpus/{id}/unhealthy` | 标记异常（不参与调度） |
-| POST | `/api/gpus/{id}/drain` | 人工下架（`drained`，不再新分配也不随重报归位；占用中的卡回 409） |
+| POST | `/api/gpus/{id}/drain` | 提出下架要求（证据列 `drain_requested_at`；池子里的卡当场 `drained`，占用中的卡等释放时落成 `drained`） |
+| POST | `/api/gpus/{id}/undrain` | 撤回下架要求（`drained` 回 `available`；不解除 `draining`／`unhealthy`） |
 
 ## 认证方式
 
