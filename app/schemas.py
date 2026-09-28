@@ -140,6 +140,8 @@ class GpuOut(ORM):
     gpu_index: int | None
     status: str
     workspace_id: str | None
+    # 管理员的 drain 意图（证据列）：非 NULL＝已要求这张卡离开池子；`status` 仍是观察值。
+    drain_requested_at: datetime | None
     updated_at: datetime
 
 

@@ -94,3 +94,5 @@ def test_gpu_endpoints_non_admin_403():
             gid = gpu.id
         assert client.post(f"/api/gpus/{gid}/drain", headers=_auth(token)).status_code == 403
         assert client.post(f"/api/gpus/{gid}/unhealthy", headers=_auth(token)).status_code == 403
+        # N-125 新增的解除路径同样在管理门之后（少这一条，它就是个无人守的写入口）
+        assert client.post(f"/api/gpus/{gid}/undrain", headers=_auth(token)).status_code == 403

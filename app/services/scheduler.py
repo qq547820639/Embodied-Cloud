@@ -4,8 +4,9 @@
 - 分配：`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`（PostgreSQL 生效；SQLite 为
   no-op）—— 每轮只锁一行候选，候选被别人锁住时短暂退避重试；
   `gpu_allocations.gpu_id/workspace_id` 唯一约束兜底 —— 并发下至多一个事务插入成功。
-- 释放：幂等；stop/delete 后占用中的 GPU 回 AVAILABLE，人工判决（UNHEALTHY／DRAINED）
-  只清绑定、不改状态列——自动路径不替管理员撤判决。
+- 释放：幂等；stop/delete 后占用中的 GPU 回 AVAILABLE，但带着管理员下架意图
+  （`gpus.drain_requested_at` 非空）的占用卡落成 DRAINED；已有的 UNHEALTHY／DRAINED
+  只清绑定、不改状态列——自动路径不替管理员撤判决（N-123／N-125）。
 - UNHEALTHY／DRAINED 不参与调度也不自动归位；DRAINING（缺席降级）重新被上报到即归位。
 """
 
@@ -14,7 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import ColumnElement
@@ -304,13 +305,21 @@ class GpuScheduler:
             alloc.released_at = now
             db.delete(alloc)
         # 兼容：直接挂在 Gpu.workspace_id 的孤儿绑定也清理
-        # 状态列按"这张卡原来是占用还是被人判过"分叉：占用还回池子，人工判决
-        # （unhealthy／drained）原样留着——绑定必须清，判决不许被自动路径抹掉（N-123）。
+        # 状态列按"这张卡原来是什么判决"分叉：占用还回池子；占用中但挂着管理员下架意图的卡
+        # 落成 drained（意图是人的判决，释放只是把它兑现，不是替管理员撤判决，N-125）；
+        # 已有的 unhealthy／drained 原样留着，只清绑定。
         db.execute(
             update(Gpu)
             .where(Gpu.workspace_id == workspace_id)
             .values(
                 status=case(
+                    (
+                        and_(
+                            Gpu.status == GpuStatus.ALLOCATED.value,
+                            Gpu.drain_requested_at.is_not(None),
+                        ),
+                        GpuStatus.DRAINED.value,
+                    ),
                     (Gpu.status == GpuStatus.ALLOCATED.value, GpuStatus.AVAILABLE.value),
                     else_=Gpu.status,
                 ),
@@ -371,25 +380,48 @@ class GpuScheduler:
             db.commit()
 
     def mark_drained(self, db: Session, gpu_id: str) -> bool:
-        """管理员把这张卡从池子里摘出去（SLURM 的 DRAIN，不是机器那条 DOWN）。
+        """管理员要求这张卡离开池子——占用中也判得动（N-125，闭登记项 N-124）。
 
-        返回值是「这张卡现在是否处于 drained」，不是「有没有抛错」：池子里的卡
-        （available，或被缺席降级过的 draining）都判得动；占用中的卡不改写——
-        `gpus.status == allocated` 是本仓的占用权威（`app/main.py:36` 的 stuck 保护与
-        一批常驻断言都读它），把它抹掉就是新造一类两张表互相打脸。路由据此回 409，
-        改前那种「前置不满足 ⇒ 什么都不做 ⇒ 仍回 204」从此不再成立。
+        写的是意图证据列 `gpus.drain_requested_at`，占用事实不动：`status == allocated`
+        是这张卡在 `gpus` 一侧唯一的占用载体（对外的 `gpu_allocated` 指标就数它，
+        `app/main.py:34-37`；`workspaces.gpu_id` 那半边仍在，覆盖它就会让两张表各说各话）。
+        池子里的卡（available／被缺席降级过的 draining）当场
+        判成 drained；正在被用的卡保持 allocated，等 `release` 那一脚按意图把它落成 drained
+        ——K8s 的 `spec.unschedulable` 与 SLURM 的 `state=drain` 都是这个分工。
+        返回值是「这张卡现在是否带着管理员意图」，False 只可能是卡不存在。N-123 那版
+        用 409 拒绝占用中的卡，是因为当时没有第二列可以说"意图已经登记"。
         """
         gpu = db.get(Gpu, gpu_id)
         if gpu is None:
             return False
-        if gpu.status == GpuStatus.DRAINED.value:
-            return True  # 幂等：判决已经是这个形状，主张为真
-        if gpu.status in {GpuStatus.AVAILABLE.value, GpuStatus.DRAINING.value}:
-            gpu.status = GpuStatus.DRAINED.value
+        pool_states = {GpuStatus.AVAILABLE.value, GpuStatus.DRAINING.value}
+        if gpu.drain_requested_at is None or gpu.status in pool_states:
+            now = utcnow()
+            gpu.drain_requested_at = now
+            if gpu.status in pool_states:
+                gpu.status = GpuStatus.DRAINED.value
+            gpu.updated_at = now
+            db.commit()
+        return True
+
+    def mark_undrained(self, db: Session, gpu_id: str) -> bool:
+        """解除管理员的下架意图；只有带着这一意图的卡会被改动。
+
+        状态归位只处理管理员自己判下去的那一档：`drained → available`。
+        `draining`（机器判决）与 `unhealthy`（健康判决）不由这条路径撤销——它们各有
+        自己的所有者（分别是下一次成功上报与管理员的 `/unhealthy`）。
+        返回值是「这张卡现在是否已无下架意图」，False 只可能是卡不存在。
+        """
+        gpu = db.get(Gpu, gpu_id)
+        if gpu is None:
+            return False
+        if gpu.drain_requested_at is not None or gpu.status == GpuStatus.DRAINED.value:
+            gpu.drain_requested_at = None
+            if gpu.status == GpuStatus.DRAINED.value:
+                gpu.status = GpuStatus.AVAILABLE.value
             gpu.updated_at = utcnow()
             db.commit()
-            return True
-        return False
+        return True
 
     def list_gpus(self, db: Session) -> list[Gpu]:
         return list(db.scalars(select(Gpu).order_by(Gpu.host_id, Gpu.gpu_uuid)))
@@ -469,6 +501,13 @@ def recover_stuck_gpu_allocations(db: Session) -> None:
             .where(Gpu.workspace_id.notin_(occupied_ids))
             .values(
                 status=case(
+                    (
+                        and_(
+                            Gpu.status == GpuStatus.ALLOCATED.value,
+                            Gpu.drain_requested_at.is_not(None),
+                        ),
+                        GpuStatus.DRAINED.value,
+                    ),
                     (Gpu.status == GpuStatus.ALLOCATED.value, GpuStatus.AVAILABLE.value),
                     else_=Gpu.status,
                 ),
@@ -486,6 +525,13 @@ def recover_stuck_gpu_allocations(db: Session) -> None:
             .where(Gpu.workspace_id.is_not(None))
             .values(
                 status=case(
+                    (
+                        and_(
+                            Gpu.status == GpuStatus.ALLOCATED.value,
+                            Gpu.drain_requested_at.is_not(None),
+                        ),
+                        GpuStatus.DRAINED.value,
+                    ),
                     (Gpu.status == GpuStatus.ALLOCATED.value, GpuStatus.AVAILABLE.value),
                     else_=Gpu.status,
                 ),

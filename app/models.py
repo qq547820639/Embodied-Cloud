@@ -339,6 +339,11 @@ class Gpu(Base):
         nullable=True,
         index=True,
     )
+    # 管理员的 drain 意图（证据列，不是状态）：非 NULL＝已要求这张卡离开池子。
+    # 「占用」与「判决」分栏，`status` 只留观察值（N-124：挤在同一列时 `/drain` 只能
+    # 对占用中的卡回 409）。释放路径在工作跑完后把它落成 status=drained。
+    # NULL＝没有管理员提出过这个要求；不加 server default，理由见迁移文件。
+    drain_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )

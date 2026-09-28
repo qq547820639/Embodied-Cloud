@@ -15,8 +15,14 @@
 改法借 SLURM 的三分法（`sinfo`：DRAIN 是“per system administrator request”，DOWN 是
 “Slurm can automatically place nodes in this state if some failure occurs”，`*` 是不响应），
 把"谁下的判决"提到值本身：`DRAINED` 只由管理员写、只有管理员能解除；`DRAINING` 从此只表示
-"上一次上报里没有它"，这一次有了就归位。占用中的卡不参与（`allocated` 是本仓的占用权威，
-`app/main.py:36` 的 stuck 保护读它），所以 `/drain` 撞上占用的卡改为 409 并点名当前状态。
+"上一次上报里没有它"，这一次有了就归位。
+N-125 改写了"占用中的卡不参与"这一步（登记项 N-124 闭）：占用与判决挤在同一列，才只能让
+`/drain` 拒绝占用中的卡（N-123 那一版回 409）。现在管理员意图有自己的证据列
+`gpus.drain_requested_at`（alembic 第 16 节），`/drain` 占用中也判得动——当场只记意图、
+`status` 仍是 allocated（占用事实在 `gpus` 一侧只有这一个载体——对外的 `gpu_allocated`
+指标就数它，`app/main.py:34-37`），等 `release` 那一脚
+按意图兑现成 drained；`/undrain` 是唯一的解除路径。于是本文件的 409 那一极换成了
+"意图当场读得到、释放时兑现"那一极。
 
 失联前提一律由真实生产者（`sync_host` 少报）制造，不手写 `UPDATE gpus SET status=…`；
 库用 tmp_path 下的文件库：判的是"另一个会话读得到"，不是同一连接里的脏读。
@@ -77,6 +83,12 @@ def _row(sf, uuid: str) -> tuple[str, str | None]:
         gpu = db.scalar(select(Gpu).where(Gpu.gpu_uuid == uuid))
         assert gpu is not None, f"清单里根本没有 {uuid}，本档前提没造出来"
         return gpu.status, gpu.workspace_id
+
+
+def _intent(sf, gpu_id: str) -> object:
+    """这张卡的管理员下架意图（证据列），从另一个会话读。"""
+    with sf() as db:
+        return db.get(Gpu, gpu_id).drain_requested_at
 
 
 def _hold(sf, workspace_id: str) -> Gpu:
@@ -245,11 +257,82 @@ def _card(gpu_id: str) -> tuple[str, str | None]:
 
 
 def _unwrite(gpu_id: str) -> None:
-    """把测试借走的那张卡还给共享池：DRAINED 不会被任何自动路径抬回来，不收就会永久少一张。"""
+    """把测试借走的那张卡还给共享池：drained 不会被任何自动路径抬回来，不收就永久少一张。"""
     with SessionFactory() as db:
         gpu = db.get(Gpu, gpu_id)
+        gpu.drain_requested_at = None
         gpu.status = GpuStatus.AVAILABLE.value
         db.commit()
+
+
+def test_an_intent_on_a_busy_card_is_cashied_when_the_workload_ends(factory) -> None:
+    """占用中判下架：当场只记意图，`release` 才把它兑现成 drained。"""
+    _sync(factory, ("gpu-a", "gpu-b"))
+    held = _hold(factory, "ws-intent")
+    with factory() as db:
+        assert GpuScheduler(factory).mark_drained(db, held.id) is True
+
+    assert _row(factory, held.gpu_uuid) == (GpuStatus.ALLOCATED.value, "ws-intent"), (
+        "占用事实必须还在（`allocated` 是本仓的占用权威）"
+    )
+    assert _intent(factory, held.id), "204 之后意图必须读得到"
+
+    with factory() as db:
+        GpuScheduler(factory).release(db, "ws-intent")
+    assert _row(factory, held.gpu_uuid) == (GpuStatus.DRAINED.value, None), (
+        "意图没有在释放时兑现 ⇒ 这张卡悄悄回了池子"
+    )
+
+
+def test_withdrawing_the_intent_before_the_workload_ends_returns_the_card_to_the_pool(factory) -> None:
+    """反悔要来得及：意图撤掉之后，同一张卡释放回的是 available。"""
+    _sync(factory, ("gpu-a", "gpu-b"))
+    held = _hold(factory, "ws-withdraw")
+    with factory() as db:
+        sched = GpuScheduler(factory)
+        sched.mark_drained(db, held.id)
+    with factory() as db:
+        assert GpuScheduler(factory).mark_undrained(db, held.id) is True
+    assert _row(factory, held.gpu_uuid) == (GpuStatus.ALLOCATED.value, "ws-withdraw")
+    assert not _intent(factory, held.id), "撤回没落到意图列上"
+
+    with factory() as db:
+        GpuScheduler(factory).release(db, "ws-withdraw")
+    assert _row(factory, held.gpu_uuid) == (GpuStatus.AVAILABLE.value, None)
+
+
+def test_undrain_lifts_the_admin_verdict_back_into_the_pool(factory) -> None:
+    """池子里被下架的卡：`/undrain` 是唯一的解除路径（机器路径都不碰它）。"""
+    _sync(factory, ("gpu-a", "gpu-b"))
+    with factory() as db:
+        gpu = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-b"))
+        GpuScheduler(factory).mark_drained(db, gpu.id)
+    assert _row(factory, "gpu-b")[0] == GpuStatus.DRAINED.value
+
+    _sync(factory, ("gpu-a", "gpu-b"))
+    assert _row(factory, "gpu-b")[0] == GpuStatus.DRAINED.value, "重报不许替管理员撤判决"
+    with factory() as db:
+        gpu = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-b"))
+        GpuScheduler(factory).mark_undrained(db, gpu.id)
+    assert _row(factory, "gpu-b") == (GpuStatus.AVAILABLE.value, None)
+    assert not _intent(factory, gpu.id)
+
+
+def test_undrain_does_not_lift_the_machine_or_health_verdicts(factory) -> None:
+    """撤的是自己的判决：`draining`（机器）与 `unhealthy`（健康）都不归这条路管。"""
+    _sync(factory, ("gpu-a", "gpu-b"))
+    _sync(factory, ("gpu-a",))
+    _sync(factory, ("gpu-a", "gpu-b"))  # gpu-b 已经归位，先把它判成 unhealthy
+    with factory() as db:
+        gpu = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-b"))
+        GpuScheduler(factory).mark_unhealthy(db, gpu.id)
+        GpuScheduler(factory).mark_undrained(db, gpu.id)
+    assert _row(factory, "gpu-b")[0] == GpuStatus.UNHEALTHY.value, "撤下架意图撤掉了健康判决"
+
+    with factory() as db:
+        other = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-a"))
+        GpuScheduler(factory).mark_undrained(db, other.id)
+    assert _row(factory, "gpu-a")[0] == GpuStatus.AVAILABLE.value, "本来就正常的卡不该被这条路改坏"
 
 
 def test_the_drain_endpoint_lands_the_verdict_and_is_idempotent() -> None:
@@ -270,12 +353,11 @@ def test_the_drain_endpoint_lands_the_verdict_and_is_idempotent() -> None:
             _unwrite(gid)
 
 
-def test_the_drain_endpoint_refuses_a_busy_card_and_names_why() -> None:
-    """占用中的卡：改前回 204 而什么都没发生；现在 409，并把当前状态说给客户。
+def test_draining_a_busy_card_records_the_intent_and_cashiers_it_at_release() -> None:
+    """占用中的卡：N-125 之后 `/drain` 判得动，判的是**意图列**而不是把占用事实抹掉。
 
-    占用前提走真实产品路径（建工作区→auto_start→等 RUNNING），不手写 `status=allocated`：
-    这张卡随后要经过真的 stop→release，才能同时证到"被拒的请求不改任何东西"与
-    "正常放卡仍然回池"（`case` 的 WHEN 那一支）。
+    改前（N-123 那一版）这里回 409，因为一列装不下两件事；现在 204 之后必须同时读到
+    "还在被用"与"管理员要求下架"，而工作区停止时意图被兑现成 drained（不是 available）。
     """
     with TestClient(app) as client:
         token = _register(client, "n123-busy@example.com", "n123-busy")
@@ -293,21 +375,35 @@ def test_the_drain_endpoint_refuses_a_busy_card_and_names_why() -> None:
             wait_status(client, token, wid, "running")
             gid = client.get(f"/api/workspaces/{wid}", headers=_auth(token)).json()["gpu_id"]
             assert gid, "RUNNING 的工作区必须绑一张卡"
-            assert _card(gid) == (GpuStatus.ALLOCATED.value, wid)
 
-            resp = client.post(f"/api/gpus/{gid}/drain", headers=_auth(token))
-            assert resp.status_code == 409, resp.text
-            assert GpuStatus.ALLOCATED.value in resp.text, f"409 要点名拒绝的理由：{resp.text}"
-            assert _card(gid) == (GpuStatus.ALLOCATED.value, wid), "被拒绝的请求不该改任何东西"
+            assert client.post(f"/api/gpus/{gid}/drain", headers=_auth(token)).status_code == 204
+            listed = {g["id"]: g for g in client.get("/api/gpus", headers=_auth(token)).json()}
+            assert listed[gid]["status"] == GpuStatus.ALLOCATED.value, (
+                f"占用事实被抹掉了：{listed[gid]}"
+            )
+            assert listed[gid]["drain_requested_at"], (
+                f"204 之后读端必须看得到那份意图：{listed[gid]}"
+            )
 
             assert client.post(f"/api/workspaces/{wid}/stop", headers=_auth(token)).status_code == 200
             wait_status(client, token, wid, "stopped")
-            assert _card(gid) == (GpuStatus.AVAILABLE.value, None), (
-                "占用中的卡放卡后仍要回池：case 的 WHEN 那一支不能被改坏"
+            assert _card(gid) == (GpuStatus.DRAINED.value, None), (
+                "意图要在释放时兑现成 drained，而不是把卡放回池子"
             )
         finally:
             with SessionFactory() as db:
                 GpuScheduler(SessionFactory).release(db, wid)
+                _undo_drain(gid)
+
+
+def _undo_drain(gpu_id: str) -> None:
+    """把这张卡的下架意图撤掉并放回池子（共享池的卡不能被一轮判据永久摘走）。"""
+    with SessionFactory() as db:
+        gpu = db.get(Gpu, gpu_id)
+        gpu.drain_requested_at = None
+        if gpu.status == GpuStatus.DRAINED.value:
+            gpu.status = GpuStatus.AVAILABLE.value
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -430,18 +526,65 @@ def scheduler_source() -> str:
     return SCHEDULER_SRC.read_text(encoding="utf-8")
 
 
-def test_the_provenance_registry_names_exactly_one_writer_per_verdict():
-    """`DRAINED` 只有管理员那一处、`DRAINING` 只有缺席降级那一处。
+def intent_writers(source: str) -> set[str]:
+    """哪些函数会写 `gpus.drain_requested_at`（管理员的意图列，自动路径一律不许碰）。"""
+    writers: set[str] = set()
+    for fn in _defs(ast.parse(source)):
+        for node in _own_nodes(fn):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Attribute) and t.attr == "drain_requested_at" for t in node.targets
+            ):
+                writers.add(fn.name)
+    return writers
 
-    多一个能写人工判决的自动路径，就是把 N-114 (b) 重新打开——这条判据是它的闸门。
+
+CLEAN_SHAPE = """
+def sync_host(db, host_id, gpus):
+    for info in gpus:
+        gpu = find(info)
+        if gpu.status == GpuStatus.DRAINING.value:
+            gpu.status = GpuStatus.AVAILABLE.value
+"""
+
+AUTO_PATH_CLEARS_INTENT = """
+def sync_host(db, host_id, gpus):
+    for info in gpus:
+        gpu = find(info)
+        if gpu.status == GpuStatus.DRAINING.value:
+            gpu.drain_requested_at = None
+            gpu.status = GpuStatus.AVAILABLE.value
+"""
+
+INTENT_SETTER = """
+def mark_drained(db, gpu_id):
+    gpu.drain_requested_at = utcnow()
+"""
+
+
+def test_only_the_admin_paths_touch_the_intent_column():
+    """意图列只有 `/drain` 与 `/undrain` 两条路能写；自动路径一碰就把人的判决撤了。"""
+    assert intent_writers(scheduler_source()) == {"mark_drained", "mark_undrained"}
+    assert intent_writers(CLEAN_SHAPE) == set()
+    assert intent_writers(AUTO_PATH_CLEARS_INTENT) == {"sync_host"}, (
+        "重报顺手清掉管理员意图——这把尺子必须看得见"
+    )
+    assert intent_writers(INTENT_SETTER) == {"mark_drained"}
+
+
+def test_the_provenance_registry_names_exactly_one_writer_per_verdict():
+    """`DRAINED` 由管理员那一脚与"意图兑现"那两脚写，`DRAINING` 只有缺席降级那一处。
+
+    登记册的意义：任何新增的自动路径想写人工判决，都得先在这里被点名并写明理由
+    （release／recover 之所以在列，是因为它们读的是 `drain_requested_at`——判决的来源
+    仍然是管理员，N-125）。多一个不读意图列的写入者，就是把 N-114 (b) 重新打开。
     """
     registry = status_writer_registry(scheduler_source())
     assert registry == {
-        "AVAILABLE": {"sync_host", "release", "recover_stuck_gpu_allocations"},
+        "AVAILABLE": {"sync_host", "mark_undrained", "release", "recover_stuck_gpu_allocations"},
         "ALLOCATED": {"allocate"},
         "UNHEALTHY": {"mark_unhealthy"},
         "DRAINING": {"sync_host"},
-        "DRAINED": {"mark_drained"},
+        "DRAINED": {"mark_drained", "release", "recover_stuck_gpu_allocations"},
     }, registry
 
 
