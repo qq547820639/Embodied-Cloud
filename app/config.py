@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     # （泄漏方向是"少报可用额"，不会多扣钱）
     billing_hold_ttl_minutes: int = 60
 
+    # --- GPU inventory 时效（§3 调度面，N-110）---
+    # host 的 `online` 要由最近一次 inventory 同步背书。刷新档是 120 tick ≈ 2 min
+    # （`OperationWorker.PERIODIC_INVENTORY_EVERY`），这里取 5 个窗口：一次 nvidia-smi
+    # 或 `list_node` 卡住不该把整台节点判死。与 N-108 的「90 s ＝ 设备 5 s 轮询 × 18」
+    # 同一取向——判死阈值必须显著大于生产者自己的周期。
+    gpu_host_offline_after_seconds: int = 600
+
     # --- edge agent（§25）---
     # `online` 必须由最近一次心跳背书：超过这个秒数没心跳就是 `offline`。
     # 阈值方向有成熟先例：AWS IoT 对 MQTT 连接的判据是「IoT core will wait 1.5x of the

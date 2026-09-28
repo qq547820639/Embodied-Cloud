@@ -30,6 +30,7 @@
 | warm_pool_prewarm_failed_total 增量 | 持续 >0 说明池在反复开"注定失败"的格（容量不够或 `warm_pool_size` 与舰队不匹配），不是用户故障 |
 | workspace_running / gpu_allocated 失衡 | allocated > running + 5 |
 | gpu UNHEALTHY 数量 | >0 |
+| gpu_hosts 出现 `offline` | 那台节点连续 5 个刷新窗口（默认 600 s）没再同步成功：docker 档查 `nvidia-smi` 还在不在，k8s 档查 kubeconfig 与集群可达性。`GET /api/gpus/hosts` 的 `last_synced_at` 就是最后一次成功同步的时刻——`online` 只是它的结论（N-110） |
 | API 5xx 率 | >1% 持续 10min |
 
 ## 3. 容量模型

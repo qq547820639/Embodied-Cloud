@@ -11,6 +11,7 @@
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +24,11 @@ from ..utils import utcnow
 # MiB 常略低于 N*1024（如 24GB 卡上报 24564 MiB，比 24576 少 12 MiB）。分配时
 # 给需求 MiB 留一个小容差，避免「24GB 卡无法满足 24GB 模板」的误判。
 VRAM_TOLERANCE_MIB = 16
+
+# `gpu_hosts.status` 是自由文本列（不是 GpuStatus 那样的枚举），这两个值就是它的全部
+# 词表：写在哪里、由谁改写，都只在本模块里发生。
+HOST_ONLINE = "online"
+HOST_OFFLINE = "offline"
 
 
 @dataclass
@@ -91,15 +97,28 @@ class GpuScheduler:
         provider: str,
         gpus: list[GpuInfo],
     ) -> GpuHost:
-        """幂等 upsert host + gpus；消失的 GPU 标记 DRAINING（不再分配）。"""
+        """幂等 upsert host + gpus；消失的 GPU 标记 DRAINING（不再分配）。
+
+        每次成功的同步都顺手给 `last_synced_at` 盖章：`status="online"` 是结论，
+        这一列才是它的证据，`expire_stale_hosts` 只按证据改判。
+        """
+        seen_at = utcnow()
         host = db.get(GpuHost, host_id)
         if host is None:
-            host = GpuHost(id=host_id, name=name, address=address, provider=provider)
+            host = GpuHost(
+                id=host_id,
+                name=name,
+                address=address,
+                provider=provider,
+                status=HOST_ONLINE,
+                last_synced_at=seen_at,
+            )
             db.add(host)
         else:
             host.address = address
             host.provider = provider
-            host.status = "online"
+            host.status = HOST_ONLINE
+            host.last_synced_at = seen_at
         db.flush()
 
         seen: set[str] = set()
@@ -253,6 +272,34 @@ class GpuScheduler:
     # ------------------------------------------------------------------
     # status
     # ------------------------------------------------------------------
+    def expire_stale_hosts(
+        self, db: Session, *, offline_after_seconds: int, now: datetime | None = None
+    ) -> int:
+        """把「上次同步已过期」的 host 从 online 改判 offline，返回改了几台。
+
+        判据只看证据列，不看结论列：`status == online` 且 `last_synced_at` 早于阈值。
+        `last_synced_at IS NULL`（本列上线后还没同步过的存量行）**一律不动**——
+        从没同步过不等于同步失败，把它判成 offline 与把它留在 online 一样是编造。
+
+        这里不碰调度：`allocate` 的权威是 `gpus.status`，host 的 `status` 只有一处
+        读者（admin 的 `GET /api/gpus/hosts` 与前端表格）。本函数的职责就是把那一处
+        读数变成真话——运维不该看到一台早已离开集群的节点仍然"在线"。
+        """
+        moment = now or utcnow()
+        threshold = moment - timedelta(seconds=offline_after_seconds)
+        stale = db.scalars(
+            select(GpuHost).where(
+                GpuHost.status == HOST_ONLINE,
+                GpuHost.last_synced_at.is_not(None),
+                GpuHost.last_synced_at < threshold,
+            )
+        ).all()
+        for host in stale:
+            host.status = HOST_OFFLINE
+        if stale:
+            db.commit()
+        return len(stale)
+
     def mark_unhealthy(self, db: Session, gpu_id: str) -> None:
         gpu = db.get(Gpu, gpu_id)
         if gpu is not None:

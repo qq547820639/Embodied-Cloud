@@ -44,6 +44,11 @@ def test_gpu_endpoints_admin_and_release_cycle():
         hosts = client.get("/api/gpus/hosts", headers=_auth(token))
         assert hosts.status_code == 200
         assert any(h["name"] == "mock-host" for h in hosts.json())
+        # N-110：`status` 只是结论，读端必须同时拿到它的凭证列——OPERATIONS 的排查表
+        # 就指着这一列，端点不吐它的话那张表是在承诺一个拿不到的东西。
+        mock_host = next(h for h in hosts.json() if h["name"] == "mock-host")
+        assert mock_host["last_synced_at"], f"开机 inventory 之后 hosts 读不到同步时刻：{mock_host}"
+        assert mock_host["status"] == "online"
 
         # 创建并运行工作区 → GPU 被分配并绑定
         created = client.post(

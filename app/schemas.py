@@ -149,6 +149,9 @@ class GpuHostOut(ORM):
     address: str
     provider: str
     status: str
+    # `status` 的凭证：最后一次 inventory 同步成功的时刻（N-110）。
+    # 读端自己就能核结论，不必信那一列单边写的词。
+    last_synced_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------

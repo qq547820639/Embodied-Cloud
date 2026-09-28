@@ -260,12 +260,11 @@ def test_start_is_idempotent_and_a_second_start_does_not_double_the_loop() -> No
 # ---------------------------------------------------------------------------
 
 
-def test_all_five_background_tasks_are_registered_with_their_constants() -> None:
-    """C1 配额监控／warm pool maintain／hold 回收／reconcile 驱动者／edge 时效判定：五条都要在周期表上。
+def test_all_seven_background_tasks_are_registered_with_their_constants() -> None:
+    """C1 配额／warm pool／hold 回收／reconcile／edge 时效／inventory 重报／host 时效：七条都要在表上。
 
     间隔写成字面量的话常量就成了没人读的装饰（N-99 的 A 组同一条理由），所以这里同时钉"是谁"与"多久"。
-    N-108 加第五条时把这条从 four 改名为 five 并加了一行——注册表成员是**精确等值**断言，
-    新增周期任务必然要同时改这条判据（登记为有意的行为变化，不是放宽断言）。
+    N-108 加第五条时把这条从 four 改名为 five 并加了一行。
     """
     from app import deps
 
@@ -277,6 +276,8 @@ def test_all_five_background_tasks_are_registered_with_their_constants() -> None
         ("pending hold 回收", deps.orchestrator.release_expired_holds, OperationWorker.PERIODIC_HOLD_SWEEP_EVERY),
         ("reconcile 驱动者", deps._reconcile_stuck_cells, OperationWorker.PERIODIC_RECONCILE_EVERY),
         ("edge 时效判定", deps._expire_stale_edge_agents, OperationWorker.PERIODIC_EDGE_SWEEP_EVERY),
+        ("GPU inventory 重报", deps._refresh_gpu_inventory, OperationWorker.PERIODIC_INVENTORY_EVERY),
+        ("host 时效判定", deps._expire_stale_gpu_hosts, OperationWorker.PERIODIC_HOST_SWEEP_EVERY),
     ]
     for label, callable_, cadence in expected:
         matched = [(n, c) for n, c in entries if c == callable_]
@@ -287,6 +288,15 @@ def test_all_five_background_tasks_are_registered_with_their_constants() -> None
         assert matched[0][0] == cadence, (
             f"{label} 的间隔不是常量 {cadence}，实际 {matched[0][0]}"
         )
+    # 上面只钉"清单里的每条都在表上"，看不见"表上又长了一条而清单没跟"——
+    # 那种新增会一路绿着进生产（本仓实测：N-110 加两档时逐条判据全部照绿）。
+    # 这一根把 docstring 里"成员是精确等值"那句话真的变成断言。
+    on_table = {getattr(c, "__name__", repr(c)) for _, c in entries}
+    listed = {getattr(c, "__name__", repr(c)) for _, c, _ in expected}
+    assert on_table == listed, (
+        f"周期表与这条判据不再同集合：只在表上 {sorted(on_table - listed)}；"
+        f"只在判据里 {sorted(listed - on_table)}"
+    )
 
 
 # ---------------------------------------------------------------------------

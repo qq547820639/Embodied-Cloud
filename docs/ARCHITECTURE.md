@@ -84,6 +84,13 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
 - 分配顺序：AVAILABLE（显存满足模板需求，含 16MiB 厂商预留容差）→ ALLOCATED；
   释放：stop/destroy → AVAILABLE。
 - UNHEALTHY 不参与调度；DRAINING 不再分配新 workspace。
+- **inventory 是周期重报的，不是开机一次的**（N-110）：worker 周期表每 120 tick 重跑
+  同一个 `bootstrap_gpu_inventory`，于是"节点少报一张卡 → 那张卡 DRAINING"这段收敛在
+  进程存活期内就有驱动者；`sync_host` 每次成功都给 `gpu_hosts.last_synced_at` 盖章，
+  `expire_stale_hosts` 只按这一列把过期的 `online` 改判 `offline`（阈值
+  `gpu_host_offline_after_seconds`，默认 600 s＝5 个刷新窗口；`last_synced_at IS NULL`
+  的存量行不动——从没同步过无从判失效）。主机状态不进门禁：`allocate` 的权威是
+  `gpus.status`，这一列的职责是让 admin 的 `GET /api/gpus/hosts` 说真话。
 - **等不到 ≠ 没卡**（本轮在真 PG 行锁上量出来后分开报）：`allocate()` 每轮都数得到
   `still_waiting`（AVAILABLE 且容量足够的行数），预算耗尽时若它还大于 0 就抛
   `GpuPoolContendedError`（"N 张卡在等锁"），只有真没候选才抛 `No GPU available with >= X GB`。

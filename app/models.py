@@ -312,6 +312,10 @@ class GpuHost(Base):
     address: Mapped[str] = mapped_column(String(255), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, default="docker")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="online")
+    # 最近一次 inventory 同步成功的时刻（`GpuScheduler.sync_host` 盖章）。
+    # `status` 只是结论，这一列才是它的证据：没有它，"在线"就是开机那一次
+    # `bootstrap_gpu_inventory` 的永久快照（N-110）。NULL＝本列上线后还没同步过。
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 

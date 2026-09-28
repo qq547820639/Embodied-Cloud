@@ -105,6 +105,30 @@ def _expire_stale_edge_agents() -> int:
         )
 
 
+def _refresh_gpu_inventory() -> None:
+    """周期性重报 GPU inventory（N-110）。
+
+    `sync_host` 里"未再上报的 GPU → DRAINING"那段收敛过去只有开机一个驱动者
+    （`bootstrap_db`），于是节点上少了一张卡要等进程重启才看得见，而 host 的
+    `online` 更是一次性的永久快照。这里开自己的会话重跑同一个函数：不新写第二套
+    同步逻辑，只给它补一个驱动者。
+    """
+    with SessionFactory() as db:
+        bootstrap_gpu_inventory(db)
+
+
+def _expire_stale_gpu_hosts() -> int:
+    """host 的 `online` 过期改判 offline。
+
+    阈值只有一个来源（`settings.gpu_host_offline_after_seconds`），服务本体不留
+    第二份默认值——与 `_expire_stale_edge_agents` 同形。
+    """
+    with SessionFactory() as db:
+        return scheduler.expire_stale_hosts(
+            db, offline_after_seconds=settings.gpu_host_offline_after_seconds
+        )
+
+
 provider = make_provider()
 orchestrator = WorkspaceOrchestrator(
     SessionFactory,
@@ -130,6 +154,10 @@ worker = OperationWorker(
         (OperationWorker.PERIODIC_RECONCILE_EVERY, _reconcile_stuck_cells),
         # §25/N-108：设备 `online` 的时效判定（没有心跳就不是在线）
         (OperationWorker.PERIODIC_EDGE_SWEEP_EVERY, _expire_stale_edge_agents),
+        # §3/N-110：inventory 重报（节点少一张卡要能在运行中被看见）
+        (OperationWorker.PERIODIC_INVENTORY_EVERY, _refresh_gpu_inventory),
+        # §3/N-110：host 的 `online` 要由最近一次同步背书（N-108 的节点版）
+        (OperationWorker.PERIODIC_HOST_SWEEP_EVERY, _expire_stale_gpu_hosts),
     ],
 )
 # §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用。

@@ -95,6 +95,12 @@ class OperationWorker:
     PERIODIC_RECONCILE_EVERY = 30
     RECONCILE_STUCK_OLDER_THAN_SECONDS = 60
     RECONCILE_CELLS_PER_PASS = 8
+    # N-110：inventory 重报。`sync_host` 里"未再上报的 GPU → DRAINING"那段收敛一直
+    # 只有开机一个驱动者（`bootstrap_db`），节点少了一张卡也要等重启才看得见。
+    PERIODIC_INVENTORY_EVERY = 120
+    # N-110：host 时效判定档。阈值住在配置里（`gpu_host_offline_after_seconds`），
+    # 这一档只决定"多久看一眼"，与 `PERIODIC_EDGE_SWEEP_EVERY` 同形。
+    PERIODIC_HOST_SWEEP_EVERY = 30
 
     def __init__(
         self,

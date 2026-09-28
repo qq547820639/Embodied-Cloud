@@ -212,6 +212,33 @@ def test_openapi_version_matches():
     assert spec["info"]["version"] == _pyproject_version()
 
 
+def test_openapi_artifact_is_the_current_app():
+    """`docs/openapi.json` 必须就是现在这台 app 生成的那份（漂了就要红）。
+
+    上面那条只核 `info.version`：加一个响应字段、改一个模型它都照绿。实测就是证据——
+    N-110 给 `GpuHostOut` 加列后重跑 `make api-docs`，仓里的 spec 除了新列之外还补出了
+    一个 `usage_segment_booked`（那是更早一轮进的模型），说明这份对外工件已经漂了一轮
+    以上而没有任何常驻读者发现。`api-docs` 是手工目标，不在 `validate` 里，
+    所以由这条判据来当它的读者。
+    """
+    import json
+
+    from app.main import app
+
+    generated = json.loads(json.dumps(app.openapi()))
+    committed = json.loads(Path("docs/openapi.json").read_text())
+
+    def _drift(section: str) -> list[str]:
+        now, was = generated.get(section, {}), committed.get(section, {})
+        names = set(now) | set(was)
+        return sorted(name for name in names if now.get(name) != was.get(name))
+
+    drift = _drift("components") + _drift("paths") + _drift("info")
+    assert not drift, (
+        f"docs/openapi.json 与当前 app 不一致（{drift}）——跑 `make api-docs` 重新生成"
+    )
+
+
 def _locked_project_version(lock_text: str) -> str | None:
     """从 uv.lock 里取本项目自己的版本（不能按行找：每个包都有 version 行）。"""
     for block in lock_text.split("[[package]]"):

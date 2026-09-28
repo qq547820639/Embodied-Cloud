@@ -3043,6 +3043,18 @@
           "status": {
             "type": "string",
             "title": "Status"
+          },
+          "last_synced_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced At"
           }
         },
         "type": "object",
@@ -4161,6 +4173,11 @@
           "accumulated_seconds": {
             "type": "integer",
             "title": "Accumulated Seconds"
+          },
+          "usage_segment_booked": {
+            "type": "boolean",
+            "title": "Usage Segment Booked",
+            "default": false
           }
         },
         "type": "object",
