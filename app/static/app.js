@@ -1246,11 +1246,11 @@ async function refreshGpus() {
           <td>${esc(g.model)}</td>
           <td>${esc(g.host_id)}</td>
           <td class="num">${g.memory_total}</td>
-          <td><span class="badge ${esc(g.status)}">${GPU_STATUS_CN[g.status] || esc(g.status)}</span>${g.health === "unhealthy" ? ` <span class="badge unhealthy">${GPU_HEALTH_CN.unhealthy}</span>` : ""}</td>
+          <td><span class="badge ${esc(g.status)}">${GPU_STATUS_CN[g.status] || esc(g.status)}</span>${g.health === "unhealthy" ? ` <span class="badge unhealthy">${GPU_HEALTH_CN.unhealthy}</span>` : ""}${g.drain_requested_at && g.status !== "drained" ? ` <span class="badge draining">已请求排水</span>` : ""}</td>
           <td class="muted">${g.workspace_id ? `#${shortId(g.workspace_id)}` : "—"}</td>
           <td><div class="actions-cell">
-            ${g.status === "available" ? `<button class="secondary small" data-action="gpu-drain" data-id="${esc(g.id)}">进入维护</button>` : ""}
-            ${g.status !== "unhealthy" ? `<button class="danger small" data-action="gpu-unhealthy" data-id="${esc(g.id)}">标记异常</button>` : ""}
+            ${g.drain_requested_at || g.status === "drained" ? `<button class="secondary small" data-action="gpu-undrain" data-id="${esc(g.id)}">撤回下架要求</button>` : `<button class="secondary small" data-action="gpu-drain" data-id="${esc(g.id)}">进入维护</button>`}
+            ${g.health === "unhealthy" ? `<button class="secondary small" data-action="gpu-healthy" data-id="${esc(g.id)}">恢复健康</button>` : `<button class="danger small" data-action="gpu-unhealthy" data-id="${esc(g.id)}">标记异常</button>`}
           </div></td>
         </tr>`).join("")}</tbody></table>`;
   } catch (err) {
@@ -1260,10 +1260,19 @@ async function refreshGpus() {
 }
 
 async function gpuDrain(id) {
-  if (!await confirmDialog("GPU 进入维护", "该 GPU 将不再接收新工作区（已有分配不受影响）。确认？", { confirmText: "确认维护" })) return;
+  if (!await confirmDialog("GPU 进入维护", "该 GPU 将离开池子：空闲的卡当场下架，占用中的卡在本次使用结束后下架。确认？", { confirmText: "确认下架" })) return;
   try {
     await api(`/api/gpus/${id}/drain`, { method: "POST" });
-    toast("已标记维护中");
+    toast("已登记下架要求");
+    await refreshGpus();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+async function gpuUndrain(id) {
+  if (!await confirmDialog("撤回下架要求", "撤回管理员的下架判决后该 GPU 重新接收工作区；缺席降级不由这里解除。确认？", { confirmText: "撤回要求" })) return;
+  try {
+    await api(`/api/gpus/${id}/undrain`, { method: "POST" });
+    toast("已撤回下架要求");
     await refreshGpus();
   } catch (err) { toast(err.message, "error"); }
 }
@@ -1273,6 +1282,15 @@ async function gpuUnhealthy(id) {
   try {
     await api(`/api/gpus/${id}/unhealthy`, { method: "POST" });
     toast("已标记异常");
+    await refreshGpus();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+async function gpuHealthy(id) {
+  if (!await confirmDialog("恢复健康", "解除管理员的健康判决，该 GPU 重新参与调度；占用与下架意图各由自己的那一列说话，这里都不动。确认？", { confirmText: "恢复健康" })) return;
+  try {
+    await api(`/api/gpus/${id}/healthy`, { method: "POST" });
+    toast("已解除健康判决");
     await refreshGpus();
   } catch (err) { toast(err.message, "error"); }
 }
@@ -1309,7 +1327,9 @@ const actionHandlers = {
   "agent-heartbeat": (el) => agentHeartbeat(el.dataset.id),
   "agent-telemetry": (el) => agentTelemetry(el.dataset.id),
   "gpu-drain": (el) => gpuDrain(el.dataset.id),
+  "gpu-undrain": (el) => gpuUndrain(el.dataset.id),
   "gpu-unhealthy": (el) => gpuUnhealthy(el.dataset.id),
+  "gpu-healthy": (el) => gpuHealthy(el.dataset.id),
 };
 
 document.addEventListener("click", (e) => {

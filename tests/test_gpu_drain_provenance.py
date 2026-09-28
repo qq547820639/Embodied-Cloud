@@ -788,6 +788,134 @@ def test_the_admin_ui_labels_every_gpu_status():
     )
 
 
+# ---------------------------------------------------------------------------
+# 前端面（续）：GPU 那一行的读者必须拿真值作比较，且每个判决都能在控制台撤回
+# ---------------------------------------------------------------------------
+# `gpu_row_offenders` 量的是 N-126 之后新长出来的那一类缺陷：状态列的值集被改小
+# （`unhealthy` 搬进 `gpus.health`），而按旧值集写的**读者**还留在树上。这种比较不会抛错、
+# 不会红任何一条既有断言，只会永远为真或永远为假——`app/static/app.js` 的
+# `g.status !== "unhealthy"` 就是这个形状：它本该"已判异常的卡不再给标记异常按钮"，
+# 实际是每张卡都给。判据按别名解析（不认死变量名 `g`），所以改名躲不过它。
+
+# 模板体里合法地嵌着别的模板串（按钮就是用嵌套反引号写的），所以"到下一个反引号为止"会
+# 把行读成一截——读成一截时后面的比较全部消失，判据就会在带缺陷的树上假绿。收口锚必须
+# 落在 `)` + `join(` 这一对上，并用 `</tr>` 自证整行都读到了。
+_GPU_ROW_TEMPLATE = re.compile(r"gpus\.map\(\((\w+)\)\s*=>\s*`(.*?)`\)\.join\(", re.S)
+# 只认字面量右操作数：`g.status === GPU_STATUS_CN[x]` 这类不在本尺射程内（没有可比的对端）。
+_LITERAL_COMPARE = r'{alias}\.(status|health)\s*[!=]==\s*["\']([^"\']+)["\']'
+
+
+def gpu_row_comparisons(js: str) -> list[tuple[str, str]]:
+    """GPU 行模板里对 `status`／`health` 的字面量比较，返回 (列名, 被比的值)。
+
+    读不到模板、或模板里一处比较都没有 ⇒ 直接判红：这条判据的分母必须由被测量对象自己
+    提供，否则"没有违规"与"提取式坏了/渲染块被删了"在终端上同形。
+    """
+    row = _GPU_ROW_TEMPLATE.search(js)
+    assert row, "app.js 里读不到 `gpus.map((g) => ` … `)` 这段行渲染，这条判据没有分母"
+    alias, body = row.group(1), row.group(2)
+    assert body.rstrip().endswith("</tr>"), (
+        f"行模板只读到一截（末尾 {body[-40:]!r}）：再往后的比较会静默漏掉，判据就不能算读过"
+    )
+    found = [
+        (m.group(1), m.group(2))
+        for m in re.finditer(_LITERAL_COMPARE.format(alias=re.escape(alias)), body, re.S)
+    ]
+    assert found, f"别名 `{alias}` 的 GPU 行模板里一处 status/health 比较都没有，判据为空转"
+    return found
+
+
+def gpu_row_offenders(js: str) -> list[tuple[str, str]]:
+    """被比的价值不落在该列自己的枚举里 ⇒ 这是一次永远为真/永远为假的死比较。"""
+    allowed = {
+        "status": {member.value for member in GpuStatus},
+        "health": {member.value for member in GpuHealth},
+    }
+    return [(column, value) for column, value in gpu_row_comparisons(js) if value not in allowed[column]]
+
+
+def _gpu_row_js(status_value: str) -> str:
+    """合成行模板：变量名故意不叫 `g`，用来证明判据不是按名字认的。"""
+    return (
+        "const rows = `<tbody>${gpus.map((card) => `\n"
+        '  <tr><td>${card.gpu_uuid}</td>\n'
+        f'  <td>${{card.status === "available" ? "x" : ""}}</td>\n'
+        f'  <td>${{card.status !== "{status_value}" ? `<button data-action="gpu-unhealthy"></button>` : ""}}</td>\n'
+        '  <td>${card.health === "unhealthy" ? "y" : ""}</td></tr>`).join("")}</tbody>`;'
+    )
+
+
+def test_the_gpu_row_gate_catches_a_status_value_that_no_longer_exists():
+    """尺子自己得会开火：把 N-126 那一步改回去，必须被点名（配三态反证）。"""
+    assert gpu_row_offenders(_gpu_row_js("unhealthy")) == [("status", "unhealthy")], (
+        "合成反证没开火：判据读不到死比较，那主档的绿就没有意义"
+    )
+    assert gpu_row_offenders(_gpu_row_js("drained")) == [], "合法值被判成违规（分母过宽）"
+    with pytest.raises(AssertionError, match="没有分母"):
+        gpu_row_comparisons("function noop() { return 1; }")
+    with pytest.raises(AssertionError, match="空转"):
+        gpu_row_comparisons("const t = `<tbody>${gpus.map((card) => `<tr><td>${card.id}</td></tr>`).join("")}`;")
+
+
+def test_the_gpu_row_does_not_compare_status_to_a_value_it_cannot_hold():
+    """真语料：GPU 行的每一个 status／health 比较都必须打在同一列的真值集上。
+
+    健康从状态列搬走（N-126）之后，状态列只剩四值；拿第五种写法去比它，按钮的可见性就
+    不再由任何事实决定——这正是本文件反复钉的「存在性主张要由事实背书」。
+    """
+    assert gpu_row_offenders(APP_JS.read_text(encoding="utf-8")) == []
+
+
+def _gpu_post_actions() -> set[str]:
+    """从路由自己的 AST 取「管理员能下的判决」末段名（不手抄端点清单）。"""
+    router_src = (DEPS_SRC.parent / "routers" / "gpus.py").read_text(encoding="utf-8")
+    actions: set[str] = set()
+    for node in ast.walk(ast.parse(router_src)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if (
+                isinstance(dec, ast.Call)
+                and isinstance(dec.func, ast.Attribute)
+                and dec.func.attr == "post"
+                and dec.args
+                and isinstance(dec.args[0], ast.Constant)
+                and isinstance(dec.args[0].value, str)
+            ):
+                actions.add(dec.args[0].value.rstrip("/").rsplit("/", 1)[-1])
+    return actions
+
+
+def _console_action_keys(js: str) -> set[str]:
+    """`actionHandlers` 的键（事件委托真的认识的动作名）。提取不到就判红，同上一条判据。"""
+    block = re.search(r"const actionHandlers = \{(.*?)\n\};", js, re.S)
+    assert block, "app.js 里读不到 actionHandlers，这条判据没有分母"
+    keys = {m.group(1) for m in re.finditer(r'["\']([\w-]+)["\']\s*:', block.group(1))}
+    assert keys, "actionHandlers 体解析出来是空的——提取式坏了"
+    return keys
+
+
+def test_every_admin_gpu_verdict_has_a_console_reader():
+    """四个判决端点都得能在管理台点上：只给"下判决"不给"撤判决"，等于把回退留给改库。
+
+    分母由路由自己给（`@router.post("/{gpu_id}/X")`），不是手抄的名单；`gpu-<X>` 既要出现在
+    行模板里、也要出现在 `actionHandlers` 里——只写按钮不接处理器，点了什么都不会发生，
+    而这两种缺席在页面上长得一样。
+    """
+    actions = _gpu_post_actions()
+    assert len(actions) >= 4, f"GPU 路由上的判决端点少到 {sorted(actions)}，分母不自证"
+    js = APP_JS.read_text(encoding="utf-8")
+    handlers = _console_action_keys(js)
+    unhandled = sorted(f"gpu-{name}" for name in actions if f"gpu-{name}" not in handlers)
+    row = _GPU_ROW_TEMPLATE.search(js)
+    assert row, "读不到 GPU 行模板"
+    body = row.group(2)
+    missing_in_row = sorted(f"gpu-{name}" for name in actions if f'data-action="gpu-{name}' not in body)
+    assert missing_in_row == [], f"这些判决在管理台没有按钮：{missing_in_row}"
+    assert unhandled == [], f"这些按钮没有接处理器，点了不会发请求：{unhandled}"
+    assert handlers >= {f"gpu-{name}" for name in actions}
+
+
 def test_the_inventory_sweep_is_still_driven_periodically() -> None:
     """归位这段收敛只在真有人重报时才发生：周期驱动者必须还在（N-110 的那根线）。
 

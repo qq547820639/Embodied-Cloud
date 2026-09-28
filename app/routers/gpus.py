@@ -74,8 +74,8 @@ def mark_undrained(gpu_id: str, db: DB, user: CurrentUser):
     """撤回下架意图（K8s 的 `uncordon`）：drained 回 available，占用中的意图一并清除。
 
     这一格必须存在：N-125 之后 `/drain` 会落在一张**正在被使用**的卡上，若没有撤回路径，
-    一次误点就是一张永久掉的卡，只能改库。`unhealthy` 与缺席降级（`draining`）不在这里撤——
-    它们各有自己的所有者（管理员的 `/unhealthy` 与下一次成功上报）。
+    一次误点就是一张永久掉的卡，只能改库。健康判决（`gpus.health`）与缺席降级（`draining`）
+    不在这里撤——它们各有自己的所有者（管理员的 `/healthy` 与下一次成功上报）。
     """
     _admin(user)
     if not scheduler.mark_undrained(db, gpu_id):

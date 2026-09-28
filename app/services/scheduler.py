@@ -5,9 +5,10 @@
   no-op）—— 每轮只锁一行候选，候选被别人锁住时短暂退避重试；
   `gpu_allocations.gpu_id/workspace_id` 唯一约束兜底 —— 并发下至多一个事务插入成功。
 - 释放：幂等；stop/delete 后占用中的 GPU 回 AVAILABLE，但带着管理员下架意图
-  （`gpus.drain_requested_at` 非空）的占用卡落成 DRAINED；已有的 UNHEALTHY／DRAINED
-  只清绑定、不改状态列——自动路径不替管理员撤判决（N-123／N-125）。
-- UNHEALTHY／DRAINED 不参与调度也不自动归位；DRAINING（缺席降级）重新被上报到即归位。
+  （`gpus.drain_requested_at` 非空）的占用卡落成 DRAINED；已有的 DRAINED 只清绑定、
+  不改状态列——自动路径不替管理员撤判决（N-123／N-125）。
+- DRAINED 不参与调度也不自动归位；DRAINING（缺席降级）重新被上报到即归位。健康判决不住在
+  状态列里（N-126／ADR 0010）：它由 `gpus.health` 说，分配候选用 `health_is_usable()` 拒掉。
 """
 
 import time
@@ -332,7 +333,7 @@ class GpuScheduler:
         # 兼容：直接挂在 Gpu.workspace_id 的孤儿绑定也清理
         # 状态列按"这张卡原来是什么判决"分叉：占用还回池子；占用中但挂着管理员下架意图的卡
         # 落成 drained（意图是人的判决，释放只是把它兑现，不是替管理员撤判决，N-125）；
-        # 已有的 unhealthy／drained 原样留着，只清绑定。
+        # 已有的 drained 原样留着，只清绑定（健康判决不住在状态列里，这一脚碰不到它，N-126）。
         db.execute(
             update(Gpu)
             .where(Gpu.workspace_id == workspace_id)

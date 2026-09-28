@@ -221,6 +221,151 @@ def test_non_admin_cannot_open_gpu_view(page, api):
     assert page.query_selector('.nav-item[data-view="gpus"]') is None or page.is_hidden('.nav-item[data-view="gpus"]')
 
 
+# ---------------------------------------------------------------------------
+# 管理台的 GPU 行：三个维度各自的读者（N-128）
+# ---------------------------------------------------------------------------
+
+
+def _promote_admin(db_path, email: str) -> None:
+    """把刚注册的用户抬成 admin。
+
+    管理台是「占用／健康／下架意图」这三列唯一的人类读者，所以这条线必须真的以 admin
+    身份进 `#/gpus`；注册接口只发 user，提升就直接写这个测试自己拥有的 sqlite 文件。
+    rowcount 判 1：写不到人身上时不能继续，否则后面每一句都是"没有管理员"造成的假绿。
+    """
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("UPDATE users SET role='admin' WHERE email=?", (email,))
+        conn.commit()
+        assert cur.rowcount == 1, f"提升 admin 落空（users 里没有 {email}）"
+
+
+def _click_and_confirm(page, selector: str, confirm_text: str) -> None:
+    """点行内动作 → 确认弹窗里点那一颗同名按钮 → 等弹窗关掉（动作是异步发的）。"""
+    page.click(selector)
+    page.wait_for_selector("#dialog-root .dialog-backdrop", timeout=20000)
+    page.evaluate(
+        """(label) => {
+            const btns = [...document.querySelectorAll('#dialog-root .dialog-actions button')];
+            const b = btns.find((x) => x.textContent.trim() === label);
+            if (!b) throw new Error('确认弹窗里没有 ' + label + '：' + btns.map((x) => x.textContent));
+            b.click();
+        }""",
+        confirm_text,
+    )
+    page.wait_for_selector("#dialog-root .dialog-backdrop", state="detached", timeout=20000)
+
+
+def _gpu_row(page, gpu_uuid: str) -> str:
+    selector = f'#gpus table tbody tr:has-text("{gpu_uuid}")'
+    page.wait_for_selector(selector, timeout=30000)
+    return selector
+
+
+def _has_chip(page, row: str, text: str) -> bool:
+    """行内徽章位点：整行取文本会被按钮字面量污染（"标记异常"里就含"异常"）。"""
+    return page.query_selector(f'{row} .badge:has-text("{text}")') is not None
+
+
+def _gpu_by_id(api, token: str, gpu_id: str) -> dict:
+    return next(g for g in api.get("/api/gpus", token).json() if g["id"] == gpu_id)
+
+
+def test_admin_gpu_row_shows_the_matching_pole_of_each_verdict(page, api, live_server, page_errors):
+    """每张卡的按钮和徽章必须由当前判决决定——死比较只有真 DOM 能抓到（N-126 的读者面）。
+
+    改前的 `app/static/app.js:1253` 写的是 `g.status !== "unhealthy"`：状态列在 N-126 之后
+    不存在这个值，于是这个条件恒为真，"标记异常"按钮在任何卡上都不消失。字符串级断言
+    读不出"恒为真"（它只看得见文本在不在源码里），六视图那条用例又跳过 gpus 视图，
+    所以这一档此前没有任何读者。
+
+    两个极性各自都要走到，才谈得上"按钮跟着判决走"：
+    - 空闲卡：`/unhealthy` ⇒ 异常徽章 + 按钮翻成`恢复健康`；`/healthy` ⇒ 回到原极。
+    - 占用卡：`/drain` 只登记意图 ⇒ `已请求排水`读者出现、状态**仍是**已分配；工作区停掉
+      之后意图被兑现成人工下架，再`撤回下架要求`回到可用（末尾这步顺手把池子还回去）。
+    """
+    email, password = api.register()
+    _promote_admin(live_server.db_path, email)
+    token = api.token(email, password)
+    free = next(
+        g
+        for g in api.get("/api/gpus", token).json()
+        if g["status"] == "available" and g["health"] is None and g["drain_requested_at"] is None
+    )
+
+    login(page, email, password)
+    page.goto("/#/gpus", wait_until="domcontentloaded")
+    row = _gpu_row(page, free["gpu_uuid"])
+
+    # 前提自证：这一行的初始极是"下判决"，不是"撤判决"
+    assert page.is_visible(f'{row} [data-action="gpu-unhealthy"]'), "空闲卡没给标记异常按钮"
+    assert not page.is_visible(f'{row} [data-action="gpu-healthy"]'), (
+        "从没被判过的卡直接出现`恢复健康`：健康列不是这个形状（NULL＝没人判过）"
+    )
+
+    _click_and_confirm(page, f'{row} [data-action="gpu-unhealthy"]', "标记异常")
+    page.wait_for_selector(f'{row} [data-action="gpu-healthy"]', timeout=30000)
+    assert page.query_selector(f'{row} .badge.unhealthy') is not None, (
+        "判了异常却没有健康徽章——刚拆出来的那一维又被藏回去"
+    )
+    judged = _gpu_by_id(api, token, free["id"])
+    assert judged["health"] == "unhealthy", judged
+    assert judged["status"] == "available" and judged["drain_requested_at"] is None, (
+        f"/unhealthy 越界改了别的维度：{judged}"
+    )
+
+    _click_and_confirm(page, f'{row} [data-action="gpu-healthy"]', "恢复健康")
+    page.wait_for_selector(f'{row} [data-action="gpu-unhealthy"]', timeout=30000)
+    restored = _gpu_by_id(api, token, free["id"])
+    assert restored["health"] is None, restored
+    # 徽章那一半只能按位点判：行内文字里"标记异常"这颗按钮本来就含"异常"，整行取文本分不出两极
+    assert page.query_selector(f'{row} .badge.unhealthy') is None, "撤了判决徽章还在"
+
+    # ── 占用卡：意图是证据列，不覆盖占用事实 ──
+    template_id = api.get("/api/templates", token).json()[0]["id"]
+    created = api.post(
+        "/api/workspaces", token, {"name": "gpu-intent", "template_id": template_id, "auto_start": True}
+    )
+    assert created.status_code == 201, created.text
+    ws_id = created.json()["id"]
+    deadline = time.monotonic() + 60
+    busy: dict | None = None
+    while time.monotonic() < deadline:
+        busy = next((g for g in api.get("/api/gpus", token).json() if g["workspace_id"] == ws_id), None)
+        if busy is not None:
+            break
+        time.sleep(0.5)
+    assert busy is not None, f"60s 内没有卡被分配给 {ws_id}，占用前提没造出来"
+
+    row = _gpu_row(page, busy["gpu_uuid"])
+    assert page.is_visible(f'{row} [data-action="gpu-drain"]'), "占用中的卡不给下架按钮（N-125 之后判得动）"
+    assert not _has_chip(page, row, "已请求排水")
+    _click_and_confirm(page, f'{row} [data-action="gpu-drain"]', "确认下架")
+    page.wait_for_selector(f'{row} [data-action="gpu-undrain"]', timeout=30000)
+    assert _has_chip(page, row, "已请求排水"), "意图列有值却在表格里读不到——这一列就没有人类读者"
+    pending = _gpu_by_id(api, token, busy["id"])
+    assert pending["status"] == "allocated" and pending["drain_requested_at"], (
+        f"登记意图时把占用抹掉了：{pending}"
+    )
+
+    api.request("POST", f"/api/workspaces/{ws_id}/stop", token)
+    page.evaluate("() => showView('gpus')")
+    released = _gpu_by_id(api, token, busy["id"])
+    assert released["status"] == "drained", f"释放后意图没被兑现成下架：{released}"
+    gpu_row = _gpu_row(page, busy["gpu_uuid"])
+    assert not _has_chip(page, gpu_row, "已请求排水"), (
+        "下架已兑现却还挂着待兑现的读者，表格里同一件事出现两种说法"
+    )
+    _click_and_confirm(page, f'{row} [data-action="gpu-undrain"]', "撤回要求")
+    back = _gpu_by_id(api, token, busy["id"])
+    assert back["status"] == "available" and back["drain_requested_at"] is None, back
+    assert page.is_visible(f'{_gpu_row(page, busy["gpu_uuid"])} [data-action="gpu-drain"]')
+    # 全程零 JS 异常、零 4xx/5xx：改前占用中的卡 `/drain` 回 409，会被这根探针直接记下来
+    assert page_errors == [], f"控制台出现 JS 错误或失败请求：{page_errors}"
+
+
+
 def test_register_login_and_logout_userbar(page, api):
     email, password = api.register()
     login(page, email, password)
