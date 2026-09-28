@@ -50,6 +50,7 @@ from app.models import (
 )
 from app.services.scheduler import GpuInfo, GpuScheduler, recover_stuck_gpu_allocations
 from tests.dbfiles import db_url
+from tests.gpu_drift import gpu_ownership_disagreements
 
 ENGINE = create_engine(db_url("recover-drift"), connect_args={"check_same_thread": False})
 Factory = sessionmaker(bind=ENGINE, expire_on_commit=False)
@@ -254,42 +255,6 @@ def test_the_gap_checker_can_see_a_missing_case() -> None:
     assert status_case_gaps(STATUS_CASES, missing) == [WorkspaceStatus.CREATED.value]
     assert status_case_gaps(STATUS_CASES, set(STATUS_CASES)) == []
 
-
-# ---------------------------------------------------------------------------
-# 判据：跨表一致性（两个方向的冲突都能点名）
-# ---------------------------------------------------------------------------
-
-
-def gpu_ownership_disagreements(db: Session) -> list[dict[str, str]]:
-    """`gpus` 与 `workspaces` 互相指认的冲突清单；空表 = 两张权威表一致。
-
-    - `card-points-at-holder`：`gpus.workspace_id = w.id` 而 `w.gpu_id != gpus.id`
-      —— 卡被一个不声称持有它的格占着：谁也抢不走，持有它的人也不会来放（卡被钉死）。
-    - `holder-points-at-card`：`w.gpu_id = g.id` 而 `g.workspace_id != w.id`
-      —— 正是本轮缺陷的形状：强制放卡之后格子还声称持有那张卡。
-    """
-    out: list[dict[str, str]] = []
-    for gpu in db.scalars(select(Gpu).order_by(Gpu.id)):
-        if gpu.workspace_id is None:
-            continue
-        holder = db.get(Workspace, gpu.workspace_id)
-        if holder is None or holder.gpu_id != gpu.id:
-            out.append(
-                {
-                    "kind": "card-points-at-holder",
-                    "gpu_id": gpu.id,
-                    "workspace_id": gpu.workspace_id,
-                }
-            )
-    for ws in db.scalars(select(Workspace).order_by(Workspace.id)):
-        if ws.gpu_id is None:
-            continue
-        card = db.get(Gpu, ws.gpu_id)
-        if card is None or card.workspace_id != ws.id:
-            out.append(
-                {"kind": "holder-points-at-card", "gpu_id": ws.gpu_id, "workspace_id": ws.id}
-            )
-    return out
 
 
 # ---------------------------------------------------------------------------
