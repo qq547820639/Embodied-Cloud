@@ -163,6 +163,49 @@ def test_request_sends_the_agent_token_header(monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# 发现响应的形状：不是清单必须报错，不能读成"今天没活"（N-109）
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"deployments": []}',  # 200 + 对象：合法 JSON，但顶层不是清单
+        b'{"detail": "upstream rejected"}',  # 网关/代理把自己的信封塞进了 200
+        b"null",  # 最坏的形状：`list(None)` 直接 TypeError，而 `else []` 会静默
+        b'"ok"',  # 标量
+    ],
+)
+def test_assigned_that_is_not_an_array_is_a_hard_error(monkeypatch, body: bytes):
+    """`[]` 与"响应根本不是清单"一读就同形，而含义相反：前者是没活干，后者是没读到。
+
+    静默折成 `[]` 的形状是：设备不取件、不报错、退出码 0，运维看到的是一台在线且
+    空闲的设备——与 `heartbeat` 那条"没报错不等于在线"的教义同形（N-108）。
+    """
+    _serve(monkeypatch, body)
+    with pytest.raises(AgentClientError) as seen:
+        _client().list_assigned("agent-1")
+    assert "not a JSON array" in str(seen.value), str(seen.value)
+    assert TOKEN not in str(seen.value)
+
+
+def test_undecodable_assigned_body_is_a_hard_error(monkeypatch):
+    """HTML 错误页顶着 200：`_json` 那一层就拒，轮不到形状判断。"""
+    _serve(monkeypatch, b"<html>502 from proxy</html>")
+    with pytest.raises(AgentClientError, match="non-JSON body"):
+        _client().list_assigned("agent-1")
+
+
+def test_empty_assigned_array_is_a_legitimate_idle_reading(monkeypatch):
+    """不开火对照：真的"没有你的活"仍然是空清单，不是错误。"""
+    _serve(monkeypatch, b"[]")
+    assert _client().list_assigned("agent-1") == []
+
+
+def test_a_real_assigned_list_passes_through_unchanged(monkeypatch):
+    _serve(monkeypatch, b'[{"id": "d1", "status": "pending"}]')
+    assert _client().list_assigned("agent-1") == [{"id": "d1", "status": "pending"}]
+
+
+# ----------------------------------------------------------------------
 # 驱动
 # ----------------------------------------------------------------------
 def test_mock_driver_refuses_to_run_before_load(tmp_path: Path):

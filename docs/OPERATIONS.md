@@ -329,7 +329,9 @@ embodiedcloud-edge-agent run                    # 或 --json --iterations 1 做�
 
 每轮做的事：心跳 → 发现绑定给自己的部署 → `begin` → 流式取件（边写边算 sha256，
 超体积上限即熔断并删除半成品）→ 与部署记录的期望摘要核对 → `report-checksum` →
-mock 驱动装载并跑一次 → 以 `kind=edge-run` 回报遥测。运维看结果：
+mock 驱动装载并跑一次 → 以 `kind=edge-run` 回报遥测。任一步失败都会在同一格里说清它
+走到了哪一步：发现响应不是清单 ⇒ 整轮硬失败（不会读成"今天没活"）；机器人已经上机而
+遥测上报失败 ⇒ 那一格仍是 `ran`、另带 `reported: false`，退出码非零。运维看结果：
 `GET /api/edge/agents/{id}/telemetry`。
 
 排查顺序：
@@ -340,6 +342,8 @@ mock 驱动装载并跑一次 → 以 `kind=edge-run` 回报遥测。运维看�
 | 一轮下来 `assigned` 为空 | 部署有没有在 `POST /deployments` 时带 `edge_agent_id`（指派是控制面动作） |
 | `ArtifactIntegrityError` | 产物被换过或链路损坏：文件不会被留下，也不会被喂给驱动；重下即可，若持续红查上游 artifact 登记 |
 | 第二轮不跑驱动 | 有意为之：只在"本轮亲手推到 verified"的那一次上机（无运行游标，见 ADR 0007 后果段） |
+| 退出码 1、`not a JSON array` | 发现端点回来的不是清单（中间层改了响应体）。设备不会把它读成"没活干"：查 base URL 是否被指到了网关/登录页 |
+| stderr `已运行，但结果未能上报`、退出码 1 | 机器人**已经动过**，只是那条 `edge-run` 遥测没进控制面：`deployments/{id}` 会停在 verified 而无人知晓运行结果。别在没核对的情况下手工重跑同一模型 |
 
 真机驱动接入点是 `edge_agent/drivers.py:build_driver`，目前只有 `mock`。
 

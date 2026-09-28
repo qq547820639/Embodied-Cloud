@@ -111,8 +111,20 @@ class AgentClient:
         return self._json("POST", f"/edge/agents/{agent_id}/telemetry", {"kind": kind, "payload": payload})
 
     def list_assigned(self, agent_id: str) -> list[dict]:
-        body = self._json("GET", f"/edge/agents/{agent_id}/deployments/assigned")
-        return list(body) if isinstance(body, list) else []
+        """发现：控制面回答「这台设备该做什么」的那张清单。
+
+        形状不符必须抛，不能折成 `[]`。`[]` 是一个**合法读数**（"今天没有你的活"），
+        于是"响应根本不是清单"会被设备理解成"没活干"：不取件、不报错、退出码 0，
+        而运维侧看到的是一台在线设备。本文件对非 JSON 的响应体已经是这个立场
+        （`_json` 抛 `AgentClientError`），清单这条路径不该例外。
+        """
+        path = f"/edge/agents/{agent_id}/deployments/assigned"
+        body = self._json("GET", path)
+        if not isinstance(body, list):
+            raise AgentClientError(
+                None, self.url(path), f"assigned is not a JSON array, got {type(body).__name__}"
+            )
+        return list(body)
 
     def begin(self, agent_id: str, deployment_id: str) -> dict:
         return self._json(

@@ -13,6 +13,7 @@
 机器人；设备把运行结果作为遥测（`kind=edge-run`）回传，控制面据此收口。
 """
 
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,6 +36,8 @@ class RoundOutcome:
     sha256: str = ""
     detail: str = ""
     observation: RobotObservation | None = None
+    #: 控制面是否知道这一格的处置。`False` 只有一种来源：机器人已经动过而上报失败。
+    reported: bool = True
 
     def as_json(self) -> dict:
         return {
@@ -44,6 +47,7 @@ class RoundOutcome:
             "status_after": self.status_after,
             "sha256": self.sha256,
             "detail": self.detail,
+            "reported": self.reported,
             "observation": None
             if self.observation is None
             else {"ok": self.observation.ok, "steps": self.observation.steps, "detail": self.observation.detail},
@@ -118,6 +122,7 @@ class EdgeAgentRuntime:
 
         current = record
         fetched = ""
+        unreported: str | None = None
         if before == "pending":
             current = self.client.begin(self.agent_id, dep_id)
         if str(current.get("status")) == "downloading":
@@ -135,21 +140,40 @@ class EdgeAgentRuntime:
         if after == "verified" and fetched and dest.is_file():
             self.driver.load(dest, str(current.get("robot_type") or ""))
             observation = self.driver.run()
-            self.client.telemetry(
-                self.agent_id,
-                RUN_TELEMETRY_KIND,
-                {
-                    "deployment_id": dep_id,
-                    "driver": getattr(self.driver, "name", "unknown"),
-                    "sha256": fetched or checksum,
-                    "ok": observation.ok,
-                    "steps": observation.steps,
-                    "detail": observation.detail,
-                },
-            )
+            try:
+                self.client.telemetry(
+                    self.agent_id,
+                    RUN_TELEMETRY_KIND,
+                    {
+                        "deployment_id": dep_id,
+                        "driver": getattr(self.driver, "name", "unknown"),
+                        "sha256": fetched or checksum,
+                        "ok": observation.ok,
+                        "steps": observation.steps,
+                        "detail": observation.detail,
+                    },
+                )
+            except AgentClientError as exc:
+                # 机器人**已经动过**了。让异常继续往外抛会被 `run_once` 的通用分支折成
+                # `("error", before, before)`——那一格读起来跟"取件之前就失败了"完全一样，
+                # 而事实是一次真实的物理运行没人知道。这里反过来把它记全：action 仍是
+                # `ran`、状态仍是 `verified`、观察结果保留，另加 `reported=False` 与一行
+                # stderr；抬退出码是 `main()` 的责任，不在这里悄悄降级也不在这里退出。
+                unreported = str(exc)
+                print(f"[edge-agent] {dep_id} 已运行，但结果未能上报：{exc}", file=sys.stderr)
             action = "ran"
         elif after == "verified" and not fetched:
             action = "skipped"
+        detail = "" if observation is None else observation.detail
+        if unreported is not None:
+            detail = f"{detail}；已运行但上报失败：{unreported}"
         return RoundOutcome(
-            dep_id, action, before, after, sha256=fetched, detail="" if observation is None else observation.detail
+            dep_id,
+            action,
+            before,
+            after,
+            sha256=fetched,
+            detail=detail,
+            observation=observation,
+            reported=unreported is None,
         )

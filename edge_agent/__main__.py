@@ -105,7 +105,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for o in outcomes:
             print(f"{o.deployment_id[:8]} {o.status_before}→{o.status_after} {o.action} {o.detail}")
-    return 1 if any(o.action == "error" for o in outcomes) else 0
+    # 非零退出的两种形状：一处坏记录（error），或一次**机器人真动过而控制面不知道**
+    # 的运行（reported=False）——后者若退 0，冒烟跑的绿灯会盖住一条无人知晓的物理动作。
+    return 1 if any(o.action == "error" or not o.reported for o in outcomes) else 0
 
 
 if __name__ == "__main__":  # pragma: no cover
