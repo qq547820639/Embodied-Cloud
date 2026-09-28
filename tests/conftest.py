@@ -5,7 +5,7 @@ from pathlib import Path
 import pg_server
 import pytest
 
-from tests.dbfiles import db_name, db_url
+from tests.dbfiles import db_name, db_url, sweep_own_test_dbs
 
 os.environ["EMBODIEDCLOUD_PROVIDER"] = "mock"
 os.environ["EMBODIEDCLOUD_DATABASE_URL"] = db_url("embodiedcloud")
@@ -14,6 +14,9 @@ os.environ["EMBODIEDCLOUD_WORKSPACE_ROOT"] = "/tmp/test-embodiedcloud-workspaces
 
 def pytest_sessionfinish(session, exitstatus):
     Path(db_name("embodiedcloud")).unlink(missing_ok=True)
+    # 每个模块级 ENGINE 都留下一份带本进程 pid 的库文件；会话结束时就一并收掉
+    # （只收本 pid 的，别的并发跑不受影响）。见 tests/dbfiles.py 的模块 docstring。
+    sweep_own_test_dbs()
 
 
 # ---------------------------------------------------------------------------
