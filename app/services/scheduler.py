@@ -16,7 +16,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..models import Gpu, GpuAllocation, GpuHost, GpuStatus, WorkspaceStatus
+from ..models import Gpu, GpuAllocation, GpuHost, GpuStatus, Workspace, WorkspaceStatus
 from ..utils import utcnow
 
 # nvidia-smi `--query-gpu=memory.total` 上报单位为 MiB；标称「N GB」的卡实际可用
@@ -210,7 +210,15 @@ class GpuScheduler:
         )
 
     def release(self, db: Session, workspace_id: str) -> None:
-        """幂等释放：GPU 回 AVAILABLE、清 workspace_id、删除运行时分配绑定记录。
+        """幂等释放：GPU 回 AVAILABLE、清 workspace_id、删除运行时分配绑定记录，
+        并把那一格上残留的 `gpu_id/gpu_index/gpu_name` 一起清掉（N-86）。
+
+        本函数是唯一的分配权威，所以"放卡"这件事在这里是**三件成对**而不是两件：
+        卡回池、分配行删除、格子不再声称持有它。只写前两件的话，读者
+        （`schemas.py` 的 `WorkspaceOut` → API/前端、`warmpool.py` 的 unbooked inflight 计数）
+        拿到的是"这格还占着那张已易主的卡"，而这类漂移回收器看不见——它既没有分配行、
+        `Gpu.workspace_id` 也不再指向那格。调用方原先各自手写清列（`_fail` 那一处保留，
+        它还要兜住 release 自己抛错的情形），现在由这里统一兜住。
 
         删除而非软标记：gpu_allocations.gpu_id 唯一约束用于"同一 GPU 至多一个
         活动分配"，保留已释放行会阻塞重新分配；分配记录不是审计账本
@@ -231,6 +239,15 @@ class GpuScheduler:
             .where(Gpu.workspace_id == workspace_id)
             .values(status=GpuStatus.AVAILABLE.value, workspace_id=None, updated_at=now)
         )
+        # 成对的第二半：这张卡回池了，那一格就不许再声称持有它。走 ORM 而不是批量
+        # UPDATE —— 调用方（`_finalize_stop`、warm pool 的撤销档）手上正拿着同一个实例，
+        # 批量 UPDATE 会让身份图里的旧值活过本次提交，读者拿到的仍是"我持有那张卡"。
+        # 格子不存在（ghost 分配）时这里就是 no-op，与上面两条 UPDATE 的边界一致。
+        holder = db.get(Workspace, workspace_id)
+        if holder is not None:
+            holder.gpu_id = None
+            holder.gpu_index = None
+            holder.gpu_name = None
         db.commit()
 
     # ------------------------------------------------------------------
