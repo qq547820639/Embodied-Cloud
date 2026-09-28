@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 877 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 898 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -115,6 +115,10 @@
 | N-96 | **present-but-not-running 被读成缺席 ⇒ 卡从活 runtime 底下放走**（闭登记项 N-79，并更正其一半前提）：`_release_admitted(command_succeeded=False)` 只认 MISSING，而 k8s 只读 `available_replicas`（docstring 承诺的「0 副本 → MISSING」代码没做）、docker 兜底把所有非 running 落到 MISSING。改法：缺席只认引擎亲口说的话（404／自述 exited·dead／自己缩到 0 副本），docker 用白名单不兜底；paused/restarting 实测 `Running:true`，登记原文那两半是假的。依据本机打开：moby `state.go` 七常量与 `container.go:76` 原文、pod-lifecycle.md 第 114 行、SDK 31.0.0 属性表。 | 判据 20 支（k8s 五档＋产品级两极＋docker 实测表＋AST 两 clause 各带开火与合规控制），改前 9 开火；邻面 12 文件 147 支 rc=0。代价另立 N-98。未证实：dead/removing 瞬态本机造不出来（没做到）；真 GPU 集群上 Pending 收敛未跑。 |
 | N-97 | **已入账的运行段被读者各算一次，第三个读者是前端**（闭登记项 N-76）：destroy 先结算、`provider.destroy` 抛错上抛给 DESTROY 重试 ⇒ RUNNING＋已入账＋`started_at` 未清，实测 QUOTA 门禁 60 而账本 SUM 30。改法：唯一键模板（喂原始列值、不做时区归一）＋唯一口径`workspace_seconds_used`（投影＋仅当未入账的 live），展示端点与门禁都改为调它；`WorkspaceOut` 新增 `usage_segment_booked`（赋值位点全仓唯一、非映射属性），7 个 WorkspaceOut 出口都带上，`app.js` 两处 live 只在它为假时才加。依据本机取回：Microsoft 计量 FAQ「dropped as duplicates」、AWS `MeterUsage` 幂等与 `DuplicateRequestException`。 | 判据 22 支（C1–C6，含 HTTP 一请求两极、JS 落点尺、路由接线尺、唯一赋值尺），改前 14 开火，读数 `QUOTA 门禁读到 60，账本 SUM 只有 30`；邻面 113 支 rc=0。连带改判 `test_settled_projection.py` 的排除措辞。未证实：真浏览器渲染未跑；PG 侧键形态未实测。 |
 | N-99 | **被释放准入拒下的格没有再试的人 ⇒ 一张卡可永久钉住**（闭登记项 N-98）：STOP 打满 `MAX_ATTEMPTS=3` 后进程内无人再试，`OperationType.RECONCILE` 有消费者无入队点，`reconcile_all` 也不是周期任务。改法定向档：`reconcile_all(limit=, older_than_seconds=)` 默认 None＝改前全量扫描，`_reconcile_cell_admitted` 一处准入（沿用 `_has_active_operation` 那份活跃态），`deps._reconcile_stuck_cells` 30 tick／60 s／8 格注册进既有周期表。依据本机重开：reconcile.go:44、node_lifecycle_controller.go:939 与 :850/:863、nomad config.go:273、oslo.service 的 periodic_task.py 第 202/204 行（外部包）。 | 判据 11 支（接线＋AST 界参数尺＋行为四极＋上界＋默认档全量＋消费者不拆），四臂单变量各只红对应那支；邻面 130 支 rc=0，ruff/mypy rc=0；连带补 `test_reconcile_cell_isolation.py` 的 stats 两格。未做：多副本同相位抖动（OPERATIONS.md:9 写的是 1+ 副本），量级每副本每趟 ≤8 次往返、不产生第二种判决（三条既有幂等机制，标为推断）。 |
+| N-100 | **周期回路与开机接线只被跑到过、没被断过**：摘掉 `_run_periodic()` 全套仍绿。改法：11 支判据覆盖取模闸门逐 tick、一支抛错不停兄弟、真线程 start/stop、注册表成员与间隔取自常量、lifespan 真叫 crash recovery、`renew_lease` 两极。 | 判据 `tests/test_periodic_loop_and_boot_wiring.py` 11 支；五臂单变量各只红它守的那一支（摘接线 3 红／取模恒真 A1／撤 hold 注册 C1／去 lease 谓词 E2／去 lifespan 一脚 D1+D3）。未证实：多副本同时开机未测。 |
+| N-101 | **`_fail` 的 release 自抛档故意留跨表冲突并写 will be reconciled，而没有任何用例回头看卡那一行、也没跑过那个补做入口**。改法：跨表量具抽成 `tests/gpu_drift.py`（一份而不是两份），四档钉住「冲突可点名／活跃 operation 时不许动／终态后驱动者收回并幂等／不调驱动者就永远停冲突」。 | 判据 `tests/test_release_failure_self_heals.py` 4 支；六臂变异电池：删驱动者末尾一脚只红 T3、删 active-operation 保护只红 T2、量具 holder 方向改瞎红 T1+T2、`_fail` 顺手放卡四档全红（共用前提）。未证实：本机是 mock provider。 |
+| N-102 | **STOP 那一侧的 release 自抛零覆盖**：`stop finalize failed` 那串只在生产侧一处，`tests/` 零处；形状与 provision 侧相反（两表仍互相认账、卡被队列占着）。改法：按 provider 能否答话分两极钉，S2 UNKNOWN 不许动、S3 MISSING 必须收完，两支之间只动一个变量。 | 判据 `tests/test_stop_release_failure_self_heals.py` 3 支；六臂：UNKNOWN 当没了 ⇒ 只红 S2、删 MISSING 档补做 ⇒ 只红 S3、抛错档清列 ⇒ 只红 S1、写成 FAILED ⇒ 三支全红。未证实：账本侧重复入账那一面由 `test_gpu_seconds_metric_delta.py` 守着，本轮未复算。 |
+| N-103 | **release 自抛的四处兜底只钉了两处**：`destroy()`（orchestrator.py:630-638）与 warm pool 认领撤销放行档（warmpool.py:399-409）零覆盖，两处留下的都是「卡被一个终态行占着、两表仍互相认账」。 | 判据 T5/T6 进 `test_release_failure_self_heals.py`、warm pool 那档进它自己的文件（13 支）；五臂：删驱动者末尾一脚 ⇒ T3+T6，回收器成对的第二半恒不执行 ⇒ 只红 warm pool 那支。顺带登记两条无人驱动的 promise：N-104（hold 抛错靠 TTL）、N-105（destroy 结算抛错没命名补做者）。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）

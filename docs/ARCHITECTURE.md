@@ -65,6 +65,12 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
   注意最后那条"QUEUED/CREATED 且无 active op ⇒ 重新入队"是**测试夹具的引信**：任何模块留下的
   CREATED 行，都会被下一个起 TestClient 的模块的 worker 当成待办去抢共享卡池——留下行的模块
   必须自己收尾（`tests/test_gpu_pool_guard.py` 的 `rig`）。
+- `scheduler.release` 自己抛错时，四个消费位（`_fail` 的 `orchestrator.py:374-389`、`_stop_cleanup`
+  的 `:471-474`、`destroy` 的 `:630-638`、warm pool 认领撤销的 `warmpool.py:399-409`）都**故意**
+  不让这次失败改变状态判决，而把卡留在原处——失败的是"记账动作"，不是"runtime 事实"。
+  区别只在残留形状：`_fail` 先清格上三列，于是两张表互相指认；另外三处什么都不清，于是卡被一个
+  终态行／墓碑／非终态行占着而两表仍一致。四种都有常驻判据（N-101/102/103），补做者是同一个：
+  周期驱动者 `reconcile_all()` 末尾那一脚 `recover_stuck_gpu_allocations`（受保护态除外）。
 - RUNNING 期间的 stop/destroy 结算 GPU 秒数 → 写入 CreditLedger（USAGE，幂等）。
 - provision 补偿式事务：外部副作用失败 → `provider.destroy` 补偿 + `scheduler.release` 归还，
   绝不残留孤儿容器/Pod/GPU。

@@ -101,6 +101,10 @@
 | G0.90 缺席只认引擎亲口说的话，present-but-not-running 不放行 | `pytest tests/test_runtime_presence_not_absence.py` | k8s：404→MISSING／`spec.replicas==0`→MISSING／available≥1→ALIVE／Pending→UNKNOWN／其它失败→UNKNOWN；产品级放行与不放行各一支；docker 按 moby 七态白名单（只有 exited/dead 算缺席），枚举外的态不算缺席；AST 尺 C1 与 C2 各带开火对照与合规控制 | PASS（常驻） |
 | G0.91 「已用秒数」与「这一段入账没」各只有一处定义，三个读者同源 | `pytest tests/test_live_usage_not_double_counted.py` | `usage:` 键构造在 app/ 里恰好一处且在模板函数里；路由与 billing 面上不许再出现 `accumulated_seconds` 读取；HTTP 一请求两极（入账 True／未入账 False，账本侧行数各自数一遍）；`usage_segment_booked` 赋值位点唯一；7 个 WorkspaceOut 路由全部带旗标（分母现算） | PASS（常驻） |
 | G0.92 被拒的老格有周期驱动者，且扫描有界不抢队列 | `pytest tests/test_periodic_reconcile_driver.py` | 周期表里真有驱动者且间隔取自常量；两个界参数由 AST 尺盯（缺关键字／写字面量／函数不存在各开火）；被拒 STOPPING 格收住且卡回池、有活跃 operation 的格不许被抢、FAILED 之后回到驱动者、太新的格不看、limit 生效且按 created_at 轮转、默认档仍是全量、持久化 RECONCILE 消费者还在 | PASS（常驻） |
+| G0.93 周期回路、周期任务表与开机接线都有常驻判据 | `pytest tests/test_periodic_loop_and_boot_wiring.py` | 取模闸门按 tick 计数、一支抛错不停兄弟、真线程 start/stop 成员与不增长、四张注册表在位且间隔取自常量、lifespan 真叫 crash recovery、AST 尺子带控制 | PASS（常驻） |
+| G0.94 release 自抛留下的跨表冲突可点名，并由周期驱动者收回 | `pytest tests/test_release_failure_self_heals.py` | 冲突清单非空且卡未被读成空闲；活跃 operation 时不许动；终态后收回、冲突清零、再跑幂等；不调驱动者永远停冲突 | PASS（常驻） |
+| G0.95 STOP 的 release 自抛按 provider 能否答话分两极 | `pytest tests/test_stop_release_failure_self_heals.py` | 停在 STOPPING 且两表一致；UNKNOWN 时驱动者不动；MISSING 时收完（STOPPED＋卡回池＋三列清空＋幂等） | PASS（常驻） |
+| G0.96 destroy 与 warm pool 的 release 自抛残留由回收器成对收回 | `pytest tests/test_release_failure_self_heals.py tests/test_warmpool_claim_admission.py` | 墓碑/终态行占着卡时可点名且两表一致；回收器放卡必成对清列、不动墓碑状态；再跑幂等 | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |
