@@ -107,6 +107,7 @@
 | G0.96 destroy 与 warm pool 的 release 自抛残留由回收器成对收回 | `pytest tests/test_release_failure_self_heals.py tests/test_warmpool_claim_admission.py` | 墓碑/终态行占着卡时可点名且两表一致；回收器放卡必成对清列、不动墓碑状态；再跑幂等 | PASS（常驻） |
 | G0.97 hold 释放失败的残留由 TTL 清扫收口，且死线前不许提前收 | `pytest tests/test_hold_release_failure_self_heals.py` | 抛错不泄给调用面、状态与原因照写、那笔仍 PENDING 且额度仍被圈住；死线前清扫返回 0；死线后周期入口返回 1 并还回额度 | PASS（常驻） |
 | G0.98 destroy 结算失败的段不入账、也不被按时钟补做（判决有据） | `pytest tests/test_streaming_lifecycle.py` | 失败当场零 USAGE 条目、墓碑 started_at 已清、再跑周期驱动者仍零；对照档账本正常时必须正好入一段 | PASS（常驻） |
+| G0.99 逐格异常边界退回非终态后，下一趟必须收完且不重复入账 | `pytest tests/test_reconcile_cell_isolation.py` | 第一趟：errors=1、本格留原状态、卡与绑定不动、两表一致、usage 恰一条；第二趟：终态 + 卡回池 + 三列清 + 冲突零 + usage 仍一条 | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

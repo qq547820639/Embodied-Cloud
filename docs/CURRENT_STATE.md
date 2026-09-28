@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 903 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 906 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -121,6 +121,7 @@
 | N-103 | **release 自抛的四处兜底只钉了两处**：`destroy()`（orchestrator.py:630-638）与 warm pool 认领撤销放行档（warmpool.py:399-409）零覆盖，两处留下的都是「卡被一个终态行占着、两表仍互相认账」。 | 判据 T5/T6 进 `test_release_failure_self_heals.py`、warm pool 那档进它自己的文件（13 支）；五臂：删驱动者末尾一脚 ⇒ T3+T6，回收器成对的第二半恒不执行 ⇒ 只红 warm pool 那支。顺带登记两条无人驱动的 promise：N-104（hold 抛错靠 TTL）、N-105（destroy 结算抛错没命名补做者）。 |
 | N-104 | **hold 释放失败留下的那笔 pending 没人认领收口**：`_fail` 里那一步被盲捕获吞掉只留一条 warning，指望 TTL 清扫补，但没有任何用例让 `release_hold` 真抛错。改法：三档钉住「残留可点名／死线前不收／死线后由周期入口收回并还额度」，H2/H3 之间只动 `expires_at`。 | 判据 `tests/test_hold_release_failure_self_heals.py` 3 支；五臂：摘 try/except ⇒ 三支全红（共用夹具）、时间谓词恒真 ⇒ 只红 H2、RUNNING 保护反过来 ⇒ 只红 H3。未证实：60 tick 与 TTL 时长的比例未量。 |
 | N-105 | **注释承诺的「可补偿」没有归属者**：destroy 的结算抛错档写「修复方向是可补偿」，而三个候选补做者都不在场（reconcile 跳过 tombstone、quota monitor 要求未删、回收器只管卡）。判决与改法：这一段不入账、也不许按 `utcnow() - started_at` 补（那会把等待时长计成运行时长），注释改成判决。 | 判据 `tests/test_streaming_lifecycle.py` 2 支（E1 零条目＋墓碑不留段；E2 对照档证明「零」非恒真）；四臂：墓碑保留 started_at ⇒ 两支一起红，状态守卫恒假 ⇒ E2 红并连带暴露既有 auditable 那支依赖「结算被尝试过」。未证实：真 PostgreSQL 断连档未测。 |
+| N-106 | **异常边界只钉了前半句**：`_reconcile_one` 里 release／`_finalize_stop` 抛错退回非终态之后，没有任何判据跑第二趟证明它真被收完（既有注入都炸在判据之前，两趟那支是健康档）。改法：三档钉「残留可点名 + 已提交的结算不被 rollback 吞掉 + 下一趟收完且不重复入账」，STOPPING 档另走一遍。 | 判据 `tests/test_reconcile_cell_isolation.py` 3 支；六臂：G2 不再结算 ⇒ 只红 R1+R2、G3 幂等键换成 `utcnow()` ⇒ 只红 R2、G4 STOPPING 不叫 release ⇒ 只红 R3、G1 边界写终态 ⇒ 四支读同一列。未证实：只注入过 mock，真 docker/k8s 的 release 错误来源未测。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）

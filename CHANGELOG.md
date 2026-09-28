@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 903 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 906 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898→903，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96／G0.97／G0.98。
+- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898→903→906，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96／G0.97／G0.98／G0.99。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -1401,6 +1401,12 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 判据 `tests/test_streaming_lifecycle.py` 两档：E1 当场零 USAGE 条目、墓碑 `started_at` 已清、`accumulated_seconds` 不动，换回真账本再跑一趟周期驱动者仍然零条目；E2 对照档——同一夹具同一入口、账本没坏时必须正好入一段（3590–3600 秒）。E2 的另一重作用：证明 E1 那个「0」不是恒真，查询与写入面都在场。
 - 牙齿（四臂）：基线与无关注释臂 0 红；F1 让墓碑保留 `started_at` ⇒ 两支一起红（都读这一列）；F3 把 `_settle_running_segment` 的状态守卫改成恒假 ⇒ E2 红，并连带打红既有那支 `test_destroy_settle_failure_marks_auditable_and_still_releases`——它钉的「留下可审计痕迹」其实依赖结算**被尝试过**，这是本轮顺带量出的一条既有依赖。E1 的「零条目」那一面没有任何现存改动能让它红（今天没有路径为墓碑写 USAGE），它防的是尚不存在的补做者，这一点写在 docstring 里。邻面 8 文件 81 支 rc=0；ruff/mypy rc=0。
 - 未证实：真实账本故障（PostgreSQL 断连）下的行为没测——本轮注入的是 stub 抛错。
+
+### 异常边界退回非终态之后，下一趟必须把这格收完（N-106）
+- 缺陷（覆盖缺陷）：`_reconcile_one` 里的 `scheduler.release`（`:800`）与 `_finalize_stop`（`:833`）都不带守卫，抛错会落到「一格失败不得中止整趟」那个边界（`:703-712`）。既有两支注入判据炸的是`provider.reconcile`——在判据**之前**，结算根本没跑过；而本文件唯一连跑两趟那支用的是 `explode=set()`（健康档）。于是「本格退回原状态、下一趟接着收」这句话只钉了前半句。
+- 判据 `tests/test_reconcile_cell_isolation.py` 三档：R1 release 在 RUNNING+MISSING 档抛错 ⇒ `errors=1`、本格留 RUNNING、卡与格上绑定都不动、两表一致，而**已提交的结算不被 `db.rollback()` 一起吞掉**（usage 恰好一条；结算自己 commit，边界只能退回未提交的那半）；R2 第二趟（release 已放行）必须收完：FAILED + 卡回池 + 三列清 + 冲突零 + usage 仍只有一条；R3 STOPPING+MISSING 档同形状走一遍。
+- 牙齿（六臂变异电池）：无关注释臂 0 红；G2 让 RUNNING 档不再结算 ⇒ 只红 R1+R2；G3 把幂等键从 `started_at.isoformat()` 换成 `utcnow().isoformat()` ⇒ **只红 R2**（「补做不得把同一段算两次」这一面有独立的牙）；G4 让 STOPPING 档不叫 release ⇒ **只红 R3**；G1 让异常边界顺手写 FAILED ⇒ R1+R2 红并连带打红既有两支「本格留在原状态」的判据与 R3（四支读同一列，不是四支各有牙）。各臂 `cmp` 还原、`git diff app/` 为空；邻面 8 文件 86 支 rc=0。
+- 未证实：这一档跑在 mock provider 上；docker/k8s 里 release 抛错的真实成因（daemon 断连、APIServer 5xx）未注入过——形状相同但错误来源不同，登记在本轮的「未证实」而不是缺陷。
 
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
