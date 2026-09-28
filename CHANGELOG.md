@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 979 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 984 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -1464,6 +1464,16 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 门禁 G0.106；§2 新行 N-116；新登记 N-117（`_finalize_stop` 的配对证据在调用链上而不在函数里）。
 - 未证实：真机流媒体面（本机没有 WebRTC 会话；会话行由 ORM 直建，被测的是「终结」那一半，`streaming.start()` 要 RUNNING 之外的整套所有权／凭据前置，在这里只会稀释判据）；`stop():421-427` 的「已 STOPPED 幂等补做」一档靠「STOPPED 蕴含会话已闭」这条没有机械核的不变量。
 
+### 池子的余量与分配器吃的不是同一条证据（N-122，闭 N-114 的 (a) 半边）
+- 缺陷（两个谓词各说各话）：`WarmPoolManager._free_capacities_gib`（`app/services/warmpool.py:194`）只按 `gpus.status == available` 数空闲显存，而 N-112 之后 `allocate` 在同一个 WHERE 里多要一条 `host_is_visible()`（`app/services/scheduler.py:67`，一条 EXISTS 在 `gpu_hosts.status == online` 上）。于是一台停止同步的节点上那张仍标 AVAILABLE 的卡被池子记成余量 ⇒ 补位闸门（`app/services/warmpool.py:156-161`）开出一格 PREWARMING ⇒ worker 起来占不到卡 ⇒ 收割成 FAILED、入队 DESTROY、进冷却，一整个预热周期白烧。这是 N-114 (a) 那条账里真正会烧钱的一半。
+- 改法是把那条谓词**借过来**（`app/services/warmpool.py:44` 从 `.scheduler` import），不手写第二份规则——第二份会自己漂，漂了就是这次的缺陷重演；这条规矩本身由结构判据钉（见下）。顺带更正 `expire_stale_hosts` 的一句假话：「host 的 `status` 只有一处读者」自 N-112 起就不成立，grep 读数是三处（`app/services/scheduler.py:81` 那条 EXISTS → `allocate` 的 `:202`／`:251`、`app/services/warmpool.py:211`、admin 的 `GET /api/gpus/hosts`）。
+- 改前复算（一次性夹具，不改仓库代码）：同一份库里两张卡（在线节点 8 GiB、失联节点 24 GiB）、一个 `gpu_requirement_gb=16` 的模板 —— 旧谓词数出 `[8, 24]` ⇒ 判“开格”；新谓词数出 `[8]` ⇒ `skipped_no_capacity`。失联节点那张卡 `status=available`、`workspace_id=None`，全程没人改写它（N-112 那条不变量仍在）。
+- 判据 5 支（`tests/test_warmpool_capacity_visibility.py`）。行为面：决定档（唯一够用的卡挂在失联节点 ⇒ `created == 0` 且零行 workspace）、恢复档（节点重新同步的下一趟 `maintain()` 照开 ⇒ 证据驱动而非永久抽干）、健康舰队对照（并钉住“池子挑的卡＝分配器真占的卡”这一同向性）。结构面：AST 钉「调的是那条共享谓词、名字来自 `.scheduler`、函数体里没有 `GpuHost`」，外加这把尺子自己的三态反证（合规／重抄一份／根本没有规则，三种读数必须互不相同）。失联一律走证据列（固定 `last_synced_at` ＋ 仓库自己的 `expire_stale_hosts(now=…)`），不手写 `UPDATE gpu_hosts SET status='offline'`——那样测的是我自己写下的结论列，不是那条 EXISTS。
+- 三臂电池（`/tmp/n122-battery.py`）：D1 摘掉谓词 ⇒ 4 红（决定档＋恢复档＋两支结构档）；D2 换成**等价的手写第二份**规则 ⇒ 2 红且只红在结构档、行为档全绿——这才是“行为同、形状违反”那一极；D3 把 `host_is_visible` 反号 ⇒ 8 红，其中 5 支是 N-112 在 `tests/test_gpu_allocation_visibility.py` 里的既有判据（同文件控制随本轮重跑，全绿才是意外、红才是应该）。恢复后复跑 0 红。
+- 两条自伤留痕（都在本轮内发现并修）：① D2 第一版五支全红，红因是 `warmpool` 没 import `GpuHost` ⇒ NameError，那一臂什么都没判别，补上 import 才成为等价臂；② 电池在变异与恢复之间崩在参数形状上，把 D3 的反号变异**留在了工作树里**，`git diff` 当场查到——之后给每支臂加了 try/finally 还原。
+- 门禁 G0.110；§2 新行 N-122；ARCHITECTURE 的可见性条目补上第三个消费者；登记项 N-114 行内更正：(a) 已闭，(b) 仍开放（`DRAINING` 一个值同时承载管理员判决与自动判决，要给自动判决定义归位就得先给管理员判决换一个值，否则“重报一次就把手工 drain 抬回池子”）。
+- 未证实：worker 那一侧的失败代价（占不到卡 → FAILED → DESTROY → 冷却那一串）没测——本轮只证「池子不再开这一格」，那一段属 `tests/test_warmpool.py` 与 provision 失败档的范围；真机 GPU 的节点失联（把一台宿主从集群里摘掉）仍无证据，本机只有 mock。
+
 ### 记账脚本在仓内留一个 tmp/，就把文档门顶红了（N-118）
 - 缺陷（工具的自我遮蔽，不在产品代码里）：`scripts/validate_release.py:732 _doc_roots()` 按 `ROOT.iterdir()` 现取顶层目录当「仓内根」，而文档门的存在性核对（`doc_reference_offenders` 的 :615-621 那段划界）写死了「只核以既有仓内根目录开头的路径」——它的前提是**根面等于仓库的组成面**。记账脚本把备份落进仓内 `tmp/anchor-patch-n116/` 之后，这个前提就塌了：`tmp` 成了根，CHANGELOG 与 CURRENT_STATE 里那两句**故意不作为指针**的示例路径 `tmp/probe.py` 各产一条假悬空引用，`doc_references` 当场翻红。红因不在文档，也不在产品代码，而在量具自己的落点。
 - 一手读数与机制隔离（不靠「删掉之后变绿」倒推）：同一进程里只换 `roots` 入参、其余全部取现值 ⇒「现行 8 个根 → 干净；roots 里加一个 `tmp` → 恰好 2 条同名 offender，差集 2」。`git check-ignore --stdin` 的语义在一次性夹具里实测：输入 `tmp/ dist/ app/ nosuch/` 只回吐被忽略的那两个；不在仓库里时 `fatal: not a git repository`、rc=128、stdout 为空 ⇒ 干净导出下新过滤器退化成 ∅，行为与改前逐位一致。
@@ -1518,7 +1528,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - ~~`N-61`：要不要把构建后端从 setuptools 换成 hatchling~~ —— **已由 N-62 结案：不换**。本机在 `git worktree` 副本上真跑过：hatchling 1.32.4 两建 wheel 同为 `629d6ff7e24f`（它自己就钉 tar 成员 mtime/uid/gid 与 gzip mtime，读安装到本机 venv 的源文件核对过）；与 setuptools 的 wheel 差异只有三处——成员 55 对 56（少 `dist-info/top_level.txt`，全仓 grep 零读者）、`Requires-Dist` 只差 PEP 508 的引号风格（22 条语义同集）、`WHEEL` 的 Generator 行。净收益只是删掉 `scripts/sdist_normalize.py`（约 100 行，6 支判据与两处消费位都已落门禁），代价是 `uv.lock` 重解析、`dev` extra 对齐、wheel 侧 `recomputable` 基线重钉与所有引用产物 sha 的文档面重扫⇒ 不抵。再议的触发条件：自研归一哪天失效，或后端侧出现**别的**产品收益。
 - ~~`N-111`：**一台彻底不再同步的节点，它名下那些仍标 AVAILABLE 的卡没人接走**。`expire_stale_hosts` 只改 host 的结论列，不碰 `gpus.status`（`allocate` 的权威是后者），所以节点整机消失后新工作区仍会被派到一张不存在的卡上。不顺手 drain 的理由是**归位那一半还没定**：`DRAINING`／`UNHEALTHY` 今天没有任何回到 AVAILABLE 的路径（只有 admin 路由 `app/routers/gpus.py` 的两个 POST 会写它们，`sync_host` 对仍在上报清单里的卡只更新 model/memory/index 不改 status，`release` 与 `recover_stuck_gpu_allocations` 只碰带 `workspace_id` 的行），于是“节点暂时看不见”一旦变成 DRAINING 就是一次不可逆的容量注销。要么先给一次成功重报定义归位语义（并回答“管理员手工 drain 的卡该不该被自动抬回来”），要么给缺席降级另设一档比 host 判死更长的阈值。~~ —— **已由 N-112 闭合**：分配候选与等锁计数一起吃 `host_is_visible()` 这条 EXISTS，失联节点上的卡不再被派给新工作区；不改写 `gpus.status`，所以节点回来即恢复可分配，管理员的 DRAINING/UNHEALTHY 也不被周期任务顶掉。判据 6 支＋四臂电池，读数见上面 N-112 一节。
 
-- `N-114`：**两张没被 N-112 关掉的账，都记在“失联节点的卡”名下**。(a) 它虽然不再被分配，但仍以 `AVAILABLE` 出现在 `GET /api/gpus` 与容量报表里——“能派”与“算空闲”从今天起不是同一个问题，而读侧只认后者；(b) `DRAINING`／`UNHEALTHY` 到今天仍然**没有回到 AVAILABLE 的路径**（只有 admin 路由的两个 POST 会写它们，`sync_host` 对仍在上报清单里的卡只更新 model/memory/index，`release`／`recover_stuck_gpu_allocations` 只碰带 `workspace_id` 的行）。(b) 正是 N-112 不敢用状态列实现 (a) 的原因：先定“一次成功重报该不该把管理员手工 drain 的卡抬回来”，再决定容量读数要不要跟着可见性走。
+- `N-114`：**两张没被 N-112 关掉的账，都记在“失联节点的卡”名下**。~~(a) 它虽然不再被分配，但仍以 `AVAILABLE` 出现在 `GET /api/gpus` 与容量报表里——“能派”与“算空闲”从今天起不是同一个问题，而读侧只认后者~~ —— **(a) 已由 N-122 闭合**：warm pool 的补位闸门改吃同一条 `host_is_visible()`，失联节点上的卡不再被算进余量（判据 `tests/test_warmpool_capacity_visibility.py`，读数见上面 N-122 一节）；(b) `DRAINING`／`UNHEALTHY` 到今天仍然**没有回到 AVAILABLE 的路径**（只有 admin 路由的两个 POST 会写它们，`sync_host` 对仍在上报清单里的卡只更新 model/memory/index，`release`／`recover_stuck_gpu_allocations` 只碰带 `workspace_id` 的行）。**(b) 仍开放，做法已定**：给管理员判决单独一个状态值，让 `DRAINING` 只表示“重报了就该回池”的自动判决——这仍是 N-112 不敢用状态列实现 (a) 的原因：先定“一次成功重报该不该把管理员手工 drain 的卡抬回来”，再决定容量读数要不要跟着可见性走。
 
 - `N-115`：**跑完却再也报不上来的部署，今天没有人负责**。N-113 的收口是事件驱动的：设备 POST 一条 `edge-run` 才改判。于是三种形状都会一直停在 `running`——设备跑完即被掐（N-109 的 `reported=false` 档）、设备掉了而部署没重下、以及人工在库外把部署推到 running。要么给 `running` 配一个时效判决，要么在写入侧要求设备在 run 前重新登记；两条都要先回答“谁有权把一条运行判成超时失败”。另外 `DeploymentRecord.updated_at` 带 `onupdate`，它是“最后一次被改动”而不是“最后一次被看见”，不能直接当证据列用——这一格与 N-110 的差别正在这里，故登记不收口。
 

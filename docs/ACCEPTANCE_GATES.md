@@ -118,6 +118,7 @@
 | G0.107 文档门的「仓内根」面不含被 git 忽略的 scratch 目录 | `pytest tests/test_validation_matrix.py` | 自建 `tmp/` 时根面不含 `tmp`、活调用 `dangling_doc_reference_offenders()` 为 `[]`、`paths>=200`；`.gitignore` 的 `tmp/` 行有文本面读者 | PASS（常驻） |
 | G0.108 每一处写 `WorkspaceStatus` 终态的函数自己带齐终结 | `pytest tests/test_finalize_stop_closes_streaming.py` | 崩溃现场重试能修回来；真代码证到前提（一次 stop 后即 `failed`）；正常档恰好关一次；全 `app/` 尺子读数 `set()` 且分母自证 4＋1 处 | PASS（常驻） |
 | G0.109 账面指针一律写成仓内全路径，缩写与歧义都判违规 | `pytest tests/test_validation_matrix.py` | 真语料四桶读数 缩写 0／歧义 0／已限定 ≥150／外部 ≥1；合成语料四极各判各的（含长行号边界）；门禁本体确实把这条并进 offenders | PASS（常驻） |
+| G0.110 池子的余量与分配器吃同一条可见性证据 | `pytest tests/test_warmpool_capacity_visibility.py` | 唯一够用的卡挂在失联节点 ⇒ `created=0` 且零行 workspace；节点重报后同一格照开；两台都在线时不开火；AST 钉“借同一条谓词、函数体内无 `GpuHost`”，并有“重抄一份／根本没有规则”两态反证 | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

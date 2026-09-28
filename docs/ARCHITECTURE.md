@@ -91,6 +91,7 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
   `/drain`、`/unhealthy` 的判决有自己的生命周期（inventory 每 2 min 重报一次，
   "重新出现即回池"会让手工 drain 活不过两分钟），而"节点暂时失联"必须可逆——
   节点回到 online 的下一趟分配自然看得到那张卡，全程没人改写过卡的状态。
+  同一条谓词的第三个消费者是 warm pool 的补位闸门（N-122）：余量与挑卡必须吃同一份证据，否则池子会为一张开不到的卡开出预热格。
 - **inventory 是周期重报的，不是开机一次的**（N-110）：worker 周期表每 120 tick 重跑
   同一个 `bootstrap_gpu_inventory`，于是"节点少报一张卡 → 那张卡 DRAINING"这段收敛在
   进程存活期内就有驱动者；`sync_host` 每次成功都给 `gpu_hosts.last_synced_at` 盖章，
