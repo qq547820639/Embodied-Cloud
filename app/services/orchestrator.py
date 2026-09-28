@@ -615,8 +615,14 @@ class WorkspaceOrchestrator:
             self._settle_running_segment(db, workspace)
         except Exception as exc:
             db.rollback()
-            # 结算失败不得静默丢账：留下可审计、可补偿的痕迹（error_message + ERROR 日志），
-            # 但不阻断资源释放与 DELETED 置位（修复方向是「可补偿」，不是「让 destroy 失败」）。
+            # 结算失败不得静默丢账：留下可审计痕迹（error_message + ERROR 日志），
+            # 但不阻断资源释放与 DELETED 置位（不能让一次账本故障把容器和卡钉住）。
+            # 这一段的账**就是不入账，也没有补做者**（原判据写「可补偿」是未兑现的主张，
+            # N-105 查清后改口）：`reconcile_all` 跳过 tombstone、quota monitor 只选
+            # `deleted_at IS NULL`、回收器只管卡不管账。故意不去"补"的理由是时钟：
+            # `_settle_run` 取 `utcnow() - started_at`，对墓碑格那就是把等待时长算成运行时长。
+            # 判据 `tests/test_streaming_lifecycle.py` 的 N-105 两档（零条目 + started_at 已清；
+            # 对照档证明"零"不是"destroy 从不结算"）。
             workspace.error_message = f"destroy settle failed: {exc}"
             logger.error("workspace %s destroy settle failed: %s", workspace.id[:8], exc)
         try:

@@ -9,20 +9,23 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models import (
+    CreditLedger,
     Gpu,
     GpuAllocation,
     GpuStatus,
+    LedgerType,
     StreamingSession,
     StreamingStatus,
     Template,
     Workspace,
     WorkspaceStatus,
 )
+from app.services.ledger import CreditLedgerService
 from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.mock import MockProvider
 from app.services.scheduler import GpuInfo, GpuScheduler
@@ -264,6 +267,94 @@ def test_destroy_settle_failure_marks_auditable_and_still_releases():
         # 资源释放不被结算失败阻断
         assert db.scalar(select(Gpu)).status == GpuStatus.AVAILABLE.value
         assert db.scalar(select(GpuAllocation).where(GpuAllocation.workspace_id == wid)) is None
+
+
+def test_destroy_settle_failure_leaves_the_segment_unbooked_and_stays_that_way():
+    """N-105 的判决：结算失败丢掉的那一段**没人补**，而且不许有人按时钟补。
+
+    代码注释原先写「修复方向是可补偿」（`app/services/orchestrator.py:618-619`）——本轮查清那是
+    一条没有归属者的主张：`reconcile_all` 的循环先跳过 tombstone（`:687-688`），
+    `monitor_runtime_quotas` 的选择集要求 `deleted_at IS NULL`，
+    `recover_stuck_gpu_allocations` 只管卡不管账。而唯一还能算这一段的那一层
+    （`_settle_run`，`:550-556`）按 `utcnow() - started_at` 取秒——对墓碑格那就是把"等待时长"
+    计成"运行时长"。所以应然定在：**这一段就是不入账**，本档钉两件事——
+    ① 失败当场没有任何 USAGE 条目，且周期驱动者再跑一趟也不会冒出一条；
+    ② 墓碑的 `started_at` 被清空，留下"这一段结束了、未计费"的事实，而不是"还欠一段"的假象。
+
+    牙齿（四臂变异电池实测，2026-09-28；各臂恢复后 `cmp` 逐字节相同、末跑 8 passed）：
+    基线与无关注释臂 0 红。F1 让墓碑保留 `started_at` ⇒ 本档与对照档 E2 一起红（两支都读这一列）。
+    F3 把 `_settle_running_segment` 的状态守卫改成恒假（destroy 从不尝试结算）⇒ E2 红，
+    连带把既有那支 `test_destroy_settle_failure_marks_auditable_and_still_releases` 也打红——
+    它钉的"留下可审计痕迹"其实依赖结算**被尝试过**，这是本轮顺带量出的一条既有依赖。
+    本档"零条目"那一面**没有任何现存改动能让它红**（今天没有任何路径会为墓碑写 USAGE），
+    它防的是尚不存在的补做者；"这个 0 不是恒真"由 E2 用同一个查询证明（对照档读出恰好 1 条）。
+    """
+    orchestrator, wid, _ = _running_workspace_with_stream()
+
+    class FailingLedger:
+        def settle_workspace_run(self, db, workspace, seconds, started_iso):
+            raise RuntimeError("simulated ledger outage")
+
+    orchestrator.ledger = FailingLedger()
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        ws.started_at = datetime.now(UTC) - timedelta(seconds=3600)  # 真的跑过一小时
+        ws.accumulated_seconds = 0
+        db.commit()
+        orchestrator.destroy(db, ws)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert ws.status == WorkspaceStatus.DELETED.value
+        usage = list(
+            db.scalars(
+                select(CreditLedger).where(
+                    CreditLedger.workspace_id == wid,
+                    CreditLedger.type == LedgerType.USAGE.value,
+                )
+            )
+        )
+        assert usage == [], f"结算失败却留下了条目，本档的形状就不是这一条：{[u.gpu_seconds for u in usage]}"
+        assert ws.started_at is None, "墓碑还留着 started_at ⇒ 看上去像有一段没算的账"
+        assert ws.accumulated_seconds == 0, ws.accumulated_seconds
+
+    # 换回真账本再跑一趟周期驱动者：没有任何一条路会把这一小时补进来（那会把等待算成运行）
+    orchestrator.ledger = CreditLedgerService(Factory)
+    orchestrator.reconcile_all()
+    with Factory() as db:
+        assert db.scalar(
+            select(func.count(CreditLedger.id)).where(
+                CreditLedger.workspace_id == wid,
+                CreditLedger.type == LedgerType.USAGE.value,
+            )
+        ) == 0, "出现了补做者，而它按的是 utcnow()——这一笔会多计一小时"
+        assert db.get(Workspace, wid).started_at is None
+
+
+def test_destroy_books_the_segment_when_the_ledger_answers():
+    """对照档：同一夹具、同一入口，账本没坏时必须正好入一段账。
+
+    没有这一支，上一档的"零条目"可能只是 destroy 从不结算——那比丢一段账更坏。
+    """
+    orchestrator, wid, _ = _running_workspace_with_stream()
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        ws.started_at = datetime.now(UTC) - timedelta(seconds=3600)
+        db.commit()
+        orchestrator.destroy(db, ws)
+
+    with Factory() as db:
+        entries = list(
+            db.scalars(
+                select(CreditLedger).where(
+                    CreditLedger.workspace_id == wid,
+                    CreditLedger.type == LedgerType.USAGE.value,
+                )
+            )
+        )
+        assert len(entries) == 1, [e.gpu_seconds for e in entries]
+        assert 3590 <= (entries[0].gpu_seconds or 0) <= 3600, entries[0].gpu_seconds
+        assert db.get(Workspace, wid).started_at is None
 
 
 def test_destroy_provider_failure_does_not_release_or_tombstone():
