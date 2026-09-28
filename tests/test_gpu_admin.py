@@ -3,7 +3,7 @@
 - admin 可见 inventory / hosts
 - 工作区 running 时 GPU ALLOCATED 且绑定 workspace；stop 后释放回 AVAILABLE
   （审计发现「GPU 释放回 available」此前只有注释、没有断言）
-- unhealthy / drain 状态流转
+- unhealthy / drain 三维度流转（状态、健康列、下架意图列）与两条解除路径
 """
 
 from fastapi.testclient import TestClient
@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from app.deps import SessionFactory, scheduler
 from app.main import app
-from app.models import Gpu, GpuStatus, Role, User
+from app.models import Gpu, GpuHealth, GpuStatus, Role, User
 from tests.gpu_pool import ensure_free_gpus
 from tests.test_demo_workspace import _auth, _register
 from tests.workspace_progress import wait_status
@@ -73,12 +73,24 @@ def test_gpu_endpoints_admin_and_release_cycle():
         assert gpu_list[ws["gpu_id"]]["status"] == GpuStatus.AVAILABLE.value
         assert gpu_list[ws["gpu_id"]]["workspace_id"] is None
 
-        # 维护/异常流转（对已释放的 GPU）
+        # 三个维度各一列（ADR 0010）：下架是状态＋意图，健康是另一列，互不覆盖
         gid = ws["gpu_id"]
         assert client.post(f"/api/gpus/{gid}/drain", headers=_auth(token)).status_code == 204
         assert client.post(f"/api/gpus/{gid}/unhealthy", headers=_auth(token)).status_code == 204
         final = {g["id"]: g for g in client.get("/api/gpus", headers=_auth(token)).json()}
-        assert final[gid]["status"] == GpuStatus.UNHEALTHY.value
+        assert final[gid]["status"] == GpuStatus.DRAINED.value, (
+            f"人工判决不该被健康判决顶掉：{final[gid]}"
+        )
+        assert final[gid]["health"] == GpuHealth.UNHEALTHY.value, final[gid]
+        assert final[gid]["drain_requested_at"], "下架意图必须读得到（204 的那份主张要能被核对）"
+
+        # 两条解除路径都走产品接口：借走的卡必须还回共享池，否则后面的用例少一张
+        assert client.post(f"/api/gpus/{gid}/healthy", headers=_auth(token)).status_code == 204
+        assert client.post(f"/api/gpus/{gid}/undrain", headers=_auth(token)).status_code == 204
+        after = {g["id"]: g for g in client.get("/api/gpus", headers=_auth(token)).json()}
+        assert (after[gid]["status"], after[gid]["health"], after[gid]["drain_requested_at"]) == (
+            GpuStatus.AVAILABLE.value, None, None,
+        ), f"解除路径没把这张卡完整还回池子：{after[gid]}"
 
 
 def test_gpu_endpoints_non_admin_403():

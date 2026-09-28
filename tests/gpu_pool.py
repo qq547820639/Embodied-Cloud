@@ -35,7 +35,7 @@ from app.models import (
     WorkspaceOperation,
     WorkspaceStatus,
 )
-from app.services.scheduler import GpuScheduler
+from app.services.scheduler import GpuScheduler, health_is_usable
 
 #: `Gpu.memory_total` 单位是 MiB（`allocate` 把模板的 GB 需求乘 1024 再比较）。
 MIB = 1024
@@ -92,12 +92,18 @@ def reclaim_gpus(db: Session, scheduler: GpuScheduler) -> int:
 
 
 def count_big_enough(db: Session, requirement_gb: int) -> int:
-    """够用的空闲卡数（按 mock 的 MiB 口径比，不扣厂商预留容差——判据从严）。"""
+    """够用的空闲卡数（按 mock 的 MiB 口径比，不扣厂商预留容差——判据从严）。
+
+    必须与分配器吃同一批谓词（N-122 的规矩，ADR 0010 之后多一条 `health_is_usable()`）：
+    健康自 N-126 起不在 `status` 里，只数 AVAILABLE 会把一张被判不健康的卡算成余量，
+    而 `allocate` 拒发它 ⇒ 夹具宣布"净额够"而真请求拿不到卡（N-85 那一族的复发形状）。
+    """
     return len(
         list(
             db.scalars(
                 select(Gpu).where(
                     Gpu.status == GpuStatus.AVAILABLE.value,
+                    health_is_usable(),
                     Gpu.memory_total >= requirement_gb * MIB,
                 )
             )

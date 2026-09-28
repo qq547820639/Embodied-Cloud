@@ -41,7 +41,15 @@ from app import deps
 from app.db import Base
 from app.deps import SessionFactory, scheduler
 from app.main import app
-from app.models import Gpu, GpuStatus, Role, User, Workspace, WorkspaceStatus
+from app.models import (
+    Gpu,
+    GpuHealth,
+    GpuStatus,
+    Role,
+    User,
+    Workspace,
+    WorkspaceStatus,
+)
 from app.services.scheduler import GpuInfo, GpuScheduler
 from tests.gpu_pool import ensure_free_gpus
 from tests.test_demo_workspace import _auth, _register
@@ -83,6 +91,11 @@ def _row(sf, uuid: str) -> tuple[str, str | None]:
         gpu = db.scalar(select(Gpu).where(Gpu.gpu_uuid == uuid))
         assert gpu is not None, f"清单里根本没有 {uuid}，本档前提没造出来"
         return gpu.status, gpu.workspace_id
+
+
+def _health(sf, uuid: str) -> str | None:
+    with sf() as db:
+        return db.scalar(select(Gpu).where(Gpu.gpu_uuid == uuid)).health
 
 
 def _intent(sf, gpu_id: str) -> object:
@@ -195,40 +208,55 @@ def test_an_allocated_card_is_neither_demoted_nor_restored(factory) -> None:
     assert _row(factory, busy) == (GpuStatus.ALLOCATED.value, "ws-held")
 
 
-def test_an_unhealthy_card_is_never_auto_restored(factory) -> None:
-    """UNHEALTHY 也是判决：重报不许把它抬回池子（G0.103 那条"不许改写"的镜像面）。"""
+def test_a_health_verdict_survives_absence_and_reappearance(factory) -> None:
+    """健康判决活过缺席与重报，而可见性轴照常归位（ADR 0010 的两个轴各走各路）。
+
+    改前两轴挤在一列，这条判据只能读成一个"状态没被改"；现在能读得更准：
+    `status` 走 draining→available（那次缺席降级是真的），`health` 全程不动，
+    于是"这卡回来没有"与"这卡该不该用"两件事都不再互相遮蔽。
+    """
     _sync(factory, ("gpu-a", "gpu-b"))
     with factory() as db:
         gpu = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-b"))
-        GpuScheduler(factory).mark_unhealthy(db, gpu.id)
+        assert GpuScheduler(factory).mark_unhealthy(db, gpu.id) is True
+    assert _row(factory, "gpu-b")[0] == GpuStatus.AVAILABLE.value, (
+        "判健康不许顺手改占用/可用性那一列——改前正是这里把 available 抹成 unhealthy"
+    )
 
     _sync(factory, ("gpu-a",))
-    assert _row(factory, "gpu-b")[0] == GpuStatus.UNHEALTHY.value
+    assert _row(factory, "gpu-b")[0] == GpuStatus.DRAINING.value, "缺席降级照做（它答的是这次没报上来）"
+    assert _health(factory, "gpu-b") == GpuHealth.UNHEALTHY.value
     _sync(factory, ("gpu-a", "gpu-b"))
-    assert _row(factory, "gpu-b")[0] == GpuStatus.UNHEALTHY.value
+    assert _row(factory, "gpu-b")[0] == GpuStatus.AVAILABLE.value
+    assert _health(factory, "gpu-b") == GpuHealth.UNHEALTHY.value, "重报不许替管理员撤健康判决"
 
 
-def test_releasing_a_quarantined_card_clears_the_binding_but_keeps_the_verdict(factory) -> None:
-    """放卡那一脚只该结束占用，不该替管理员撤判决。
+def test_a_busy_card_can_be_quarantined_without_erasing_the_occupancy(factory) -> None:
+    """ADR 0010 的正面档：占用与判决同时为真，且判决真的挡派工。
 
-    形状：管理员先给一张占用中的卡判 unhealthy（`mark_unhealthy` 没有状态前置，这是它
-    本来就支持的用法），随后工作区停止走 `release`。改前 `release` 无条件写 AVAILABLE，
-    于是"这张卡被隔离了"这件事随停止一起消失；现在绑定清空、判决留下。
+    改前形状（N-126）：`mark_unhealthy` 把 `status` 直接改写成 unhealthy ⇒
+    占用事实在 `gpus` 这一侧消失（对外的 `gpu_allocated` 数的是 `status == allocated`），
+    而格上的归属还在，两张表互相打脸。现在两列各写各的，随后 `release` 结束占用、
+    可用性回 available，而健康判决仍然把它挡在分配之外。
     """
     _sync(factory, ("gpu-a", "gpu-b"))
     held = _hold(factory, "ws-quad")
     with factory() as db:
         GpuScheduler(factory).mark_unhealthy(db, held.id)
-    assert _row(factory, held.gpu_uuid) == (GpuStatus.UNHEALTHY.value, "ws-quad")
+    assert _row(factory, held.gpu_uuid) == (GpuStatus.ALLOCATED.value, "ws-quad"), (
+        "判健康不该抹掉占用事实"
+    )
+    assert _health(factory, held.gpu_uuid) == GpuHealth.UNHEALTHY.value
 
     with factory() as db:
         GpuScheduler(factory).release(db, "ws-quad")
-
     status, bound = _row(factory, held.gpu_uuid)
-    assert bound is None, "释放没清绑定（N-82 那一族）"
-    assert status == GpuStatus.UNHEALTHY.value, (
-        f"自动路径把管理员判决抹回 available，卡会被重新派出去：{status}"
-    )
+    assert (status, bound) == (GpuStatus.AVAILABLE.value, None), "释放该结束占用并清绑定"
+
+    with factory() as db:
+        other = GpuScheduler(factory).allocate(db, "ws-elsewhere")
+    assert other.gpu_uuid != held.gpu_uuid, "不健康的卡被派出去了：健康列没进分配谓词"
+    assert _health(factory, held.gpu_uuid) == GpuHealth.UNHEALTHY.value
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +355,7 @@ def test_undrain_does_not_lift_the_machine_or_health_verdicts(factory) -> None:
         gpu = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-b"))
         GpuScheduler(factory).mark_unhealthy(db, gpu.id)
         GpuScheduler(factory).mark_undrained(db, gpu.id)
-    assert _row(factory, "gpu-b")[0] == GpuStatus.UNHEALTHY.value, "撤下架意图撤掉了健康判决"
+    assert _health(factory, "gpu-b") == GpuHealth.UNHEALTHY.value, "撤下架意图撤掉了健康判决"
 
     with factory() as db:
         other = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-a"))
@@ -582,10 +610,58 @@ def test_the_provenance_registry_names_exactly_one_writer_per_verdict():
     assert registry == {
         "AVAILABLE": {"sync_host", "mark_undrained", "release", "recover_stuck_gpu_allocations"},
         "ALLOCATED": {"allocate"},
-        "UNHEALTHY": {"mark_unhealthy"},
         "DRAINING": {"sync_host"},
         "DRAINED": {"mark_drained", "release", "recover_stuck_gpu_allocations"},
     }, registry
+
+
+def health_writers(source: str) -> dict[str, set[str]]:
+    """谁在写 `gpus.health`：值写成 `GpuHealth.X` 记 `X`，写回 NULL 记 `NULL`。"""
+    registry: dict[str, set[str]] = {}
+    for fn in _defs(ast.parse(source)):
+        for node in _own_nodes(fn):
+            if not (
+                isinstance(node, ast.Assign)
+                and any(isinstance(t2, ast.Attribute) and t2.attr == "health" for t2 in node.targets)
+            ):
+                continue
+            value = node.value
+            if isinstance(value, ast.Constant) and value.value is None:
+                registry.setdefault("NULL", set()).add(fn.name)
+                continue
+            target = value
+            if isinstance(target, ast.Attribute) and target.attr == "value":
+                target = target.value
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "GpuHealth"
+            ):
+                registry.setdefault(target.attr, set()).add(fn.name)
+    return registry
+
+
+AUTO_PATH_WRITES_HEALTH = """
+def sync_host(db, host_id, gpus):
+    for info in gpus:
+        gpu = find(info)
+        gpu.health = GpuHealth.HEALTHY.value
+"""
+
+
+def test_only_admin_paths_write_health():
+    """健康只有 `mark_unhealthy`／`mark_healthy` 两条路能写（ADR 0010 §3.5）。
+
+    缺席降级、重报归位、`release`、recover 都不许碰它：那些答的是"观察"与"占用结束"，
+    不是对健康的判断。两个维度各一列，才不会互相抹掉——那正是 N-126 的正解。
+    """
+    assert health_writers(scheduler_source()) == {
+        "UNHEALTHY": {"mark_unhealthy"},
+        "NULL": {"mark_healthy"},
+    }, health_writers(scheduler_source())
+    assert health_writers(AUTO_PATH_WRITES_HEALTH) == {"HEALTHY": {"sync_host"}}, (
+        "自动路径写健康必须被点名（它不在期望表里，所以主档会红）"
+    )
 
 
 def test_the_auto_restore_sits_under_the_machine_verdict_predicate():
@@ -666,13 +742,32 @@ def test_the_registry_sees_case_branches_and_ignores_other_enums():
 # ---------------------------------------------------------------------------
 # 前端面：状态值是给人读的
 # ---------------------------------------------------------------------------
-def _labelled_gpu_statuses(js: str) -> set[str]:
-    """从 `GPU_STATUS_CN = { … }` 取被标签化的状态值（取不到表本身就要红，不许读成空集通过）。"""
-    block = re.search(r"GPU_STATUS_CN\s*=\s*\{(.*?)\}", js, re.S)
-    assert block, "app.js 里读不到 GPU_STATUS_CN 这张表，这条判据就没有分母"
+def _labelled_status(js: str, table: str) -> set[str]:
+    """从 `<table> = { … }` 这种 JS 对象字面量里取被标签化的值名（取不到表就要红）。"""
+    block = re.search(table + r"\s*=\s*\{(.*?)\}", js, re.S)
+    assert block, f"app.js 里读不到 {table} 这张表，这条判据就没有分母"
     keys = {m.group(1) for m in re.finditer(r"([A-Za-z_][\w-]*)\s*:", block.group(1))}
     assert keys, "表体解析出来是空的——提取式坏了，不是真的一个标签都没有"
     return keys
+
+
+def _labelled_gpu_statuses(js: str) -> set[str]:
+    return _labelled_status(js, "GPU_STATUS_CN")
+
+
+def test_the_admin_ui_labels_the_health_column_too():
+    """健康从状态列搬出来之后，前端必须有它自己的标签表与渲染位（ADR 0010）。
+
+    否则这张卡在表上只写着"可用"，管理员看不出它已被判不健康——
+    等于把刚拆出来的那一维又藏回去。
+    """
+    js = APP_JS.read_text(encoding="utf-8")
+    declared = {member.value for member in GpuHealth}
+    assert declared
+    assert _labelled_status(js, "GPU_HEALTH_CN") >= declared, (
+        f"前端少了这些健康值的中文名：{sorted(declared - _labelled_status(js, 'GPU_HEALTH_CN'))}"
+    )
+    assert "g.health" in js, "GPU 表格里没渲染健康这一维"
 
 
 def test_the_admin_ui_labels_every_gpu_status():

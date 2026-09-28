@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException
 
 from ..deps import DB, CurrentUser, scheduler
-from ..models import Gpu, GpuHost, Role
+from ..models import GpuHost, Role
 from ..schemas import GpuHostOut, GpuOut
 
 router = APIRouter(prefix="/gpus", tags=["gpus"])
@@ -30,10 +30,27 @@ def list_hosts(db: DB, user: CurrentUser):
 
 @router.post("/{gpu_id}/unhealthy", status_code=204)
 def mark_unhealthy(gpu_id: str, db: DB, user: CurrentUser):
+    """判这张卡不健康——只写 `gpus.health`，不碰 `status`（ADR 0010／N-126）。
+
+    改前它把 allocated 覆盖成 unhealthy，占用事实当场从 `gpus` 这一侧消失而格子还指着它；
+    现在"在用"与"不健康"可以同时为真，分配器靠 `health_is_usable()` 挡派工。
+    解除走 `POST /api/gpus/{gpu_id}/healthy`——人的判决只有人能撤。
+    """
     _admin(user)
-    if db.get(Gpu, gpu_id) is None:
+    if not scheduler.mark_unhealthy(db, gpu_id):
         raise HTTPException(404, "gpu not found")
-    scheduler.mark_unhealthy(db, gpu_id)
+
+
+@router.post("/{gpu_id}/healthy", status_code=204)
+def mark_healthy(gpu_id: str, db: DB, user: CurrentUser):
+    """撤回健康判决（把 `gpus.health` 交回"从没人判过"的 NULL）。
+
+    只清健康这一维：卡该回 available 还是继续 draining／drained，由各自的所有者决定
+    （下一次成功上报／`/undrain`），这条路不替它们改口。
+    """
+    _admin(user)
+    if not scheduler.mark_healthy(db, gpu_id):
+        raise HTTPException(404, "gpu not found")
 
 
 @router.post("/{gpu_id}/drain", status_code=204)

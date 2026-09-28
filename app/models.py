@@ -41,13 +41,22 @@ class RuntimeKind(StrEnum):
 
 
 class GpuStatus(StrEnum):
+    # 只回答"调度可用性"这一个维度（ADR 0010）。健康与管理员意图各有自己的列：
+    # `GpuHealth`／`gpus.health` 与 `gpus.drain_requested_at`。
+    # 历史上 unhealthy 挤在这一列里，于是判一张在用的卡不健康会把占用事实抹掉（N-126）。
     AVAILABLE = "available"
     ALLOCATED = "allocated"
-    UNHEALTHY = "unhealthy"
     # 两个 drain 是两个判决，不是一件事的两种写法：DRAINING 只表示"这次上报里没有它"，
     # 一次成功重报就归位；DRAINED 是管理员要求，只有管理员能解除（SLURM 的 DRAIN/DOWN 之分）。
     DRAINING = "draining"
     DRAINED = "drained"
+
+
+class GpuHealth(StrEnum):
+    """`gpus.health` 的取值。nullable 证据列：NULL＝从没人判过这张卡的健康。"""
+
+    HEALTHY = "healthy"
+    UNHEALTHY = "unhealthy"
 
 
 class LedgerType(StrEnum):
@@ -344,6 +353,9 @@ class Gpu(Base):
     # 对占用中的卡回 409）。释放路径在工作跑完后把它落成 status=drained。
     # NULL＝没有管理员提出过这个要求；不加 server default，理由见迁移文件。
     drain_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 健康判决（ADR 0010 的第三个维度）：NULL＝从没人判过，只有亲口判成 unhealthy 才挡分配。
+    # 不进 `status`：那张卡可以既在用又不健康，两个事实必须能同时为真（N-126）。
+    health: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )

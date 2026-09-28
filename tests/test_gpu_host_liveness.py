@@ -27,7 +27,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import deps
 from app.db import Base
-from app.models import Gpu, GpuHost, GpuStatus
+from app.models import Gpu, GpuHealth, GpuHost, GpuStatus
 from app.services.scheduler import HOST_OFFLINE, HOST_ONLINE, GpuInfo, GpuScheduler
 from app.utils import utcnow
 
@@ -298,26 +298,36 @@ def test_the_periodic_driver_reuses_the_boot_sync_instead_of_a_second_copy(monke
 def test_a_shrunken_inventory_drains_the_missing_card_without_a_restart(factory) -> None:
     """驱动者存在的意义：第二次同步少报的卡当场 DRAINING。
 
-    两张缺席的卡分开钉： AVAILABLE 的那张该被降级，UNHEALTHY 的那张**不许**被顺手
-    改写成 DRAINING——缺席降级只作用于"还在池子里"的卡（AVAILABLE/DRAINING），
-    别的判决不是它能覆盖的。
+    三张缺席的卡分开钉（ADR 0010 之后）：
+    - AVAILABLE 的那张该被降级；
+    - 已被人工下架（DRAINED）的那张**不许**被顺手改写成 DRAINING——缺席降级只作用于
+      "还在池子里"的卡（AVAILABLE/DRAINING），别人的判决不是它能覆盖的；
+    - unhealthy 的那张照常被降级（它答的是"这次没报上来"），但**健康列一律不动**：
+      判决由 `/healthy` 解除，不由一次重报或一次缺席代劳。
 
     真机上这一步靠 provider 少报；本机 mock provider 永远报同样 8 张，
     所以这里直接喂 `sync_host`——被钉的是"同步本身能收敛"，
     "provider 会在运行中少报"属另一档（未证实，见本轮收尾）。
     """
-    _sync(factory, gpus=("gpu-a", "gpu-b", "gpu-c", "gpu-d"))
+    _sync(factory, gpus=("gpu-a", "gpu-b", "gpu-c", "gpu-d", "gpu-e"))
     with factory() as db:
+        sched = GpuScheduler(factory)
         unhealthy = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-d"))
-        GpuScheduler(factory).mark_unhealthy(db, unhealthy.id)
+        sched.mark_unhealthy(db, unhealthy.id)
+        drained = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-e"))
+        assert sched.mark_drained(db, drained.id) is True
 
-    _sync(factory, gpus=("gpu-a", "gpu-b"))  # 节点上报少了 c 与 d
+    _sync(factory, gpus=("gpu-a", "gpu-b"))  # 节点上报少了 c、d、e
 
     with factory() as db:
         statuses = {g.gpu_uuid: g.status for g in db.scalars(select(Gpu))}
+        healths = {g.gpu_uuid: g.health for g in db.scalars(select(Gpu))}
     assert statuses == {
         "gpu-a": GpuStatus.AVAILABLE.value,
         "gpu-b": GpuStatus.AVAILABLE.value,
         "gpu-c": GpuStatus.DRAINING.value,
-        "gpu-d": GpuStatus.UNHEALTHY.value,
+        "gpu-d": GpuStatus.DRAINING.value,
+        "gpu-e": GpuStatus.DRAINED.value,
     }, statuses
+    assert healths["gpu-d"] == GpuHealth.UNHEALTHY.value, "缺席降级不许顺手解除健康判决"
+    assert healths["gpu-e"] is None, "别的卡不该被这趟同步写上健康判决"

@@ -142,6 +142,8 @@ class GpuOut(ORM):
     workspace_id: str | None
     # 管理员的 drain 意图（证据列）：非 NULL＝已要求这张卡离开池子；`status` 仍是观察值。
     drain_requested_at: datetime | None
+    # 健康判决（NULL＝从没人判过）：与占用、与下架意图各自一列，ADR 0010。
+    health: str | None
     updated_at: datetime
 
 

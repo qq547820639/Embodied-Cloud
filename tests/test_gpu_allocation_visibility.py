@@ -24,7 +24,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import Gpu, GpuHost, GpuStatus, Workspace
+from app.models import Gpu, GpuHealth, GpuHost, GpuStatus, Workspace
 from app.services.scheduler import GpuInfo, GpuPoolContendedError, GpuScheduler
 from app.utils import utcnow
 
@@ -83,6 +83,13 @@ def _workspace(db, wid: str) -> Workspace:
 def _gpu_status(sf: sessionmaker, gpu_uuid: str) -> str:
     with sf() as db:
         return db.scalar(select(Gpu).where(Gpu.gpu_uuid == gpu_uuid)).status
+
+
+def _gpu_axes(sf: sessionmaker, gpu_uuid: str) -> tuple[str, str | None]:
+    """两个维度一起读：`(status, health)`（ADR 0010 把它们分成了两列）。"""
+    with sf() as db:
+        gpu = db.scalar(select(Gpu).where(Gpu.gpu_uuid == gpu_uuid))
+        return gpu.status, gpu.health
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +161,13 @@ def test_a_released_card_does_not_escape_through_the_release_path(factory) -> No
 
 
 def test_visibility_is_not_a_way_back_in_for_a_hand_marked_card(factory) -> None:
-    """失联节点上的 UNHEALTHY 卡：节点恢复在线也不许被这层放回来（那是两个轴）。"""
+    """不健康的卡：可见性恢复 ≠ 健康判决解除——两个轴各自一条路（ADR 0010）。
+
+    改前这一档钉的是「status 仍是 unhealthy」，那正是把两个轴挤进一列的形状：
+    健康一判，占用与可用性都被它盖掉。现在两侧分开读，判据反而更强：
+    节点回来后 `status` 该回 available（可见性轴自己会归位），而 `health` 仍是 unhealthy，
+    分配器仍然拒发 ⇒ 挡住派工的是健康判决，不是状态列的副作用。
+    """
     _seed(factory)
     with factory() as db:
         scheduler = GpuScheduler(factory)
@@ -166,7 +179,10 @@ def test_visibility_is_not_a_way_back_in_for_a_hand_marked_card(factory) -> None
         _workspace(db, "w6")
         with pytest.raises(RuntimeError):
             GpuScheduler(factory).allocate(db, "w6", gpu_requirement_gb=40)
-    assert _gpu_status(factory, "gpu-hidden") == GpuStatus.UNHEALTHY.value
+    assert _gpu_axes(factory, "gpu-hidden") == (
+        GpuStatus.AVAILABLE.value,
+        GpuHealth.UNHEALTHY.value,
+    ), "可见性轴与健康轴必须分别归位：状态回 available，判决留在 unhealthy"
 
 
 def test_the_predicate_is_correlated_to_each_cards_own_host(factory) -> None:

@@ -15,12 +15,20 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, case, func, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import ColumnElement
 
-from ..models import Gpu, GpuAllocation, GpuHost, GpuStatus, Workspace, WorkspaceStatus
+from ..models import (
+    Gpu,
+    GpuAllocation,
+    GpuHealth,
+    GpuHost,
+    GpuStatus,
+    Workspace,
+    WorkspaceStatus,
+)
 from ..utils import utcnow
 
 # nvidia-smi `--query-gpu=memory.total` 上报单位为 MiB；标称「N GB」的卡实际可用
@@ -73,7 +81,8 @@ def host_is_visible() -> ColumnElement[bool]:
     所以"看不见节点"与"不该往那儿派卡"本来就是同一件事的两半。
 
     刻意**不改** `gpus.status`：
-    - 管理员手工 `/drain`、`/unhealthy` 写下的判决有它们自己的语义与生命周期，
+    - 管理员手工写下的判决（`/drain` 的意图列、`/unhealthy` 的健康列）有各自的
+      语义与生命周期，
       一个周期任务顺手把它们抬回 AVAILABLE 是不可接受的（重报每 2 min 一次）；
     - 而"节点暂时失联"必须能随一次成功重报自动恢复。读证据列同时满足两边：
       节点回到 online 的下一趟分配就看得到那张卡，全程没有人改写过卡的状态。
@@ -83,6 +92,20 @@ def host_is_visible() -> ColumnElement[bool]:
         .where(GpuHost.id == Gpu.host_id, GpuHost.status == HOST_ONLINE)
         .exists()
     )
+
+
+def health_is_usable() -> ColumnElement[bool]:
+    """这张卡的健康判决允许用它吗（ADR 0010，闭登记项 N-126）。
+
+    `gpus.health` 是 nullable 证据列：NULL＝从没人判过 ⇒ 照用；`healthy`＝说过健康 ⇒ 照用；
+    只有亲口判下的 `unhealthy` 才挡分配。健康不再挤在 `gpus.status` 里，所以一张卡可以
+    **既在用又不健康**，两个事实同时为真而不互相抹掉（改前 `mark_unhealthy` 覆盖 allocated，
+    对外的 `gpu_allocated` 当场少一张，而格上的归属还在）。
+
+    与 `host_is_visible()` 同一条规矩：**只有一份**。候选筛选、等锁计数（`still_waiting`）
+    与 warm pool 的余量都吃它——写第二份就会漂，N-122 量的正是漂的代价。
+    """
+    return or_(Gpu.health.is_(None), Gpu.health != GpuHealth.UNHEALTHY.value)
 
 
 def _is_unique_contention(exc: IntegrityError) -> bool:
@@ -212,6 +235,7 @@ class GpuScheduler:
                     Gpu.status == GpuStatus.AVAILABLE.value,
                     Gpu.memory_total >= required_mib,
                     host_is_visible(),
+                    health_is_usable(),
                 )
                 .order_by(*candidate_order())
                 # `of=[Gpu]`：可见性判断不许把节点那一行也锁上。为什么留着它——本轮在真
@@ -261,6 +285,7 @@ class GpuScheduler:
                     Gpu.status == GpuStatus.AVAILABLE.value,
                     Gpu.memory_total >= required_mib,
                     host_is_visible(),
+                    health_is_usable(),
                 )
             )
             if not still_waiting:
@@ -372,12 +397,39 @@ class GpuScheduler:
             db.commit()
         return len(stale)
 
-    def mark_unhealthy(self, db: Session, gpu_id: str) -> None:
+    def mark_unhealthy(self, db: Session, gpu_id: str) -> bool:
+        """判这张卡不健康——只写 `health`，**不碰 `status`**（ADR 0010）。
+
+        改前它把 `status` 直接改写成 unhealthy：一张正在被用的卡被判掉之后，
+        `gpus.status == allocated` 这个本仓唯一的占用载体当场消失（对外的
+        `gpu_allocated` 少一张，`app/main.py:34-37`），而 `gpus.workspace_id` 与
+        那一格的 `workspaces.gpu_id` 都还指着对方——两张表互相打脸，且没有任何判据会红。
+        现在两个维度各自成立：占用照旧是 allocated，健康照旧是 unhealthy，分配器靠
+        `health_is_usable()` 挡派工。返回值是「这张卡现在是否带着 unhealthy 判决」。
+        """
         gpu = db.get(Gpu, gpu_id)
-        if gpu is not None:
-            gpu.status = GpuStatus.UNHEALTHY.value
+        if gpu is None:
+            return False
+        if gpu.health != GpuHealth.UNHEALTHY.value:
+            gpu.health = GpuHealth.UNHEALTHY.value
             gpu.updated_at = utcnow()
             db.commit()
+        return True
+
+    def mark_healthy(self, db: Session, gpu_id: str) -> bool:
+        """解除健康判决（管理员动作，与 `/undrain` 同形）。
+
+        只写 `health`：这张卡该回到 available 还是继续 draining／drained，由那两个维度
+        自己的所有者决定（下一次成功上报／管理员的 `/undrain`），这条路不替它们改口。
+        """
+        gpu = db.get(Gpu, gpu_id)
+        if gpu is None:
+            return False
+        if gpu.health is not None:
+            gpu.health = None
+            gpu.updated_at = utcnow()
+            db.commit()
+        return True
 
     def mark_drained(self, db: Session, gpu_id: str) -> bool:
         """管理员要求这张卡离开池子——占用中也判得动（N-125，闭登记项 N-124）。

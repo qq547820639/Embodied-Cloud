@@ -611,7 +611,44 @@
           "gpus"
         ],
         "summary": "Mark Unhealthy",
+        "description": "\u5224\u8fd9\u5f20\u5361\u4e0d\u5065\u5eb7\u2014\u2014\u53ea\u5199 `gpus.health`\uff0c\u4e0d\u78b0 `status`\uff08ADR 0010\uff0fN-126\uff09\u3002\n\n\u6539\u524d\u5b83\u628a allocated \u8986\u76d6\u6210 unhealthy\uff0c\u5360\u7528\u4e8b\u5b9e\u5f53\u573a\u4ece `gpus` \u8fd9\u4e00\u4fa7\u6d88\u5931\u800c\u683c\u5b50\u8fd8\u6307\u7740\u5b83\uff1b\n\u73b0\u5728\"\u5728\u7528\"\u4e0e\"\u4e0d\u5065\u5eb7\"\u53ef\u4ee5\u540c\u65f6\u4e3a\u771f\uff0c\u5206\u914d\u5668\u9760 `health_is_usable()` \u6321\u6d3e\u5de5\u3002\n\u89e3\u9664\u8d70 `POST /api/gpus/{gpu_id}/healthy`\u2014\u2014\u4eba\u7684\u5224\u51b3\u53ea\u6709\u4eba\u80fd\u64a4\u3002",
         "operationId": "mark_unhealthy_api_gpus__gpu_id__unhealthy_post",
+        "parameters": [
+          {
+            "name": "gpu_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Gpu Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gpus/{gpu_id}/healthy": {
+      "post": {
+        "tags": [
+          "gpus"
+        ],
+        "summary": "Mark Healthy",
+        "description": "\u64a4\u56de\u5065\u5eb7\u5224\u51b3\uff08\u628a `gpus.health` \u4ea4\u56de\"\u4ece\u6ca1\u4eba\u5224\u8fc7\"\u7684 NULL\uff09\u3002\n\n\u53ea\u6e05\u5065\u5eb7\u8fd9\u4e00\u7ef4\uff1a\u5361\u8be5\u56de available \u8fd8\u662f\u7ee7\u7eed draining\uff0fdrained\uff0c\u7531\u5404\u81ea\u7684\u6240\u6709\u8005\u51b3\u5b9a\n\uff08\u4e0b\u4e00\u6b21\u6210\u529f\u4e0a\u62a5\uff0f`/undrain`\uff09\uff0c\u8fd9\u6761\u8def\u4e0d\u66ff\u5b83\u4eec\u6539\u53e3\u3002",
+        "operationId": "mark_healthy_api_gpus__gpu_id__healthy_post",
         "parameters": [
           {
             "name": "gpu_id",
@@ -3164,6 +3201,17 @@
             ],
             "title": "Drain Requested At"
           },
+          "health": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health"
+          },
           "updated_at": {
             "type": "string",
             "format": "date-time",
@@ -3181,6 +3229,7 @@
           "status",
           "workspace_id",
           "drain_requested_at",
+          "health",
           "updated_at"
         ],
         "title": "GpuOut"
