@@ -452,10 +452,10 @@ def test_the_quota_gate_reports_the_booked_seconds(monkeypatch):
     覆盖的是 `app/services/billing.py:380` 那一位读者——它读的就是本轮改成投影的这一列，
     并且真的拿它拒启动（配额边界两个极点一起钉：`used >= quota` 拒、差一秒放行）。
     世界用 C2 那条 release 失败+重试的形状造，所以改前它读到的是账本的两倍。
-    不覆盖：`app/routers/usage.py:36,40` 的 HTTP 展示算术与 `app/static/app.js:425,703`
-    ——同一条 `accumulated_seconds + live`，要走真 HTTP（鉴权夹具）才量得到；且那条路
-    上"仍在 RUNNING 而这一段已结算过"的窗口里 live 仍会在投影之外再加一次，那是 N-64
-    的另一半，本轮设计没有动它。
+    另两位读者现在也有常驻判据（本文件不重复钉）：`app/routers/usage.py` 的 HTTP 展示
+    算术由 `tests/test_live_usage_not_double_counted.py` 的 C1c 量，`app/static/app.js`
+    的两处 `accumulated_seconds + live`（前端读者，:427 与 :705）由同文件的 C6 量——
+    它们都只在服务端说"这一段还没入账"时才加 live。
     """
     orchestrator, billing, wid, _clock = _stop_until_release_fails(monkeypatch)
 

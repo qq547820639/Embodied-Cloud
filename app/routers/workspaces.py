@@ -11,6 +11,7 @@ from ..deps import DB, CurrentUser, billing, credential_cipher, orchestrator, wa
 from ..models import OperationType, Role, Template, Workspace, WorkspaceStatus
 from ..schemas import DemoCheckpointOut, WorkspaceAccessOut, WorkspaceCreate, WorkspaceOut
 from ..services.billing import BillingError
+from ..services.ledger import mark_usage_segment, mark_usage_segments
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -36,7 +37,7 @@ def list_workspaces(db: DB, user: CurrentUser):
     )
     if user.role != Role.ADMIN.value:
         stmt = stmt.where(Workspace.user_id == user.id)
-    return list(db.scalars(stmt))
+    return mark_usage_segments(db, db.scalars(stmt))
 
 
 @router.post("", response_model=WorkspaceOut, status_code=201)
@@ -54,7 +55,7 @@ def create_workspace(payload: WorkspaceCreate, db: DB, user: CurrentUser):
     if payload.auto_start:
         claimed = warm_pool.claim(db, template.id, user, credential_cipher=credential_cipher)
         if claimed is not None:
-            return claimed
+            return mark_usage_segment(db, claimed)
     workspace = orchestrator.create(
         db,
         template,
@@ -64,12 +65,12 @@ def create_workspace(payload: WorkspaceCreate, db: DB, user: CurrentUser):
     )
     if payload.auto_start:
         orchestrator.start_async(workspace.id)
-    return workspace
+    return mark_usage_segment(db, workspace)
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceOut)
 def get_workspace(workspace_id: str, db: DB, user: CurrentUser):
-    return _get_owned(db, workspace_id, user)
+    return mark_usage_segment(db, _get_owned(db, workspace_id, user))
 
 
 @router.get("/{workspace_id}/access", response_model=WorkspaceAccessOut)
@@ -98,7 +99,7 @@ def get_workspace_access(workspace_id: str, db: DB, user: CurrentUser):
 def start_workspace(workspace_id: str, db: DB, user: CurrentUser):
     workspace = _get_owned(db, workspace_id, user)
     if workspace.status in {WorkspaceStatus.PROVISIONING.value, WorkspaceStatus.RUNNING.value}:
-        return workspace
+        return mark_usage_segment(db, workspace)
     # 先入队再改状态：入队被"同 workspace 已有 active operation"挡下时，
     # 不能先把 workspace 翻成 QUEUED（那等于前端显示"排队中"而队列里什么都没有）
     op = orchestrator.start_async(workspace.id)
@@ -108,7 +109,7 @@ def start_workspace(workspace_id: str, db: DB, user: CurrentUser):
     workspace.error_message = None
     db.commit()
     db.refresh(workspace)
-    return workspace
+    return mark_usage_segment(db, workspace)
 
 
 @router.post("/{workspace_id}/stop", response_model=WorkspaceOut)
@@ -124,7 +125,7 @@ def stop_workspace(workspace_id: str, db: DB, user: CurrentUser):
         raise HTTPException(409, f"工作区 {workspace_id[:8]} 有生命周期操作正在执行，请稍后重试停止")
     worker.tick_once()  # fast-path：立即执行（operation 已持久化）
     db.refresh(workspace)
-    return workspace
+    return mark_usage_segment(db, workspace)
 
 
 @router.get("/{workspace_id}/logs", response_model=dict)
@@ -195,4 +196,6 @@ def list_all_workspaces(db: DB, user: CurrentUser):
     """管理员审计：包含 deleted（tombstone）workspace。"""
     if user.role != Role.ADMIN.value:
         raise HTTPException(403, "admin role required")
-    return list(db.scalars(select(Workspace).order_by(Workspace.created_at.desc())))
+    return mark_usage_segments(
+        db, db.scalars(select(Workspace).order_by(Workspace.created_at.desc()))
+    )

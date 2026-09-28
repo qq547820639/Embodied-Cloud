@@ -294,6 +294,9 @@ class Workspace(Base):
     # warm pool 状态（§18）：None = 普通 workspace；否则为池状态机
     warm_pool_state: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     accumulated_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 非映射的临时属性（SQLAlchemy 只认 `Mapped[...]`，所以它不进表、不被 flush）：
+    # 序列化前由 `ledger.mark_usage_segments` 赋值，给 `WorkspaceOut.usage_segment_booked` 用。
+    usage_segment_booked: bool = False
 
 
 # ---------------------------------------------------------------------------

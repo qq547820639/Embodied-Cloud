@@ -102,6 +102,10 @@ class WorkspaceOut(ORM):
     started_at: datetime | None
     stopped_at: datetime | None
     accumulated_seconds: int
+    # 不是模型列：`ledger.mark_usage_segments()` 在序列化前打到行上的临时属性。
+    # 前端为了让数字在两秒一轮的轮询里继续跳，自己算 `accumulated_seconds + live`；
+    # "这一段是否已进账本"必须由服务端说，否则它照旧双计（N-64 的第三个读者）。
+    usage_segment_booked: bool = False
 
 
 class WorkspaceAccessOut(BaseModel):

@@ -521,8 +521,10 @@ class WorkspaceOrchestrator:
     def _settle_run_delta(self, db: Session, workspace: Workspace) -> tuple[int, int]:
         """结算当前运行段，返回 `(账本认下的这一段秒数, 账本本次净新增秒数)`。
 
-        idempotency_key = usage:{workspace.id}:{started_at.isoformat()}，
-        与 settle_workspace_run 内部一致：同一运行段重复结算不会重复扣款。
+        idempotency_key 由 `ledger.usage_idempotency_key(workspace.id, started_at.isoformat())`
+        给出（全仓唯一一处键构造），与 settle_workspace_run 内部一致：同一运行段重复
+        结算不会重复扣款。传的是**原始列值** `workspace.started_at.isoformat()`，
+        不做时区归一 —— 读侧 `segment_booked` 用同一把键认这一段。
         累计列不靠 `+=` 维护（N-64）：幂等键只保证不重复扣款，重放时 `run_seconds`
         会按已经流逝的时间变得更大，`+=` 会让展示用量与配额门禁比账本多算一截。
         取自账本的投影既能自愈这类历史膨胀值，也让返回值与扣款同源——hold 转正

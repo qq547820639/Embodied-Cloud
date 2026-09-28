@@ -26,7 +26,7 @@ from ..models import (
     WorkspaceStatus,
 )
 from ..utils import utcnow
-from .ledger import CreditLedgerService
+from .ledger import CreditLedgerService, booked_usage_keys, workspace_seconds_used
 
 
 class BillingError(RuntimeError):
@@ -380,22 +380,28 @@ class BillingPolicy:
     def course_usage_seconds(self, db: Session, user_id: str, lab: Lab) -> int:
         """该学生在 lab.template_id 下所有（非 tombstone）workspace 的累计 GPU 秒数。
 
-        含运行中 workspace 的 live 秒数（配额必须真实执行，不能只算已结算段）。
+        含运行中 workspace 的 live 秒数（配额必须真实执行，不能只算已结算段），但
+        **只含还没进账本的那一段**：口径与展示端同源，都在 `workspace_seconds_used`
+        里（N-64 的投影 + 未入账 live）。QUOTA 门禁（`check_launch_eligible` 的
+        `used >= quota_seconds`）与配额监控的停机判定读的就是这个数，所以"结算已落库
+        而 `started_at` 未清"的窗口一度把它读成账本的两倍。
         """
-        workspaces = db.scalars(
-            select(Workspace).where(
-                Workspace.user_id == user_id,
-                Workspace.template_id == lab.template_id,
-                Workspace.deleted_at.is_(None),
+        workspaces = list(
+            db.scalars(
+                select(Workspace).where(
+                    Workspace.user_id == user_id,
+                    Workspace.template_id == lab.template_id,
+                    Workspace.deleted_at.is_(None),
+                )
             )
         )
         now = datetime.now(UTC)
-        total = 0
-        for w in workspaces:
-            total += w.accumulated_seconds or 0
-            if w.status == WorkspaceStatus.RUNNING.value and w.started_at:
-                started = w.started_at
-                if started.tzinfo is None:
-                    started = started.replace(tzinfo=UTC)
-                total += max(0, int((now - started).total_seconds()))
-        return total
+        # 一段 `IN` 查询拿回这批 workspace 的 USAGE 幂等键，逐 workspace 只查内存集合
+        booked_keys = booked_usage_keys(
+            db,
+            [w.id for w in workspaces if w.status == WorkspaceStatus.RUNNING.value],
+        )
+        return sum(
+            workspace_seconds_used(db, w, now=now, booked_keys=booked_keys)
+            for w in workspaces
+        )

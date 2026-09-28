@@ -21,6 +21,7 @@ from ..schemas import (
     WorkspaceOut,
 )
 from ..services import course as course_service
+from ..services.ledger import mark_usage_segment
 
 router = APIRouter(tags=["courses"])
 
@@ -129,7 +130,9 @@ def list_assignments(lab_id: str, db: DB, user: CurrentUser):
 @router.post("/labs/{lab_id}/launch", response_model=WorkspaceOut, status_code=201)
 def launch_lab(lab_id: str, db: DB, user: CurrentUser):
     lab = course_service.get_lab_or_404(db, lab_id, user)
-    return course_service.launch_lab(db, orchestrator, lab, user, billing=billing)
+    return mark_usage_segment(
+        db, course_service.launch_lab(db, orchestrator, lab, user, billing=billing)
+    )
 
 
 @router.post("/assignments/{assignment_id}/submit", response_model=SubmissionOut)

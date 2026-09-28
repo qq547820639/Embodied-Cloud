@@ -9,6 +9,7 @@ from sqlalchemy import select
 from ..deps import DB, CurrentUser, ledger
 from ..models import CreditLedger, LedgerType, Role, Template, User, Workspace, WorkspaceStatus
 from ..schemas import LedgerEntryOut, RechargeIn, UsageOut
+from ..services.ledger import booked_usage_keys, workspace_seconds_used
 
 router = APIRouter(tags=["usage"])
 
@@ -25,15 +26,13 @@ def usage(db: DB, user: CurrentUser):
     workspaces = _user_workspaces(db, user)
     now = datetime.now(UTC)
     running = [w for w in workspaces if w.status == WorkspaceStatus.RUNNING.value]
-    seconds_by_workspace: dict[str, int] = {}
-    for w in workspaces:
-        live = 0
-        if w.status == WorkspaceStatus.RUNNING.value and w.started_at:
-            started = w.started_at
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=UTC)
-            live = max(0, int((now - started).total_seconds()))
-        seconds_by_workspace[w.id] = w.accumulated_seconds + live
+    # 已入账段的判定：一条 `workspace_id IN (…)` 批量取回 USAGE 幂等键，避免逐 workspace
+    # 点查把这个列表端点变成 N+1。口径本身在 `workspace_seconds_used`（投影 + 未入账 live）。
+    booked_keys = booked_usage_keys(db, [w.id for w in running])
+    seconds_by_workspace: dict[str, int] = {
+        w.id: workspace_seconds_used(db, w, now=now, booked_keys=booked_keys)
+        for w in workspaces
+    }
     seconds = sum(seconds_by_workspace.values())
     template_rates = {t.id: t.estimated_hourly_cost_cny for t in db.scalars(select(Template))}
     estimated = sum(

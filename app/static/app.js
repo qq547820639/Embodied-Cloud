@@ -406,7 +406,9 @@ async function loadWorkspaces() {
     if (!workspaces.length) { el.innerHTML = '<div class="empty">还没有工作区。上面选一个模板直接启动。</div>'; ensurePolling(); return; }
     el.innerHTML = workspaces.map((w) => {
       const tpl = templateById(w.template_id);
-      const live = w.status === "running" && w.started_at
+      // 已入账的那一段由服务端否定 live（`usage_segment_booked`）：destroy 失败窗口里
+      // 账本已有这一行，再按 started_at 加一次就是两倍（N-64 的第三个读者）。
+      const live = w.status === "running" && w.started_at && !w.usage_segment_booked
         ? Math.max(0, Math.floor((Date.now() - new Date(w.started_at).getTime()) / 1000))
         : 0;
       return `
@@ -697,7 +699,7 @@ async function loadUsageWorkspaces() {
       <tbody>${workspaces.map((w) => {
         const tpl = templateById(w.template_id);
         const rate = tpl ? tpl.estimated_hourly_cost_cny : 0;
-        const live = w.status === "running" && w.started_at
+        const live = w.status === "running" && w.started_at && !w.usage_segment_booked
           ? Math.max(0, Math.floor((Date.now() - new Date(w.started_at).getTime()) / 1000))
           : 0;
         const seconds = (w.accumulated_seconds || 0) + live;
