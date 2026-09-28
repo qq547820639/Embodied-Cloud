@@ -5,6 +5,7 @@
 """
 
 import uuid
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException, Request
 from sqlalchemy import select
@@ -53,6 +54,36 @@ class EdgeService:
         db.commit()
         db.refresh(agent)
         return agent
+
+    def expire_stale_agents(
+        self, db: Session, *, offline_after_seconds: int, now: datetime | None = None
+    ) -> int:
+        """把超过 `offline_after_seconds` 没心跳的 `online` 设备改成 `offline`，返回改动条数。
+
+        `online` 是一条**存在性主张**，只能由"最近收到过心跳"这一事实背书。此前全仓没有任何
+        一处写 `OFFLINE`（`AgentStatus.OFFLINE` 零写入者、`last_heartbeat` 零读者），所以断掉的
+        设备永远显示在线：运维看到的是一台可以派活的机器人，而控制面已经再没听到过它的声音。
+
+        只碰 ONLINE：`REGISTERED`（从没通过话）不许被改写成"曾经在线后掉线"，已经 `OFFLINE`
+        的也不必重复写。比较用 `last_heartbeat <` ——`last_heartbeat IS NULL` 的行（从没心跳）
+        在这条 WHERE 下自然不被选中，不需要额外的判空。
+        这里**不**顺手 gate 派工：本设计是设备侧拉取（`GET /deployments/assigned`），把任务派给
+        一台暂时离线的设备是正常用法（它上线后自己取），所以状态列只负责说真话。
+        """
+        threshold = (now or utcnow()) - timedelta(seconds=offline_after_seconds)
+        stale = list(
+            db.scalars(
+                select(EdgeAgent).where(
+                    EdgeAgent.status == AgentStatus.ONLINE.value,
+                    EdgeAgent.last_heartbeat < threshold,
+                )
+            )
+        )
+        for agent in stale:
+            agent.status = AgentStatus.OFFLINE.value
+        if stale:
+            db.commit()
+        return len(stale)
 
     def report_telemetry(
         self, db: Session, agent: EdgeAgent, kind: str, payload: dict | None = None

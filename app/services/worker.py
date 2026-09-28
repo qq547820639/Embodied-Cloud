@@ -85,6 +85,9 @@ class OperationWorker:
     PERIODIC_WARM_POOL_EVERY = 30
     # §18：pending hold 回收扫描（比 lease 慢得多即可，泄漏窗口由 expires_at 界定）
     PERIODIC_HOLD_SWEEP_EVERY = 60
+    # §25/N-108：设备 `online` 的时效判定。阈值住在配置里（`edge_agent_offline_after_seconds`），
+    # 这一档只决定"多久看一次"；30 tick ≈ 30 s，相对 90 s 的判死窗口足够细。
+    PERIODIC_EDGE_SWEEP_EVERY = 30
     # §12/N-98：被释放准入拒下的格要有周期驱动者。跑在 worker 线程里，所以是**定向档**
     # （只看队列没在做、且比阈值老的格，一趟最多 `RECONCILE_CELLS_PER_PASS` 格）：
     # 每格一次 provider 往返（本机实测 docker inspect 中位 93.6 ms／p95 217 ms），

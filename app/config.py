@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     # （泄漏方向是"少报可用额"，不会多扣钱）
     billing_hold_ttl_minutes: int = 60
 
+    # --- edge agent（§25）---
+    # `online` 必须由最近一次心跳背书：超过这个秒数没心跳就是 `offline`。
+    # 阈值方向有成熟先例：AWS IoT 对 MQTT 连接的判据是「IoT core will wait 1.5x of the
+    # configured keep-alive time before the client is determined to be disconnected」
+    # （device-connectivity-status 页，本机打开读过）——判死必须大于 1× 客户端周期以留去抖。
+    # 这里取 18×：设备端每 5 s 一轮（`edge_agent/agent.py:93` 与 `__main__.py:49` 的默认值），
+    # 而我们这条通路是 HTTP 轮询、没有连接级存活信号可感知，单次请求卡住就可能吃掉一整轮。
+    edge_agent_offline_after_seconds: int = 90
+
     # --- auth ---
     session_ttl_hours: int = 168  # 7 天
     # 密码 pepper：生产（provider != mock）**必须**显式配置，否则 fail-closed 拒绝启动

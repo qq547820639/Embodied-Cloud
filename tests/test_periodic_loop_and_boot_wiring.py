@@ -260,10 +260,12 @@ def test_start_is_idempotent_and_a_second_start_does_not_double_the_loop() -> No
 # ---------------------------------------------------------------------------
 
 
-def test_all_four_background_tasks_are_registered_with_their_constants() -> None:
-    """C1 配额监控／warm pool maintain／hold 回收／reconcile 驱动者：四条都要在周期表上，间隔取自常量。
+def test_all_five_background_tasks_are_registered_with_their_constants() -> None:
+    """C1 配额监控／warm pool maintain／hold 回收／reconcile 驱动者／edge 时效判定：五条都要在周期表上。
 
     间隔写成字面量的话常量就成了没人读的装饰（N-99 的 A 组同一条理由），所以这里同时钉"是谁"与"多久"。
+    N-108 加第五条时把这条从 four 改名为 five 并加了一行——注册表成员是**精确等值**断言，
+    新增周期任务必然要同时改这条判据（登记为有意的行为变化，不是放宽断言）。
     """
     from app import deps
 
@@ -274,6 +276,7 @@ def test_all_four_background_tasks_are_registered_with_their_constants() -> None
         ("warm pool maintain", deps._warm_pool_maintain, OperationWorker.PERIODIC_WARM_POOL_EVERY),
         ("pending hold 回收", deps.orchestrator.release_expired_holds, OperationWorker.PERIODIC_HOLD_SWEEP_EVERY),
         ("reconcile 驱动者", deps._reconcile_stuck_cells, OperationWorker.PERIODIC_RECONCILE_EVERY),
+        ("edge 时效判定", deps._expire_stale_edge_agents, OperationWorker.PERIODIC_EDGE_SWEEP_EVERY),
     ]
     for label, callable_, cadence in expected:
         matched = [(n, c) for n, c in entries if c == callable_]

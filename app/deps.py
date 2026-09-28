@@ -93,6 +93,18 @@ def _reconcile_stuck_cells() -> dict[str, int]:
     )
 
 
+def _expire_stale_edge_agents() -> int:
+    """§25/N-108：`online` 只能由最近一次心跳背书，超时就在权威表里改成 `offline`。
+
+    阈值只有一个来源（`settings.edge_agent_offline_after_seconds`）：这里传进去，
+    服务本体不留第二份默认值——写两遍就会在某一轮改动里互相过期。
+    """
+    with SessionFactory() as db:
+        return edge_service.expire_stale_agents(
+            db, offline_after_seconds=settings.edge_agent_offline_after_seconds
+        )
+
+
 provider = make_provider()
 orchestrator = WorkspaceOrchestrator(
     SessionFactory,
@@ -116,6 +128,8 @@ worker = OperationWorker(
         (OperationWorker.PERIODIC_HOLD_SWEEP_EVERY, orchestrator.release_expired_holds),
         # §12/N-98：被拒的老格由周期驱动者重新拿回来（定向档，见 `_reconcile_stuck_cells`）
         (OperationWorker.PERIODIC_RECONCILE_EVERY, _reconcile_stuck_cells),
+        # §25/N-108：设备 `online` 的时效判定（没有心跳就不是在线）
+        (OperationWorker.PERIODIC_EDGE_SWEEP_EVERY, _expire_stale_edge_agents),
     ],
 )
 # §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用。
