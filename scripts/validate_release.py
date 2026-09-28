@@ -757,14 +757,77 @@ def _repo_file_index() -> frozenset[str]:
     return frozenset(files)
 
 
+DOC_POINTER_ANY_RE = re.compile(
+    r"(?<![\w/.~-])([A-Za-z_][\w./-]*\.(?:py|md|sh|sql|toml|json|ya?ml|ts)):(\d{1,4})(?:-\d{1,4})?"
+)
+EXTERNAL_SHAPE_RE = re.compile(r"\.\.\.|moby|github\.com|nvcr\.io|site-packages|/containers/")
+
+
+def unqualified_pointer_readings(
+    texts: dict[str, str],
+    index: frozenset[str],
+    roots: tuple[str, ...],
+) -> tuple[list[str], dict[str, int]]:
+    """第四类指针：少写仓内前缀的缩写路径。今天它们**没有任何存在性读者**。
+
+    判据把三种形状分开，绝不把"看不见"折成"合规"：
+    - qualified —— 以既有仓内根目录开头，或在仓内索引里原样存在 ⇒ 由 `doc_reference_offenders` 那
+      三类指针判据负责，这里只计数；
+    - unqualified —— 全仓 basename **唯一**命中 ⇒ 违规（应写全路径）。N-121 把存量 102 处
+      改成全路径之后，这一桶的基线是 0，所以它是棘轮：新加一条缩写指针就红；
+    - ambiguous —— basename 有 ≥2 候选 ⇒ 违规，理由里列出候选（按名字猜会指到别的文件去）；
+    - external —— 形状像外部引用（含 `...`、`moby`、`github.com`、`nvcr.io`、`site-packages`，
+      或该 basename 全仓根本没有）⇒ 不判违规也不判通过，单独计数进读数。
+
+    纯函数：语料与索引都由调用方给，测试可以直接喂合成文本证极性，不必改仓。
+    """
+    by_name: dict[str, list[str]] = {}
+    for rel in sorted(index):
+        by_name.setdefault(rel.rsplit("/", 1)[-1], []).append(rel)
+    offenders: list[str] = []
+    counts = {"qualified": 0, "unqualified": 0, "ambiguous": 0, "external": 0}
+    for doc, text in sorted(texts.items()):
+        for match in DOC_POINTER_ANY_RE.finditer(text):
+            path, line = match.group(1), match.group(2)
+            if path.split("/")[0] in roots or path in index:
+                counts["qualified"] += 1
+                continue
+            cands = by_name.get(path.rsplit("/", 1)[-1])
+            if cands is None or EXTERNAL_SHAPE_RE.search(path):
+                counts["external"] += 1
+                continue
+            if len(cands) > 1:
+                counts["ambiguous"] += 1
+                head = ", ".join(sorted(cands)[:3])
+                offenders.append(f"{doc}: 缩写指针 {path}:{line} 有 {len(cands)} 个候选（{head}），必须写全路径")
+                continue
+            counts["unqualified"] += 1
+            offenders.append(f"{doc}: 指针 {path}:{line} 少写仓内前缀，应写成 {cands[0]}:{line}")
+    return offenders, counts
+
+
 def dangling_doc_reference_offenders() -> list[str]:
-    return doc_reference_offenders(
-        _doc_pointer_texts(),
+    texts, roots, index = _doc_pointer_texts(), _doc_roots(), _repo_file_index()
+    offenders = doc_reference_offenders(
+        texts,
         _doc_line_counts(),
         _doc_section_index(),
-        roots=_doc_roots(),
-        repo_files=_repo_file_index(),
+        roots=roots,
+        repo_files=index,
     )
+    extra, _ = unqualified_pointer_readings(texts, index, roots)
+    return offenders + extra
+
+
+def doc_pointer_spelling_readings() -> dict[str, int]:
+    """四桶读数（qualified / unqualified / ambiguous / external），给门禁的 note 用。
+
+    棘轮的正当性就在这组数上：`unqualified` 今天必须是 0，因为 N-121 把存量 102 处
+    全改成了仓内全路径；`external` 那一桶不为 0 也不判违规——它单独报出来，
+    免得"豁免面"变成"看不见的那一面"。
+    """
+    _, counts = unqualified_pointer_readings(_doc_pointer_texts(), _repo_file_index(), _doc_roots())
+    return counts
 
 
 def doc_reference_stats() -> dict[str, int]:
@@ -941,7 +1004,12 @@ def main() -> int:
     }
     # 文档指针（`文件:行号`、`宿主.md §节`）要落得到实物：文件在、行没越界、章节还在。
     doc_ref_offenders = dangling_doc_reference_offenders()
-    doc_ref_note = "文档里的行号指针与章节锚点都落在实物上（自由路径的存在性留给一次性普查，见函数注释）"
+    spelling = doc_pointer_spelling_readings()
+    doc_ref_note = (
+        "文档里的行号指针与章节锚点都落在实物上；指针写法四桶 "
+        f"已限定 {spelling['qualified']}／缩写 {spelling['unqualified']}／歧义 {spelling['ambiguous']}"
+        f"／外部 {spelling['external']}（外部那几处按形状豁免，不当违规也不当通过）"
+    )
     checks["doc_references"] = {
         "status": "FAIL" if doc_ref_offenders else "PASS",
         "note": "; ".join(doc_ref_offenders) if doc_ref_offenders else doc_ref_note,

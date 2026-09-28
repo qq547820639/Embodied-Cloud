@@ -373,6 +373,84 @@ def test_scratch_directories_are_not_documentation_roots() -> None:
             scratch.rmdir()
 
 
+def test_pointer_spellings_are_fully_qualified_today() -> None:
+    """账面里的路径指针必须写成仓内全路径（N-121 的棘轮，今日基线 0）。
+
+    改前读数（一手）：`CHANGELOG.md`／`docs/CURRENT_STATE.md`／`docs/ARCHITECTURE.md`／
+    `docs/ACCEPTANCE_GATES.md`／`docs/SECURITY.md`／两份 review 里共 **114 处**缩写指针
+    （`scheduler.py:257-267`、`providers/k8s.py:328-329`、`billing.py:191-198` 这一类），
+    而 `doc_references` 的划界只认「以仓内根目录开头」⇒ 这 114 处**没有任何存在性读者**。
+    分两步改完：第一轮按反引号形状改 102 处，第二轮调**判据自己的读数**改剩下 12 处
+    （那 12 处是不带反引号写的，第一轮的正则看不见——两轮读数都以 `doc_pointer_spelling_readings()`
+    为准，不以我自己再数一遍为准）。
+    """
+    validator = _load_validator()
+    readings = validator.doc_pointer_spelling_readings()
+    assert readings["unqualified"] == 0, readings
+    assert readings["ambiguous"] == 0, readings
+    # 非恒真：语料确实很大，把判据收空也会红（这条下界与 :763 那支同源）
+    assert readings["qualified"] >= 150, readings
+    # 外部写法单独计数，不当违规也不当通过
+    assert readings["external"] >= 1, readings
+    assert validator.dangling_doc_reference_offenders() == [], validator.dangling_doc_reference_offenders()
+
+
+def test_the_spelling_clause_fires_on_each_pointer_shape() -> None:
+    """四极对照（合成语料＋合成索引，不碰仓）：缩写／歧义／外部／已限定各判各的。
+
+    这一支是上一条的牙齿：没有它，`unqualified == 0` 可能只是因为分母空或形状判据写歪。
+    """
+    validator = _load_validator()
+    index = frozenset({
+        "app/services/orchestrator.py",
+        "app/routers/usage.py",
+        "app/gate.py",
+        "scripts/gate.py",
+        "docs/CURRENT_STATE.md",
+    })
+    roots = ("app", "docs", "scripts")
+
+    shortened, counts = validator.unqualified_pointer_readings(
+        {"CHANGELOG.md": "结算逻辑见 `orchestrator.py:597`。"}, index, roots)
+    assert counts == {"qualified": 0, "unqualified": 1, "ambiguous": 0, "external": 0}, counts
+    assert len(shortened) == 1 and "app/services/orchestrator.py:597" in shortened[0], shortened
+
+    ambiguous, counts = validator.unqualified_pointer_readings(
+        {"CHANGELOG.md": "门禁装配见 gate.py:9。"}, index, roots)
+    assert counts["ambiguous"] == 1 and counts["unqualified"] == 0, counts
+    assert len(ambiguous) == 1 and "候选" in ambiguous[0], ambiguous
+
+    qualified, counts = validator.unqualified_pointer_readings(
+        {"CHANGELOG.md": "见 `app/services/orchestrator.py:597` 与 docs/CURRENT_STATE.md:9。"}, index, roots)
+    assert qualified == [] and counts["qualified"] == 2, (qualified, counts)
+
+    external, counts = validator.unqualified_pointer_readings(
+        {"CHANGELOG.md": "moby `api/swagger.yaml:8984-8995` 与 `venv/.../kube_config.py:450`。"}, index, roots)
+    assert external == [] and counts["external"] == 2, (external, counts)
+
+    # 边界自证：把缩写写进一个更长行号旁边，不得被当成同一处
+    both, counts = validator.unqualified_pointer_readings(
+        {"CHANGELOG.md": "`app/routers/usage.py:36` 与 usage.py:365 两种写法。"}, index, roots)
+    assert counts["qualified"] == 1 and counts["unqualified"] == 1, counts
+    assert len(both) == 1 and "usage.py:365" in both[0], both
+
+
+def test_the_gate_forwards_the_spelling_clause(monkeypatch) -> None:
+    """接线判据：门禁本体必须真的把新判据的读数并进 offenders（电池 C1 逼出来的）。
+
+    实测形状：把 `dangling_doc_reference_offenders()` 里那句 `extra` 摘掉之后，上面两支判据
+    照绿（它们各自直接调读数函数），也就是说**报告面不再核这条**而测试面全绿——
+    判据退化成死码。这一支换的是语料提供者（不换被测函数），让门禁在合成语料上走一遍真接线。
+    """
+    validator = _load_validator()
+    monkeypatch.setattr(
+        validator, "_doc_pointer_texts", lambda: {"CHANGELOG.md": "结算逻辑见 orchestrator.py:597。"}
+    )
+    offenders = validator.dangling_doc_reference_offenders()
+    assert any("少写仓内前缀" in o for o in offenders), offenders
+    assert any("app/services/orchestrator.py:597" in o for o in offenders), offenders
+
+
 def test_committed_docs_json_is_written_from_the_reproducible_view() -> None:
     """接线判据：提交面确实经过投影，运行面确实另写一份。
 

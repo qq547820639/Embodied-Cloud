@@ -434,7 +434,7 @@ sequenceDiagram
 #### P0-2 Docker provider 清理静默失败 → 孤儿容器 + GPU 复用
 
 - **位置**：`app/services/providers/docker.py:203-216`（`stop`/`start`/`destroy` 均 `check=False` 且不校验 returncode）
-- **问题**：`docker rm -f` 真失败（daemon 不可用等）仍标记 DELETED 并释放 GPU。孤儿容器仍持有 `--gpus device=N`，该卡被分配给新 workspace → 一卡双跑。K8s provider 已正确区分 404 与其它错误（`k8s.py:313-336`），Docker 未做到。
+- **问题**：`docker rm -f` 真失败（daemon 不可用等）仍标记 DELETED 并释放 GPU。孤儿容器仍持有 `--gpus device=N`，该卡被分配给新 workspace → 一卡双跑。K8s provider 已正确区分 404 与其它错误（`app/services/providers/k8s.py:313-336`），Docker 未做到。
 - **影响**：资源泄漏 + 双分配；「容器不存在」与「删除失败」混淆为成功。
 - **修复**：失败且非「No such container」时上抛，阻断 GPU 释放与 DELETED 置位，交由 reconcile 重试；补失败注入测试。
 
@@ -442,21 +442,21 @@ sequenceDiagram
 
 | # | 问题 | 位置 | 修复方向 |
 |---|---|---|---|
-| P1-1 | destroy 吞掉结算异常仍置 DELETED → 静默丢账 | `orchestrator.py:339-347` | 结算失败记录 error 标记 + 告警，可审计（（N-105 更正：补偿从未在场，且不许按 `utcnow()-started_at` 补；判决改为「不入账」，判据见 `tests/test_streaming_lifecycle.py`） |
-| P1-2 | deployments 路由自建第二套 Settings/engine/DI | `routers/deployments.py:20-31` | 修复 deps mypy 后回归组合根注入 |
-| P1-3 | `monitor_runtime_quotas` 硬编码 policy 且只算个人余额 | `orchestrator.py:498-516` | 复用 `self.billing`，口径统一「个人+组织」 |
-| P1-4 | warmpool 预热同步阻塞单 worker 循环 | `warmpool.py:57-93`（`:82`） | 预热改走 operation 体系或独立限流线程池 |
-| P1-5 | warmpool legacy 计数把普通 QUEUED workspace 误计入池 | `warmpool.py:321-335` | legacy 判定加 `user_id IS NULL` 归属条件 |
-| P1-6 | GPU 显存单位换算错误：24GB 卡无法满足 24GB 模板 | `scheduler.py:102` | 统一 GB/MiB 单位，补边界测试（24564 MiB 应满足 24GB） |
-| P1-7 | `_fail` 中 release 异常触发 rollback 回退 FAILED 状态 | `orchestrator.py:250-260` | release 独立 try/except，失败记录而非回滚整个会话 |
+| P1-1 | destroy 吞掉结算异常仍置 DELETED → 静默丢账 | `app/services/orchestrator.py:339-347` | 结算失败记录 error 标记 + 告警，可审计（（N-105 更正：补偿从未在场，且不许按 `utcnow()-started_at` 补；判决改为「不入账」，判据见 `tests/test_streaming_lifecycle.py`） |
+| P1-2 | deployments 路由自建第二套 Settings/engine/DI | `app/routers/deployments.py:20-31` | 修复 deps mypy 后回归组合根注入 |
+| P1-3 | `monitor_runtime_quotas` 硬编码 policy 且只算个人余额 | `app/services/orchestrator.py:498-516` | 复用 `self.billing`，口径统一「个人+组织」 |
+| P1-4 | warmpool 预热同步阻塞单 worker 循环 | `app/services/warmpool.py:57-93`（`:82`） | 预热改走 operation 体系或独立限流线程池 |
+| P1-5 | warmpool legacy 计数把普通 QUEUED workspace 误计入池 | `app/services/warmpool.py:321-335` | legacy 判定加 `user_id IS NULL` 归属条件 |
+| P1-6 | GPU 显存单位换算错误：24GB 卡无法满足 24GB 模板 | `app/services/scheduler.py:102` | 统一 GB/MiB 单位，补边界测试（24564 MiB 应满足 24GB） |
+| P1-7 | `_fail` 中 release 异常触发 rollback 回退 FAILED 状态 | `app/services/orchestrator.py:250-260` | release 独立 try/except，失败记录而非回滚整个会话 |
 | P1-8 | 生产清单 `AUTO_CREATE_TABLES=true` + `emptyDir`，Pod 重启丢数据 | `deploy/kubernetes/control-plane.yaml:23-45` | 提供 PostgreSQL + PersistentVolume + migrate-up 生产模板 |
-| P1-9 | Edge checksum 上报端点用 `CurrentUser`（用户会话）认证，与「edge 上报」协议不符 | `routers/deployments.py:120-130` | 提供 `X-Agent-Token` 认证路径，或明确由 edge 侧持用户会话上报的契约 |
-| P1-10 | `admin_adjustment` 把调整记到 admin 自己账户，无法调整他人余额 | `routers/usage.py:80-91` | 增加 target_user_id 参数 + owner 语义 |
-| P1-11 | `create_artifact` 直读控制面本地 `workspace_root/{id}`，K8s 模式读不到 Pod PVC | `deployment.py:82-91` | 改 edge/workspace 侧上传或 provider `pull_artifact` 契约 |
+| P1-9 | Edge checksum 上报端点用 `CurrentUser`（用户会话）认证，与「edge 上报」协议不符 | `app/routers/deployments.py:120-130` | 提供 `X-Agent-Token` 认证路径，或明确由 edge 侧持用户会话上报的契约 |
+| P1-10 | `admin_adjustment` 把调整记到 admin 自己账户，无法调整他人余额 | `app/routers/usage.py:80-91` | 增加 target_user_id 参数 + owner 语义 |
+| P1-11 | `create_artifact` 直读控制面本地 `workspace_root/{id}`，K8s 模式读不到 Pod PVC | `app/services/deployment.py:82-91` | 改 edge/workspace 侧上传或 provider `pull_artifact` 契约 |
 
 ### 11.3 P2 · 建议（18 项，摘要）
 
-- **重复/死代码**：`utcnow()` 在 9 个模块重复定义；`recover_stuck_workspaces`（`scheduler.py:185-194`）从未被调用；`_finalize_stop` 与 `_settle_running_segment` 结算逻辑重复；ledger `rate` 变量只进描述不参与计费。
+- **重复/死代码**：`utcnow()` 在 9 个模块重复定义；`recover_stuck_workspaces`（`app/services/scheduler.py:185-194`）从未被调用；`_finalize_stop` 与 `_settle_running_segment` 结算逻辑重复；ledger `rate` 变量只进描述不参与计费。
 - **一致性**：streaming 路由重复装配 `StreamingSessionService`/`WarmPoolManager` 实例；`Workspace.password` 列 `String(128)` 对 Fernet 密文余量极紧；生产启动未校验 `password_pepper`/`auto_create_tables`；`demo-workspace` 端点无鉴权；端口分配 TOCTOU；k8s 凭据轮换不等待滚动重启完成；course 配额门禁在 provision 重试路径可被绕过；`upsert_submission` 不校验 workspace 归属；日志脱敏只覆盖 extra 不覆盖 message。
 - **健壮性**：`course_completions` 三循环 N+1；`create_course`/`deploy` 先查再插无唯一约束兜底；`S3.exists` 吞掉鉴权/网络异常返回 False；`reconcile_all` O(N) 全表子进程调用。
 - **测试缺口**：无 P0-1/P0-2/P1-1/P1-6/P1-9/P1-10 回归保护；无 `cli.py`、`RedactingFormatter` 脱敏、独立安全专项测试。
