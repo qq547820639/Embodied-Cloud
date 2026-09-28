@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import ColumnElement
 
 from ..models import Gpu, GpuAllocation, GpuHost, GpuStatus, Workspace, WorkspaceStatus
 from ..utils import utcnow
@@ -61,6 +62,25 @@ def candidate_order() -> list:
     量出这个选择到底值多少张卡。埋在语句里的策略没人知道它比替代品好在哪。
     """
     return [Gpu.memory_total.asc()]
+
+
+def host_is_visible() -> ColumnElement[bool]:
+    """这张卡所在的节点，今天还看得见吗（N-112，闭 N-111）。
+
+    复用 N-110 那条证据，不新写第二份：`gpu_hosts.status` 由最近一次同步背书，
+    所以"看不见节点"与"不该往那儿派卡"本来就是同一件事的两半。
+
+    刻意**不改** `gpus.status`：
+    - 管理员手工 `/drain`、`/unhealthy` 写下的判决有它们自己的语义与生命周期，
+      一个周期任务顺手把它们抬回 AVAILABLE 是不可接受的（重报每 2 min 一次）；
+    - 而"节点暂时失联"必须能随一次成功重报自动恢复。读证据列同时满足两边：
+      节点回到 online 的下一趟分配就看得到那张卡，全程没有人改写过卡的状态。
+    """
+    return (
+        select(GpuHost.id)
+        .where(GpuHost.id == Gpu.host_id, GpuHost.status == HOST_ONLINE)
+        .exists()
+    )
 
 
 def _is_unique_contention(exc: IntegrityError) -> bool:
@@ -164,6 +184,11 @@ class GpuScheduler:
         误判成「无卡可用」——这个缺陷只在真行锁的 PostgreSQL 上看得见（SQLite 下
         FOR UPDATE 是 no-op），由 tests/test_postgres_concurrency.py 钉住。
         因此「本轮没锁到」不等于「没卡」：仍有 AVAILABLE 行时短暂退避后重试。
+
+        候选与"还在等锁的那把尺"必须吃同一个可见性谓词（`host_is_visible()`，N-112）：
+        只筛候选不筛计数的话，一张"节点已失联"的卡会被 `still_waiting` 数进去，
+        于是分配失败被报成「N 张卡正被别人锁着」——那是把容量结论说成了等待，
+        运维会去等锁，而该做的是去看节点。
         """
         # 统一单位：模板需求 GB → MiB（1 GiB = 1024 MiB），再扣掉厂商预留容差
         required_mib = gpu_requirement_gb * 1024 - VRAM_TOLERANCE_MIB
@@ -174,9 +199,20 @@ class GpuScheduler:
                 .where(
                     Gpu.status == GpuStatus.AVAILABLE.value,
                     Gpu.memory_total >= required_mib,
+                    host_is_visible(),
                 )
                 .order_by(*candidate_order())
-                .with_for_update(skip_locked=True)
+                # `of=[Gpu]`：可见性判断不许把节点那一行也锁上。为什么留着它——本轮在真
+                # PostgreSQL 上量过三档（证人在 tests/test_postgres_concurrency.py::
+                # test_allocate_leaves_the_host_row_lock_free）：
+                # ① EXISTS ＋ OF：主机行仍能被别的会话锁走（正常）；
+                # ② EXISTS 摘掉 OF：也锁不到——PG 不会为一个 WHERE 子查询里的表加行锁；
+                # ③ 把这条 EXISTS 改写成 `.join(GpuHost, ...)` 且没有 OF：主机行**会被锁**，
+                #    于是同一台机器上的多张卡每次分配都在同一行上排队。
+                # 留着 OF 就是为了 ③：「顺手把这个 EXISTS 改成 join」是一次正常重构。
+                # 出处（本轮打开 sql-select 页读过）："A locking clause without a table
+                # list affects all tables used in the statement."
+                .with_for_update(skip_locked=True, of=[Gpu])
                 .limit(1)
             )
             if gpu is not None:
@@ -205,11 +241,15 @@ class GpuScheduler:
                         ) from exc
                     continue
                 return gpu
-            # 没锁到候选：区分「真没卡」与「卡正被别人锁着」
+            # 没锁到候选：区分「真没卡」与「卡正被别人锁着」——两把尺同一个谓词
             still_waiting = db.scalar(
                 select(func.count())
                 .select_from(Gpu)
-                .where(Gpu.status == GpuStatus.AVAILABLE.value, Gpu.memory_total >= required_mib)
+                .where(
+                    Gpu.status == GpuStatus.AVAILABLE.value,
+                    Gpu.memory_total >= required_mib,
+                    host_is_visible(),
+                )
             )
             if not still_waiting:
                 break

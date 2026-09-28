@@ -601,6 +601,63 @@ def test_allocate_locks_exactly_one_candidate_row(pg_factory):
     assert gpu.status == GpuStatus.ALLOCATED.value
 
 
+def test_allocate_leaves_the_host_row_lock_free(pg_factory):
+    """可见性判断引了 `gpu_hosts`，但那台主机的行不许被分配的读法锁住（N-112）。
+
+    与上一支同一手法，探针对象换成主机的行：allocate 的候选语句现在带一个
+    `EXISTS (SELECT 1 FROM gpu_hosts WHERE ...)`，而 PostgreSQL 的规矩是
+    "A locking clause without a table list affects all tables used in the statement"
+    （本轮打开 sql-select 页读过；同页另一句 "If specific tables are named ... only rows
+    coming from those tables are locked" 就是 `of=[Gpu]` 存在的理由）。
+    少了 OF，同机多卡的每次分配都要在同一行上排队——一个并不需要的串行化点。
+
+    **三档实测读数（本轮，别把这一支读成"现在就挡着谁"）**：
+    ① 现状（EXISTS ＋ `of=[Gpu]`）：22/22 绿，探针读得到主机行；
+    ② 只摘掉 `of=[Gpu]`、谓词仍是 EXISTS：22/22 绿——PG 不为 WHERE 子查询里的表加行锁，
+       所以这一支在当下**打不到任何东西**；
+    ③ 把谓词改写成 `.join(GpuHost, ...)` 且摘掉 OF：**只有这一支红**（1/22）。
+    也就是说它是 ③ 的证人：「把这个 EXISTS 顺手改成 join」是一次正常重构，而那次重构
+    一旦少了 OF 就会被这里拦住。②这条读数如实写在这里，免得下一轮有人把它当成已有牙。
+    """
+    import sqlalchemy.event as sa_event
+
+    seed_gpus(pg_factory, 2)
+    ordered = ordered_gpu_ids(pg_factory)
+    host_id = host_of(pg_factory, ordered[0])
+    target = pg_factory()
+    spy = pg_factory()
+    probe: list[bool] = []
+
+    def host_is_lockable_now() -> bool:
+        row = spy.scalar(
+            sa.text("SELECT id FROM gpu_hosts WHERE id = :h FOR UPDATE SKIP LOCKED"),
+            {"h": host_id},
+        )
+        spy.rollback()
+        return row is not None
+
+    def hook(conn, cursor, statement, parameters, context, executemany):
+        upper = statement.upper().lstrip()
+        if upper.startswith("SELECT GPUS.") and "FOR UPDATE" in upper:
+            probe.append(host_is_lockable_now())
+
+    sa_event.listen(target.get_bind(), "after_cursor_execute", hook)
+    try:
+        ensure_workspace(pg_factory, "ws-host-lock-free")
+        gpu = GpuScheduler(pg_factory).allocate(target, "ws-host-lock-free", gpu_requirement_gb=0)
+        target.commit()
+    finally:
+        sa_event.remove(target.get_bind(), "after_cursor_execute", hook)
+        target.close()
+        spy.close()
+
+    assert probe, "没有捕获到 allocate 的候选语句（判据未落到被测路径上）"
+    assert probe[0] is True, (
+        "allocate 把节点那一行也锁住了：每次分配都要在 gpu_hosts 上排队（缺 of=[Gpu]）"
+    )
+    assert gpu.status == GpuStatus.ALLOCATED.value
+
+
 # ---------------------------------------------------------------------------
 # 4. worker lease：CAS 在真锁下只有一个赢家
 # ---------------------------------------------------------------------------

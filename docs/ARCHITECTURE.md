@@ -84,6 +84,13 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
 - 分配顺序：AVAILABLE（显存满足模板需求，含 16MiB 厂商预留容差）→ ALLOCATED；
   释放：stop/destroy → AVAILABLE。
 - UNHEALTHY 不参与调度；DRAINING 不再分配新 workspace。
+- **分配还要求"这张卡所在的节点今天看得见"**（N-112，闭 N-111）：候选语句带一个
+  `EXISTS (gpu_hosts WHERE id = gpus.host_id AND status = 'online')`，"还在等锁的那把尺"
+  （`still_waiting`）吃同一个谓词——两者不一致时，一张失联节点上的卡会被数进"正被别人
+  锁着"，容量结论就被说成了等待。这一层刻意**不写** `gpus.status`：管理员手工
+  `/drain`、`/unhealthy` 的判决有自己的生命周期（inventory 每 2 min 重报一次，
+  "重新出现即回池"会让手工 drain 活不过两分钟），而"节点暂时失联"必须可逆——
+  节点回到 online 的下一趟分配自然看得到那张卡，全程没人改写过卡的状态。
 - **inventory 是周期重报的，不是开机一次的**（N-110）：worker 周期表每 120 tick 重跑
   同一个 `bootstrap_gpu_inventory`，于是"节点少报一张卡 → 那张卡 DRAINING"这段收敛在
   进程存活期内就有驱动者；`sync_host` 每次成功都给 `gpu_hosts.last_synced_at` 盖章，
