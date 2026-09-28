@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 955 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 962 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **15 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -127,6 +127,7 @@
 | N-109 | **设备端两处「没报错即成功」**：发现端点回来一个不是 JSON 数组的 200 被折成 `[]`（与“今天没活”同形，设备一路退 0 而运维看它在线空闲）；遥测上报失败被 `run_once` 折成 `("error", before, before)`，一次已发生的物理运行被读成没发生。改法：形状不符即抛；那一格保持 `ran`＋`verified` 并带 `reported=false`＋stderr，退出码跟着抬。 | 判据 `tests/test_edge_agent_client.py`＋`tests/test_edge_agent_unreported_run.py` 共 15 支；九臂：M1 6 红、M3 2 红、M8 2 红（空闲档反证），其余各 1 红。未证实：真设备断网下的上报失败（本机只有 mock 驱动）。 |
 | N-110 | **节点的 `online` 是一次开机快照**：`gpu_hosts.status` 默认 online 且唯一写入点只被开机那一脚调用；“未再上报的 GPU → DRAINING”在运行期没有驱动者。改法：证据列 `last_synced_at`（alembic 第 15 节，可空，每次同步盖章）＋`expire_stale_hosts` 只按证据改判（NULL 不动）＋周期表新增“重报 inventory”与“判 host 时效”两档（阈值 `gpu_host_offline_after_seconds=600`＝5 个刷新窗口）。 | 判据 `tests/test_gpu_host_liveness.py` 14 支；十一臂：A2 判反 5 红、A5 不提交 4 红、A7 摘注册 2 红。两支臂首版存活并按观测补判据（A8 数值相等看不出常量成装饰 ⇒ 加源码面尺子；A10 那张卡没缺席 ⇒ 改成缺席且 UNHEALTHY）。连带：`GpuHostOut` 吐证据列、周期表成员判据补“同集合”那根、openapi 工件时效判据。 |
 | N-112 | **失联节点上的卡仍会被分配**（闭 N-111）：N-110 让 host 的 online 说了真话却没改行为。改法：候选与“还在等锁的那把尺”一起吃同一条 `EXISTS(gpu_hosts.status='online')`；刻意不写 `gpus.status`——管理员的 DRAINING/UNHEALTHY 有各自的生命周期，而“节点暂时失联”必须可逆。 | 判据 `tests/test_gpu_allocation_visibility.py` 6 支；四臂 A1 4 红／A2 2 红／A3 5 红／A4 3 红（A4 的 expect 被读数改过一次：release 那一支跑到最后两台节点都 offline，无关联 EXISTS 与有关联同判）。`of=[Gpu]` 由真 PG 三档实测撑住：EXISTS 摘 OF 不红，改写成 JOIN 且摘 OF 只有新增那支红。残留另登记 N-114。 |
+| N-113 | **ADR 承诺的「控制面据 edge-run 收口」没有实现者**：遥测写进表里就没人读，真跑完的部署永远挂在 `running`，唯一出口是用户手工 complete()。改法：在遥测写入的同一请求里由 `complete_from_agent_report` 收口，授权与幂等全在条件 UPDATE 的 WHERE（`id + status=running + edge_agent_id`），payload 点谁的名不重要。 | 判据 `tests/test_edge_run_closes_deployment.py` 7 支＋八臂（N1 3 红／N2 2 红／N3–N8 各 1 红）；跨包线协议名相等由常驻判据钉住；信任边界（`ok`/`detail` 设备自报）写进 ADR 0007。未证实：真机回报；超时那一档登记 N-115。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）

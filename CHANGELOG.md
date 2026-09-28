@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 955 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 962 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898→903→906→918→948→955，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96／G0.97／G0.98／G0.99／G0.100／G0.101／G0.102／G0.103／G0.104。
+- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898→903→906→918→948→955→962，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96／G0.97／G0.98／G0.99／G0.100／G0.101／G0.102／G0.103／G0.104／G0.105。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -1446,6 +1446,15 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - `of=[Gpu]` 从“文档主张”变成“量过的东西”：真 PG 上三档实测（证人 `tests/test_postgres_concurrency.py`）——① EXISTS＋OF：主机行仍可被别的会话锁走；② 只摘 OF、谓词仍是 EXISTS：**也锁不到**，所以新增的那一支在当下打不到任何东西（这句如实写进用例 docstring，免得下一轮把它读成已有牙）；③ 把 EXISTS 改写成 `.join(GpuHost, ...)` 且没有 OF：主机行**会被锁**，22 支 PG 档里只有这一支红。③ 是一次完全正常的重构形状，OF 与这支判据就是为它留的。文档出处：本轮打开 sql-select 页读到的 "A locking clause without a table list affects all tables used in the statement."
 - 未证实：真实故障注入（把一台 docker 宿主从集群里摘掉）没做，本机没有真 GPU 节点；本轮证的是“判决读的是同步证据”与“锁面在哪种写法下会变宽”。
 
+### 设备回报终于有人据此收口：`edge-run` → 部署终态（N-113）
+- 缺陷：ADR 0007 的后果段写着“设备把运行结果作为 `kind=edge-run` 的遥测回传，控制面据此收口”，而 app/ 里没有任何一处读这条遥测——`DeploymentStatus.RUNNING` 的唯一出口是用户手工 `POST /api/deployments/{id}/complete`（`app/routers/deployments.py:129`）。设备能做的四件事（begin → 取件 → 报摘要 → 上机回报）里，最后一报落进 `telemetry_events` 就到此为止：一条真跑完的部署永远挂在 `running`，那句 ADR 对运维是个假承诺。
+- 改法：在遥测写入的同一路径上收口（`DeploymentService.complete_from_agent_report`）。授权与幂等都不写在 Python 里，而是同一条条件 UPDATE 的 WHERE（`id + status=running + edge_agent_id=这台设备`，与本文件既有的 `begin_agent_download` 同一形状）——payload 点谁的名“不重要”：设备收得了的只有自己名下那条正在 running 的部署；终态一旦写下，后到的相反结论改不动它；没 run 过就没有可收口的状态，凭空判成功走不通。遥测事件本身照旧全部留档。
+- 信任边界如实写进 ADR：`ok` 与 `detail` 由设备自报，控制面无从复核机器人是否真动了；设备能做的最坏事情是把**自己名下**那条判成 success/failed，碰不到别人的行，也改不了已成终态。
+- 判据 7 支（`tests/test_edge_run_closes_deployment.py`，全走真 HTTP 端点＋真产物，不手工塞库）＋八臂电池：N1 摘掉收口 ⇒ 3 红；N2 去掉状态守卫 ⇒ 2 红；N3 去掉归属列 ⇒ 1 红；N4 成功档串写 error_message ⇒ 1 红；N5 失败档不留因 ⇒ 1 红；N6 不看 `ok` 一律判成功 ⇒ 1 红；N7 不分 kind 全都收口 ⇒ 1 红；N8 服务端自己把线协议名改掉 ⇒ 1 红（跨包常量两侧各一份、刻意不互相 import，相等关系由 `test_run_kind_wire_name_matches_the_device_spelling` 钉住）。N3 第一版锚点命中 2 次被闸门拦下（`edge_agent_id == agent.id,` 在 `begin_agent_download` 里同形），换成两行锚之后才有牙——那是锚点歧义，不是判据弱。
+- 连带两面文档：ADR 0007 后果段补上实现位点与信任边界；OPERATIONS §8 写明“部署莫名变 success”的第一因是设备报的，去遥测里找那条 `edge-run`；反过来一条停在 `running` 意味着设备还没报或报丢了（N-109 那一档），不是控制面卡住。
+- 一条自伤留痕：本轮代码提交 `3c21389` 的标题行误抄了 N-110 的题句（正文无误）——按 sha 回看的读者以本节为准。
+- 未证实：真机回报（本机只有 mock 驱动）；超时那一档另登记 N-115——事件驱动的收口天生管不到“跑完就被掐、永远没人报”的那条部署。
+
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
@@ -1469,6 +1478,8 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - ~~`N-111`：**一台彻底不再同步的节点，它名下那些仍标 AVAILABLE 的卡没人接走**。`expire_stale_hosts` 只改 host 的结论列，不碰 `gpus.status`（`allocate` 的权威是后者），所以节点整机消失后新工作区仍会被派到一张不存在的卡上。不顺手 drain 的理由是**归位那一半还没定**：`DRAINING`／`UNHEALTHY` 今天没有任何回到 AVAILABLE 的路径（只有 admin 路由 `app/routers/gpus.py` 的两个 POST 会写它们，`sync_host` 对仍在上报清单里的卡只更新 model/memory/index 不改 status，`release` 与 `recover_stuck_gpu_allocations` 只碰带 `workspace_id` 的行），于是“节点暂时看不见”一旦变成 DRAINING 就是一次不可逆的容量注销。要么先给一次成功重报定义归位语义（并回答“管理员手工 drain 的卡该不该被自动抬回来”），要么给缺席降级另设一档比 host 判死更长的阈值。~~ —— **已由 N-112 闭合**：分配候选与等锁计数一起吃 `host_is_visible()` 这条 EXISTS，失联节点上的卡不再被派给新工作区；不改写 `gpus.status`，所以节点回来即恢复可分配，管理员的 DRAINING/UNHEALTHY 也不被周期任务顶掉。判据 6 支＋四臂电池，读数见上面 N-112 一节。
 
 - `N-114`：**两张没被 N-112 关掉的账，都记在“失联节点的卡”名下**。(a) 它虽然不再被分配，但仍以 `AVAILABLE` 出现在 `GET /api/gpus` 与容量报表里——“能派”与“算空闲”从今天起不是同一个问题，而读侧只认后者；(b) `DRAINING`／`UNHEALTHY` 到今天仍然**没有回到 AVAILABLE 的路径**（只有 admin 路由的两个 POST 会写它们，`sync_host` 对仍在上报清单里的卡只更新 model/memory/index，`release`／`recover_stuck_gpu_allocations` 只碰带 `workspace_id` 的行）。(b) 正是 N-112 不敢用状态列实现 (a) 的原因：先定“一次成功重报该不该把管理员手工 drain 的卡抬回来”，再决定容量读数要不要跟着可见性走。
+
+- `N-115`：**跑完却再也报不上来的部署，今天没有人负责**。N-113 的收口是事件驱动的：设备 POST 一条 `edge-run` 才改判。于是三种形状都会一直停在 `running`——设备跑完即被掐（N-109 的 `reported=false` 档）、设备掉了而部署没重下、以及人工在库外把部署推到 running。要么给 `running` 配一个时效判决，要么在写入侧要求设备在 run 前重新登记；两条都要先回答“谁有权把一条运行判成超时失败”。另外 `DeploymentRecord.updated_at` 带 `onupdate`，它是“最后一次被改动”而不是“最后一次被看见”，不能直接当证据列用——这一格与 N-110 的差别正在这里，故登记不收口。
 
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。

@@ -113,6 +113,7 @@
 | G0.102 设备端「没报错」两向都不算背书：发现响应形状与丢失的遥测 | `pytest tests/test_edge_agent_client.py tests/test_edge_agent_unreported_run.py` | 非清单的 200 必须硬失败而 `[]` 仍是合法空闲读数；上报失败那一格必须仍是 `ran`＋`verified`＋`reported=false` 且退出码非零，上报成功侧安静照旧；同一部署下一轮不得补跑 | PASS（常驻） |
 | G0.103 节点在线由最近一次 inventory 同步背书，缺席的卡在运行期就能被看见 | `pytest tests/test_gpu_host_liveness.py` | 同步过期 ⇒ offline 且幂等、改动当场落库；阈值内／`last_synced_at IS NULL` 都不翻；换阈值参数结果跟着动；重同步把证据往前推并判回 online；两档注册的间隔取自常量（裸数字由源码面尺子点名）；少报一张卡当场 DRAINING 而不许改写 UNHEALTHY | PASS（常驻） |
 | G0.104 分配只看得见“节点今天同步过”的卡，且不改写卡的状态 | `pytest tests/test_gpu_allocation_visibility.py` | 失联节点上的卡不许被选中，也不许被数进“正被别人锁着”；在线节点的卡照旧分配；节点重新同步后同一张卡立刻可分配且全程未被改写过状态；release 路径不是放行口；UNHEALTHY 不因节点恢复而被放回来；谓词必须按本卡所在节点关联 | PASS（常驻） |
+| G0.105 设备的一条 `edge-run` 回报把**自己名下**那条 running 部署收口成终态 | `pytest tests/test_edge_run_closes_deployment.py` | ok=true ⇒ success、ok=false ⇒ failed 且带设备原话；越权点名／还没 run／后到的第二条／别的 kind 四种都不许动那一行；两条遥测事件都留档；线协议名与服务端常量必须相等 | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |
