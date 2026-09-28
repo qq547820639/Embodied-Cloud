@@ -615,6 +615,9 @@ def doc_reference_offenders(
     路径只在**限定于既有仓内根目录**时核存在性：普查显示这个限定下 445 条引用里
     未解析的只有"把两个产物名缩写成同一后缀"一种写法（示例路径 `tmp/probe.py`、
     GPU 主机上的外部脚本都不以仓内根目录开头，因此不会被误伤）。
+    「既有仓内根目录」= 顶层目录 ∖ 产物缓存类 ∖ 被 git 忽略的目录（见 `_doc_roots`）。
+    少了最后这一层，记账脚本在仓内建一个 `tmp/` 备份就会把上面那两句示例读成悬空指针
+    —— N-118 一手读数：roots 里加 `"tmp"` ⇒ 恰好 2 条假红，其余入参一字未动。
     自由路径的存在性**不做**——为示例与外部脚本开豁免，只会把判据磨成例外清单。
     """
     if not texts:
@@ -704,12 +707,42 @@ def _doc_section_index() -> dict[str, set[str]]:
     return index
 
 
+def _git_ignored_topdirs(names: list[str]) -> set[str]:
+    """被 git 忽略的顶层目录名。非 git 检出（干净导出）或 git 不可用 ⇒ 返回 ∅，行为同日。
+
+    实测本机 git：输入 `tmp/ dist/ app/ nosuch/` 只回吐被忽略的那两个；不在仓库里时
+    `fatal: not a git repository`、退码 128、stdout 为空 —— 所以这里只读 stdout，不看退码。
+    """
+    if not names:
+        return set()
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "--stdin"],  # noqa: S607
+            cwd=ROOT,
+            input="\n".join(f"{name}/" for name in names) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {line.strip().rstrip("/") for line in proc.stdout.splitlines() if line.strip()}
+
+
 def _doc_roots() -> tuple[str, ...]:
-    """仓内"既有根目录"：顶层目录去掉产物与缓存类（它们的存在本来就不该被文档保证）。"""
+    """仓内"既有根目录"：顶层目录去掉产物与缓存类（它们的存在本来就不该被文档保证）。
+
+    被 git 忽略的顶层目录同样不算：一次性取证与记账备份的落点（`tmp/`）不是仓库的组成面。
+    少了这一层过滤，一个 scratch 目录就会把文档门顶红 —— N-118 一手读数：`tmp` 进根面后
+    `CHANGELOG.md:328` 与 `docs/CURRENT_STATE.md` 里那两句示例路径 `tmp/probe.py` 各产一条
+    假悬空指针（差集 2），红因在工具的落点而不是文档。
+    """
     skip = {".git", "__pycache__", "dist", "build", "htmlcov", "embodiedcloud.egg-info", ".mypy_cache", ".pytest_cache"}
-    return tuple(
-        sorted(p.name for p in ROOT.iterdir() if p.is_dir() and p.name not in skip and not p.name.startswith("."))
-    )
+    names = [
+        p.name for p in ROOT.iterdir() if p.is_dir() and p.name not in skip and not p.name.startswith(".")
+    ]
+    ignored = _git_ignored_topdirs(names)
+    return tuple(sorted(name for name in names if name not in ignored))
 
 
 def _repo_file_index() -> frozenset[str]:

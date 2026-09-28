@@ -13,6 +13,9 @@ build/
 *.egg-info/
 smoke-embodiedcloud.db
 
+# 一次性取证与记账备份的落点：不得进版本库，也不得被当成"仓内根目录"
+tmp/
+
 # WorkBuddy local memory/artifacts
 .workbuddy/memory/
 

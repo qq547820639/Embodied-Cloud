@@ -333,6 +333,44 @@ def test_run_report_lives_in_the_ignored_directory() -> None:
     assert any(line.strip().rstrip("/") == "dist" for line in ignore.splitlines()), (
         ".gitignore 没忽略 dist/ → 环境读数会重新进入版本库"
     )
+    names = {line.strip().rstrip("/") for line in ignore.splitlines() if line.strip()}
+    assert "tmp" in names, (
+        ".gitignore 没忽略 tmp/ ⇒ 一次性取证与记账备份会脏工作树，"
+        "并把 `_doc_roots()` 的文档根面撑大（N-118 实测：多出 tmp 就产出 2 条假悬空指针）"
+    )
+
+
+def test_scratch_directories_are_not_documentation_roots() -> None:
+    """仓内 scratch 目录不得撑大「文档根」这一面（N-118）。
+
+    一手读数：记账脚本把 `.bak` 落进仓内 `tmp/anchor-patch-n116/` 之后，`_doc_roots()`
+    （按 `ROOT.iterdir()` 现取顶层目录）多出 `"tmp"`，CHANGELOG:328 与 CURRENT_STATE 里
+    那两句**设计上不作为指针**的示例路径 `tmp/probe.py` 立刻被读成悬空引用，主线门
+    `doc_references` 当场翻红。机制隔离复算（只换 roots、其余入参取现值）：
+
+        现行 8 个根 → 干净；roots 里加一个 "tmp" → 恰好 2 条同名 offender，差集 2。
+
+    所以这条判据钉的不是 `tmp` 这一 spelled 名字，而是「被 git 忽略的目录不属于文档面」
+    这条划界：`.gitignore` 里的 `tmp/` 行与 `_git_ignored_topdirs()` 的过滤任缺其一都红
+    （前者由上面那条文本面判据钉，本条钉行为面）。
+    """
+    validator = _load_validator()
+    scratch = ROOT / "tmp"
+    made = not scratch.exists()
+    scratch.mkdir(exist_ok=True)
+    try:
+        assert any(p.name == "tmp" for p in ROOT.iterdir() if p.is_dir()), (
+            "夹具没能把 scratch 目录造出来，本条就成了恒真断言"
+        )
+        roots = validator._doc_roots()
+        assert "tmp" not in roots, f"scratch 目录进了文档根面 {roots} ⇒ 示例路径会被读成悬空指针"
+        offenders = validator.dangling_doc_reference_offenders()
+        assert offenders == [], f"doc_references 被工具自己的落点顶红：{offenders}"
+        # 分母不许被收坏：收敛 roots 之后，路径指针仍要有实打实的量（与既有那支同一下界）。
+        assert validator.doc_reference_stats()["paths"] >= 200, validator.doc_reference_stats()
+    finally:
+        if made and not any(scratch.iterdir()):
+            scratch.rmdir()
 
 
 def test_committed_docs_json_is_written_from_the_reproducible_view() -> None:
