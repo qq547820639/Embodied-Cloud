@@ -25,26 +25,33 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture(autouse=True)
 def _gpu_pool_not_starved():
-    """整池被上游用例占满时，先回收再开测（背景与实测读数见 tests/gpu_pool.py）。
+    """整池被上游用例占满、或剩余空闲卡已经排在队列欠款上时，先回收再开测。
 
-    只在"一张够用的卡都没有"时动手：那不可能是新一轮测试开头的合法状态——真需要
-    "没有卡"这一前提的用例是自己把池抽干的（`test_scheduler` 的两条
+    判据是**净额**（原始空闲 − 未执行的 provision op），不是原始空闲：只在
+    "一张够用的卡都没有"时动手，会放过"正好 1 张空闲 + 队列里压着 1 个 queued op"
+    这个合法但致命的状态——下一个 tick 会先替那条 op 吃掉那唯一一张卡
+    （背景与实测读数见 tests/gpu_pool.py 模块 docstring）。
+
+    真需要"没有卡"这一前提的用例是自己把池抽干的（`test_scheduler` 的两条
     No GPU available），不是靠上一轮的残骸。有了这道闸，"谁的 workspace 多"
-    不再决定谁红；不触发时对任何用例零影响。
+    不再决定谁红；不触发时它对任何用例零影响（只读两个计数，不改任何行）。
     """
     from sqlalchemy import inspect
 
     from app.deps import SessionFactory, scheduler
-    from tests.gpu_pool import count_big_enough, reclaim_gpus
+    from tests.gpu_pool import count_big_enough, reclaim_gpus, unfulfilled_provision_ops
 
     with SessionFactory() as db:
         # 建表在 lifespan 里：第一个用例跑之前表可能还不存在
-        if inspect(db.bind).has_table("gpus") and count_big_enough(db, 8) == 0:
-            released = reclaim_gpus(db, scheduler)
-            print(
-                f"[conftest] mock GPU 池被上游用例占满：回收 {released} 张，"
-                f"现在够用 {count_big_enough(db, 8)} 张"
-            )
+        if inspect(db.bind).has_table("gpus"):
+            free = count_big_enough(db, 8)
+            debt = unfulfilled_provision_ops(db)
+            if free - debt < 1:
+                released = reclaim_gpus(db, scheduler)
+                print(
+                    f"[conftest] mock GPU 池净额不足（原始空闲 {free} 张、未执行 provision op "
+                    f"{debt} 个）：回收 {released} 张，现在够用 {count_big_enough(db, 8)} 张"
+                )
     yield
 
 
