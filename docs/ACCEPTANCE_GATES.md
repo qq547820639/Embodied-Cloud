@@ -115,6 +115,8 @@
 | G0.104 分配只看得见“节点今天同步过”的卡，且不改写卡的状态 | `pytest tests/test_gpu_allocation_visibility.py` | 失联节点上的卡不许被选中，也不许被数进“正被别人锁着”；在线节点的卡照旧分配；节点重新同步后同一张卡立刻可分配且全程未被改写过状态；release 路径不是放行口；UNHEALTHY 不因节点恢复而被放回来；谓词必须按本卡所在节点关联 | PASS（常驻） |
 | G0.105 设备的一条 `edge-run` 回报把**自己名下**那条 running 部署收口成终态 | `pytest tests/test_edge_run_closes_deployment.py` | ok=true ⇒ success、ok=false ⇒ failed 且带设备原话；越权点名／还没 run／后到的第二条／别的 kind 四种都不许动那一行；两条遥测事件都留档；线协议名与服务端常量必须相等 | PASS（常驻） |
 | G0.106 runtime 失踪那一档把串流会话与端口一起终结，且「写终态必配对终结」有尺子 | `pytest tests/test_reconcile_closes_streaming.py` | MISSING 档会话 `failed`＋两侧端口清空＋卡回池；ALIVE／UNKNOWN 两档不开火；复跑不重复入账；结构尺子在真文件读数 `[]`，并对「漏配对／上层在前／调用排在写之后」三种合成形状分别点名 2／0／1 | PASS（常驻） |
+| G0.107 文档门的「仓内根」面不含被 git 忽略的 scratch 目录 | `pytest tests/test_validation_matrix.py` | 自建 `tmp/` 时根面不含 `tmp`、活调用 `dangling_doc_reference_offenders()` 为 `[]`、`paths>=200`；`.gitignore` 的 `tmp/` 行有文本面读者 | PASS（常驻） |
+| G0.108 每一处写 `WorkspaceStatus` 终态的函数自己带齐终结 | `pytest tests/test_finalize_stop_closes_streaming.py` | 崩溃现场重试能修回来；真代码证到前提（一次 stop 后即 `failed`）；正常档恰好关一次；全 `app/` 尺子读数 `set()` 且分母自证 4＋1 处 | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

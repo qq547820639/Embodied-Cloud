@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 968 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 976 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -1456,13 +1456,33 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 未证实：真机回报（本机只有 mock 驱动）；超时那一档另登记 N-115——事件驱动的收口天生管不到“跑完就被掐、永远没人报”的那条部署。
 
 ### runtime 失踪那一档要把串流会话一起终结（N-116）
-- 缺陷：`_reconcile_one` 的 RUNNING→MISSING 那一档（`app/services/orchestrator.py:798`）结算、放卡、写 `FAILED`、记 `stopped_at`，却不叫 `streaming.terminate_for_workspace` —— STOP 档（`:448`）与 DESTROY 档（`:611`）本来就调它，唯独这条「runtime 自己没了、没人叫过 stop」的路漏了。后果是两张表互相打脸（与 N-82 同族）：`workspaces` 说这一格已经死了，`streaming_sessions` 还留着 `connected` 与两侧端口，`GET /api/streaming/workspace/{id}` 与前端那一行端口成了假活。
-- 分母由一手扫描给出（AST 判，终态枚举名取表达式根节点，不用行窗口）：全仓 `app/` 写 `WorkspaceStatus` 终态共 5 处 —— `_finalize_stop:590`（STOPPED）、`destroy:641`（DELETED）、`_reconcile_one:789`／`:807`（FAILED）、`warmpool.claim:408`（FAILED）。改前 4 处在同一条路径上先它执行过终结会话，唯一没配对的正是本轮补的那一处（`:807`）；补完重扫仍是 4/5，剩下那一处是 `_finalize_stop`，本轮登记为 N-117。
-- 改法：MISSING 档在结算之前调 `terminate_for_workspace`（`:804`）。选它而不选「在 reconcile 循环末尾统一收尾」：该函数只动库、不叫 provider，无活动会话时返回 0、重复调用同结果，因而在「一格失败退回非终态」那一趟（N-106 立的边界）也不会留下半个收尾。
+- 缺陷：`_reconcile_one` 的 RUNNING→MISSING 那一档（`app/services/orchestrator.py:805`）结算、放卡、写 `FAILED`、记 `stopped_at`，却不叫 `streaming.terminate_for_workspace` —— STOP 档（`:448`）与 DESTROY 档（`:618`）本来就调它，唯独这条「runtime 自己没了、没人叫过 stop」的路漏了。后果是两张表互相打脸（与 N-82 同族）：`workspaces` 说这一格已经死了，`streaming_sessions` 还留着 `connected` 与两侧端口，`GET /api/streaming/workspace/{id}` 与前端那一行端口成了假活。
+- 分母由一手扫描给出（AST 判，终态枚举名取表达式根节点，不用行窗口）：全仓 `app/` 写 `WorkspaceStatus` 终态共 5 处 —— `_finalize_stop:597`（STOPPED）、`destroy:648`（DELETED）、`_reconcile_one:796`／`:814`（FAILED）、`warmpool.claim:408`（FAILED）。改前 4 处在同一条路径上先它执行过终结会话，唯一没配对的正是本轮补的那一处（`:814`）；补完重扫仍是 4/5，剩下那一处是 `_finalize_stop`，本轮登记为 N-117。
+- 改法：MISSING 档在结算之前调 `terminate_for_workspace`（`:811`）。选它而不选「在 reconcile 循环末尾统一收尾」：该函数只动库、不叫 provider，无活动会话时返回 0、重复调用同结果，因而在「一格失败退回非终态」那一趟（N-106 立的边界）也不会留下半个收尾。
 - 判据 6 支（`tests/test_reconcile_closes_streaming.py`）。行为面四支：MISSING 档会话置 `failed` 且会话与 workspace 两侧端口都交还、卡回池；ALIVE 档不开火（会话仍 `connected`）；UNKNOWN 档按 ADR 0008 谁都不许动；复跑一趟 `failed=0`、`scanned=0`、usage 条目不翻倍。结构面两支：一把尺子把「把 workspace 写成终态之前必须在同一条路径上终结过会话」钉住（只认排在它前面的同层兄弟与上层兄弟，「祖先块里调用过但排在写之后」不算成对），真文件读数 `[]`；另一支是这把尺子的反向对照，三张合成图分别必须点名 2／0／1（漏两处配对／同层在前与上层在前都算成对／调用排在写之后）。
 - 三臂电池（靶 `app/services/orchestrator.py`，三档套件 58 点）：P1 把新加的那行拿掉（回到改前形状）⇒ 2 红（行为档＋尺子）；P2 只改顺序、把终结挪到写终态之后（行为不变）⇒ 1 红（只有尺子点名，说明它钉的是配对而不是行数）；P3 拿掉 STOP 档既有的那行 ⇒ 2 红，红在别的文件（`tests/test_streaming_lifecycle.py:137`／`:186`）。P3 的 expect 由第一遍读数补齐，不是按「我以为谁红」写；它同时量出这把尺子的作用面：只覆盖 `_reconcile_one`、不进被调函数体找终结调用——这条限度写进了用例 docstring，不冒充全仓规则。恢复后复跑 0 红。
 - 门禁 G0.106；§2 新行 N-116；新登记 N-117（`_finalize_stop` 的配对证据在调用链上而不在函数里）。
 - 未证实：真机流媒体面（本机没有 WebRTC 会话；会话行由 ORM 直建，被测的是「终结」那一半，`streaming.start()` 要 RUNNING 之外的整套所有权／凭据前置，在这里只会稀释判据）；`stop():421-427` 的「已 STOPPED 幂等补做」一档靠「STOPPED 蕴含会话已闭」这条没有机械核的不变量。
+
+### 记账脚本在仓内留一个 tmp/，就把文档门顶红了（N-118）
+- 缺陷（工具的自我遮蔽，不在产品代码里）：`scripts/validate_release.py:732 _doc_roots()` 按 `ROOT.iterdir()` 现取顶层目录当「仓内根」，而文档门的存在性核对（`doc_reference_offenders` 的 :615-621 那段划界）写死了「只核以既有仓内根目录开头的路径」——它的前提是**根面等于仓库的组成面**。记账脚本把备份落进仓内 `tmp/anchor-patch-n116/` 之后，这个前提就塌了：`tmp` 成了根，CHANGELOG 与 CURRENT_STATE 里那两句**故意不作为指针**的示例路径 `tmp/probe.py` 各产一条假悬空引用，`doc_references` 当场翻红。红因不在文档，也不在产品代码，而在量具自己的落点。
+- 一手读数与机制隔离（不靠「删掉之后变绿」倒推）：同一进程里只换 `roots` 入参、其余全部取现值 ⇒「现行 8 个根 → 干净；roots 里加一个 `tmp` → 恰好 2 条同名 offender，差集 2」。`git check-ignore --stdin` 的语义在一次性夹具里实测：输入 `tmp/ dist/ app/ nosuch/` 只回吐被忽略的那两个；不在仓库里时 `fatal: not a git repository`、rc=128、stdout 为空 ⇒ 干净导出下新过滤器退化成 ∅，行为与改前逐位一致。
+- 改法：`_doc_roots()` = 顶层目录 ∖ 产物缓存类 ∖ **被 git 忽略的目录**（新增 `_git_ignored_topdirs()`）；`_repo_file_index()` 跟着根面走，不用另改。`.gitignore` 补 `tmp/` 那一行，把这轮的落点规矩写进文本面。
+- 判据两支（`tests/test_validation_matrix.py`）：`test_scratch_directories_are_not_documentation_roots` 自己建 `tmp/`（try/finally 收回）⇒ 根面必须不含它、**活调用** `dangling_doc_reference_offenders()` 仍为 `[]`、`doc_reference_stats()["paths"] >= 200`（防我把分母收坏）；`test_run_report_lives_in_the_ignored_directory` 并一条 `tmp` 的文本面断言，不开新支。反向对照不新开：`tests/test_validation_matrix.py:763` 那一支早就用合成 roots 钉过「tmp 不在根面时示例路径不算指针」。
+- 三臂电池（靶 `scripts/validate_release.py` 与 `.gitignore`，套件 36 点）：B1 摘掉 git-ignored 过滤 ⇒ 1 红；B2 从 `.gitignore` 删掉 `tmp/` 那两行 ⇒ 2 红（文本面与行为面各有读者）；B3 把根面收成空集 ⇒ 3 红（既有那支的分母自证一起抓到，说明「收成空」不会被读成「全绿」）。恢复后复跑 0 红。
+- 未证实／限度：过滤器只认 `git check-ignore`，非 git 检出时整层不生效（今日行为，不是缺陷）；根面按**顶层目录名**判，`sub/dir` 形式的忽略子目录仍由 `_repo_file_index()` 按根收录。
+
+### STOPPED 那一处终态写入自己带齐终结（N-119，闭 N-117）
+- 缺陷：`_finalize_stop`（`app/services/orchestrator.py:582`）是全仓 `app/` 唯一一处「写出 `WorkspaceStatus` 终态，而同一条执行路径上此前没有任何终结」的位点。它的配对证据只在调用链上（`_stop_cleanup:448` → `:472`、reconcile 的 STOPPING 档 `:837` → `:846`），而 `stop():421-427` 的「已 STOPPED 就只补做结算与释放」那一档把「STOPPED ⇒ 会话已关」当成结构保证。
+- 这个保证为什么不成立（逐行核实）：`_stop_cleanup` 的 `try`（`:446-452`）把 `terminate_for_workspace` 与 `provider.stop` 放进同一段，`except`（`:453-456`）不 `db.rollback()`；而释放准入在命令失败那一档只认 provider 亲口说的 MISSING（`_release_admitted:509`）。于是「终结自己抛错、runtime 确实没了」这一形状会把 STOPPED 与仍为 `connected` 的会话一起提交，此后每一次 `stop()` 重试都走那条幂等档，永远补不回来——两表互相打脸（与 N-82／N-116 同族）。
+- 改法：终结收进 `_finalize_stop` 本体（`:596`），排在写 STOPPED（`:597`）之前——写终态的那个函数自己带齐配对，而不是指望调用链里恰好有人做过。
+- 判据 7 支（`tests/test_finalize_stop_closes_streaming.py`）。行为面四支：A1 给成崩溃现场（STOPPED ＋卡已回池＋会话仍 `connected`＋两侧端口占着，用 ORM 造，理由写在用例里），`stop()` 必须修得回来且不凭空补一段账；A2 用真代码证前提（`FaultOnFirstClose` 桩的是协作者不是被测代码，provider 自述 MISSING），一次 stop 之后就该 `failed`；A3 不许开火的对照，「恰好关一次」在库里 1×／2× 同形，唯一可分辨的面是 `stream_failure_total` 增量。结构面三支：把 N-116 那把只看 `_reconcile_one` 的尺子宽成全 `app/` 逐 def 扫（枚举名取 AST 根节点，于是 `DeploymentStatus.FAILED` 与 `w.state` 都不入分母），期望写成**应然空集**并同条留`per_file` 分母自证（orchestrator 4 处／warmpool 1 处）；两支合成对照钉极性（同层在前／上层在前算成对；忘了、排在写之后、`finally` 里、跨 `def` 边界都算漏）。
+- 两处极性是本轮从草稿翻上来的：B 组草稿钉的是 as-is（`{orchestrator.py:590}`），A2 的中段钉的是「会话仍 connected」——那都是在描述洞而不是防回归，与修法同批改回应然，否则尺子永远不认自己的修法。
+- 四臂电池（靶 `app/services/orchestrator.py` 与尺子本体，11 个套件基线全绿）：F1 摘掉新行 ⇒ 3 红（A1／A2／尺子）；F2 只改顺序、终结排在写之后（行为同）⇒ 1 红（只有尺子点名）；F3 摘掉 `_stop_cleanup` 那处**既有**终结 ⇒ 1 红（A2）——这条读数更正了登记项里的猜测：两处并存不是冗余，早期那处抛错最多损失端口回收，晚期那处抛错会把整段收尾退回非终态，后果面不同；F4 摘掉尺子的枚举名判别 ⇒ 2 红（越界对照＋分母），证明分母不是按属性名蒙出来的。全部 expect 由第一遍读数补齐；恢复后复跑 0 红。
+- 顺带把上一轮账面里被这次插行挪动的位点指回实物（`:611→:618`、`:789→:796`、`:798→:805`、`:804→:811`、`:807→:814`、`:830→:837`、`:839→:846`、`:590→:597`），逐条打印读到原文核对；同一抽样暴露出历史账面里三条指针已指向无关行（`:800`/`:833`/`:615`），本轮只登记不修，见 N-120。
+- 未证实：真实 Docker／K8s 下 `terminate_for_workspace` 会不会抛（桩替的是协作者，A2 证的是「抛了之后终态写入不被阻断、且会话必须已关」这一半）；尺子不看终结调用是否被包在会吞异常的 `try` 里，也不看它是否真写完（`_stop_cleanup:448`、`destroy:618` 都包着）；值经局部变量的间接写不在射程内。
+
+
 
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
@@ -1490,7 +1510,9 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 
 - `N-115`：**跑完却再也报不上来的部署，今天没有人负责**。N-113 的收口是事件驱动的：设备 POST 一条 `edge-run` 才改判。于是三种形状都会一直停在 `running`——设备跑完即被掐（N-109 的 `reported=false` 档）、设备掉了而部署没重下、以及人工在库外把部署推到 running。要么给 `running` 配一个时效判决，要么在写入侧要求设备在 run 前重新登记；两条都要先回答“谁有权把一条运行判成超时失败”。另外 `DeploymentRecord.updated_at` 带 `onupdate`，它是“最后一次被改动”而不是“最后一次被看见”，不能直接当证据列用——这一格与 N-110 的差别正在这里，故登记不收口。
 
-- `N-117`：**`_finalize_stop` 是全仓唯一一处「本函数不终结会话却写终态」的位置，它的配对证据在调用链上**。`app/services/orchestrator.py:590` 写 `STOPPED` 而函数体里没有 `terminate_for_workspace`；两个正常入口都先在同一趟里终结过（`_stop_cleanup:448` → `:472`；reconcile 的 STOPPING 档 `:830` → `:839`），所以今天的读数不出错。但 `stop():421-427` 那一档是「已 STOPPED 就只补做结算与释放」，它假定「STOPPED 蕴含会话已闭」，而这句既没有判据守着、也不是结构性质：`_stop_cleanup` 的 `try` 把 `terminate_for_workspace` 与 `provider.stop` 放在同一段（`:446-452`），except 不 `db.rollback()`（`:453-456`），于是「终结那一半抛错、provider 又说 runtime 没了（`admitted=True`）」这一形状会把 STOPPED 与仍为 `connected` 的会话一起提交，此后每次重试 stop 都只走那条幂等档，永远补不回来。修法候选：把终结收进 `_finalize_stop` 本体（它是 STOPPED 的唯一写点、函数幂等），并把结构尺子从 `_reconcile_one` 扩到全部 5 处终态写入；动手前要先补一支能开火的判据把上面那个形状做出来——现无任何用例走「终结抛错＋admitted」这一档，所以本轮只登记不修。
+- ~~`N-117`：**`_finalize_stop` 是全仓唯一一处「本函数不终结会话却写终态」的位置，它的配对证据在调用链上**。`app/services/orchestrator.py:597` 写 `STOPPED` 而函数体里没有 `terminate_for_workspace`；两个正常入口都先在同一趟里终结过（`_stop_cleanup:448` → `:472`；reconcile 的 STOPPING 档 `:837` → `:846`），所以今天的读数不出错。但 `stop():421-427` 那一档是「已 STOPPED 就只补做结算与释放」，它假定「STOPPED 蕴含会话已闭」，而这句既没有判据守着、也不是结构性质：`_stop_cleanup` 的 `try` 把 `terminate_for_workspace` 与 `provider.stop` 放在同一段（`:446-452`），except 不 `db.rollback()`（`:453-456`），于是「终结那一半抛错、provider 又说 runtime 没了（`admitted=True`）」这一形状会把 STOPPED 与仍为 `connected` 的会话一起提交，此后每次重试 stop 都只走那条幂等档，永远补不回来。修法候选：把终结收进 `_finalize_stop` 本体（它是 STOPPED 的唯一写点、函数幂等），并把结构尺子从 `_reconcile_one` 扩到全部 5 处终态写入；动手前要先补一支能开火的判据把上面那个形状做出来——现无任何用例走「终结抛错＋admitted」这一档，所以本轮只登记不修。~~ —— **已由 N-119 闭合**：终结收进 `_finalize_stop` 本体（`app/services/orchestrator.py:596`，写在 `:597`），尺子从 `_reconcile_one` 宽成全 `app/` 逐 def 扫、读数 `set()`；判据 `tests/test_finalize_stop_closes_streaming.py` 7 支＋四臂（F1 3 红／F2 1 红／F3 1 红／F4 2 红）。F3 更正了上面那句猜测：两处并存不是冗余——早期抛错只损失端口回收，晚期抛错会把整段收尾退回非终态。
+
+- `N-120`：**账面里的 `file:行号` 指针会随每轮插行漂移，而没有任何读者**。`doc_references` 门只判「文件在不在、行有没有越界」（`scripts/validate_release.py:637` 那条比较），所以指错了行照样全绿。本轮一手抽样三条全错：`CHANGELOG.md:1406`（N-106 轮）说 `_reconcile_one` 里的 `scheduler.release` 在 `:800`、`_finalize_stop` 在 `:833`，今天读到的是日志格式串与一句注释（真位在 `:812`／`:846`）；`CHANGELOG.md:1295` 说 destroy 的结算在 `:615`，今天是 `return  # 已 tombstone，幂等`。本轮只把自己写下的那批指针修回实物（改前/改后八个位点逐条打印核对），历史账面不回填——回填会把「当时读到什么」这条证据抹掉。可做的修法：给文档门的判据从「行不越界」加严成「指针所在的函数名与句子里点名的符号一致」（句子得带符号名，这需要先在写法上立规矩），或改成引用 `def` 名＋相对偏移这种不因插行漂移的锚形。
 
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
