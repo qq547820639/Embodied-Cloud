@@ -53,7 +53,7 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
   「operation 还在重试」与「workspace 已 FAILED」同时成立，读者看到的是一次还没发生的死亡
   （常驻对照：`tests/test_worker.py::test_retryable_provision_failure_is_not_published_as_terminal`）。
 - 启动恢复走 `reconcile_all()`：基于 runtime 事实收敛（DB RUNNING + runtime ALIVE → adopt；
-  RUNNING + MISSING → 结算置 FAILED 并归还 GPU；PROVISIONING + MISSING → 重新入队 PROVISION；
+  RUNNING + MISSING → 结算置 FAILED、归还 GPU、终结该格串流会话与两侧端口（N-116）；PROVISIONING + MISSING → 重新入队 PROVISION；
   QUEUED/CREATED → 重新入队；mock/UNKNOWN → 保守不动）。
 - 同一套收敛还有一个**周期驱动者**（N-99）：`app/deps.py` 的 `_reconcile_stuck_cells` 注册在
   worker 的周期表上，走的是 `reconcile_all(limit=…, older_than_seconds=…)` 的**定向档**——
