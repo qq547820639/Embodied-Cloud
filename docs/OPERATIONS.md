@@ -30,8 +30,17 @@
 | warm_pool_prewarm_failed_total 增量 | 持续 >0 说明池在反复开"注定失败"的格（容量不够或 `warm_pool_size` 与舰队不匹配），不是用户故障 |
 | workspace_running / gpu_allocated 失衡 | allocated > running + 5 |
 | gpu UNHEALTHY 数量 | >0 |
-| gpu_hosts 出现 `offline` | 那台节点连续 5 个刷新窗口（默认 600 s）没再同步成功：docker 档查 `nvidia-smi` 还在不在，k8s 档查 kubeconfig 与集群可达性。`GET /api/gpus/hosts` 的 `last_synced_at` 就是最后一次成功同步的时刻——`online` 只是它的结论（N-110） |
 | API 5xx 率 | >1% 持续 10min |
+
+上面这张表只收 `/metrics` 里真有的族名（常驻判据 `test_alert_table_only_references_declared_metrics`
+会拒绝任何不存在的族）。两台"节点的真相"不在指标里，看接口：
+
+- **节点是否还看得见**：`GET /api/gpus/hosts` 的 `status` 只是结论，凭证是同回的 `last_synced_at`
+  （worker 每 120 tick 重报一次 inventory，超过 `gpu_host_offline_after_seconds`＝默认 600 s＝5 个
+  刷新窗口没再同步成功就改判 `offline`）。看到 `offline` 先查该档的同步源：docker 档是 `nvidia-smi`
+  还在不在，k8s 档是 kubeconfig 与集群可达性（N-110）。
+- **设备是否还看得见**：`GET /api/edge/agents/{id}` 的 `status` 由最近一次心跳背书，超时改判 `offline`
+  （阈值 `edge_agent_offline_after_seconds`，默认 90 s＝设备端 5 s 轮询 × 18，N-108）。
 
 ## 3. 容量模型
 

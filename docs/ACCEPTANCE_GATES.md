@@ -110,6 +110,8 @@
 | G0.99 逐格异常边界退回非终态后，下一趟必须收完且不重复入账 | `pytest tests/test_reconcile_cell_isolation.py` | 第一趟：errors=1、本格留原状态、卡与绑定不动、两表一致、usage 恰一条；第二趟：终态 + 卡回池 + 三列清 + 冲突零 + usage 仍一条 | PASS（常驻） |
 | G0.100 崩溃遗留的 test-*.db 由会话开头按进程死活收口，活库不许碰 | `pytest tests/test_test_db_sweep.py` | 死 pid 被删且第二趟无事可做；活 pid 文件逐字节不变；本 pid／无后缀／别的名字不碰；`pid_is_alive` 三极；接线与反证 | PASS（常驻） |
 | G0.101 设备在线状态由心跳背书，超时改判 offline 且心跳回来能翻回 | `pytest tests/test_edge.py` | 超时翻 OFFLINE 并幂等；阈值内不翻；从没心跳的 REGISTERED 不翻；换阈值参数结果跟着动；再心跳回 ONLINE；组合根传的是 settings 里的键 | PASS（常驻） |
+| G0.102 设备端「没报错」两向都不算背书：发现响应形状与丢失的遥测 | `pytest tests/test_edge_agent_client.py tests/test_edge_agent_unreported_run.py` | 非清单的 200 必须硬失败而 `[]` 仍是合法空闲读数；上报失败那一格必须仍是 `ran`＋`verified`＋`reported=false` 且退出码非零，上报成功侧安静照旧；同一部署下一轮不得补跑 | PASS（常驻） |
+| G0.103 节点在线由最近一次 inventory 同步背书，缺席的卡在运行期就能被看见 | `pytest tests/test_gpu_host_liveness.py` | 同步过期 ⇒ offline 且幂等、改动当场落库；阈值内／`last_synced_at IS NULL` 都不翻；换阈值参数结果跟着动；重同步把证据往前推并判回 online；两档注册的间隔取自常量（裸数字由源码面尺子点名）；少报一张卡当场 DRAINING 而不许改写 UNHEALTHY | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

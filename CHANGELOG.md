@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 918 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 948 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898→903→906→918，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96／G0.97／G0.98／G0.99／G0.100／G0.101。
+- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898→903→906→918→948，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96／G0.97／G0.98／G0.99／G0.100／G0.101／G0.102／G0.103。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -1422,6 +1422,22 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 连带：`.env.example` 补该档（`test_config_docs` 当场拦下「设了没写进样例」）；周期表成员判据从 four 改名 five 并加一行——成员是精确等值断言，新增注册必须同步改它，登记为有意的行为变化。
 - 未证实：真设备断网／断电下的行为未测（本机只有 mock 驱动）；本轮证的是控制面在「心跳不再到达」这一事实下的判决。
 
+### 设备端两处「没报错即成功」：发现响应的形状与丢掉的上报（N-109）
+- 缺陷一：`AgentClient.list_assigned` 把「200 但不是 JSON 数组」折成 `[]`，而那与“今天没活”同形——设备不取件、不报错、退 0，运维看到的是一台在线且空闲的机器人。同一个文件对非 JSON 响应体本来就是抛错的（`_json`），清单这条路径不该例外。
+- 缺陷二：`edge_agent/agent.py` 里遥测上报失败会被 `run_once` 的通用分支折成 `("error", before, before)`——一次**已经发生**的物理运行连同它的观察结果一起被读成“没发生”。
+- 改法：形状不符即抛；上报失败那一格仍是 `ran`＋`verified`，另带 `reported=false` 与一行 stderr，退出码由 `main()` 据它抬。ADR 0007 后果段与 OPERATIONS §8 排查表各补两行（跑的人与运维那一侧都要看得见）。
+- 判据 15 支（`tests/test_edge_agent_client.py` 12→19、`tests/test_edge_agent_unreported_run.py` 新增 8）＋九臂电池：M1 6 红、M3 2 红、M8 2 红（误伤方向的反证——把“真的没活”也判成形状错误，必须红在空闲档），M2／M4／M5／M6／M7／M9 各 1 红；九臂无存活。
+- 中间读数：N-109 单独认证过一次（933 点、零失败），当时唯一的红就是这份文档面还没跟上——`docs_test_counts` 如实报"文档写 918、实测 933"。计数面只许有一处的理由就在这里：多一处必有一处会过期。
+
+### 节点的 `online` 要有同步背书，inventory 要有周期驱动者（N-110）
+- 缺陷：`gpu_hosts.status` 默认 `online`，全仓唯一写入点是 `sync_host`，而它只被开机那一脚调用 ⇒ 一台离开集群的节点对 admin 永久报在线；同一段里的“未再上报的 GPU → DRAINING”在进程存活期内没有驱动者，节点少一张卡要等重启才看得见。
+- 改法沿用 N-108 的形状，不引入新判决：新增证据列 `gpu_hosts.last_synced_at`（alembic 第 15 节 `4f2b7c9a1e60`，**可空**——迁移时给存量行填一个假时间戳等于把所有主机同时判成“刚刚同步过”，判死窗口反而被拉长），每次成功同步盖章；`GpuScheduler.expire_stale_hosts` 只按证据改判，`NULL` 一律不动（从没同步过 ≠ 同步失败）；阈值单一来源 `gpu_host_offline_after_seconds=600`（＝刷新档 120 tick × 5 个窗口）；周期表新增两档，其中重报那一档调的就是开机同一个函数，不写第二套同步逻辑。
+- 判据 14 支（`tests/test_gpu_host_liveness.py`）＋十一臂电池：A2 比较号判反 5 红、A5 改判不提交 4 红、A7 摘掉注册 2 红，其余各 1 红。
+- 两支臂第一版**存活**，都按观测补判据（原判据一字未改）：A8 —— `(120, fn)` 与 `(常量, fn)` 在本轮默认值下**数值相等**，数值判据结构上看不见“常量成了装饰”，于是新增源码面尺子 `cadence_literal_offenders`；A10 —— 那张 UNHEALTHY 的卡当时**还在**上报清单里，压根走不到被改写那一步，改成“缺席且 UNHEALTHY”才量得出缺席降级的状态集合边界。
+- 连带三条：`GpuHostOut` 吐 `last_synced_at`（OPERATIONS 的排查表指着这一列，端点不给就是空头承诺）；`test_periodic_loop_and_boot_wiring` 从 five 改名 seven 并补一根“周期表与判据清单必须同集合”——逐条判据看不见表上长出新档（本轮加两档时它照绿就是证据）；`test_version_consistency` 新增 openapi 工件时效判据，起因是重生成 `make api-docs` 时补出了一个更早一轮的 `usage_segment_booked`：那份对外工件已经漂了一轮以上，而没有任何常驻读者发现（新判据自己用“删一个字段”验过会红）。
+- 选型：本轮不引新依赖，沿用仓内既有形状（证据列＋周期改判／alembic batch 模式，ADR 0005 的 SQLite‑PG 语义对等）；600 s 的判死取向借的是 N-108 那一轮读过的 AWS IoT「1.5× keep-alive 才判死」口径——**本轮未重开该页**，出处见上一节。
+- 未证实：provider 会不会真在运行中少报一张卡（mock 永远报同样 8 张，本机也没有真 GPU／集群）。被钉住的是“同步本身能收敛”与“有周期驱动者在叫它”，实机那一档仍挂在物理面。
+
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
@@ -1442,6 +1458,8 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - ~~`N-98`：不放行的格没有周期驱动者，一张卡可能被永久钉住~~ —— **已由 N-99 闭合**：`reconcile_all` 加 `limit`/`older_than_seconds` 两个默认 None 的参数（默认档＝改前全量扫描，启动恢复不受影响），`deps._reconcile_stuck_cells` 以 30 tick 注册进既有周期表，只碰「队列没在做」且「比阈值老」的格、一趟最多 8 格；登记项里那条成本读数（256 格一趟 ≈24 s）正是「不做定向档就要付的价」。判据 `tests/test_periodic_reconcile_driver.py` 11 支，四臂单变量各只红它守的那一支。多副本抖动未做，量级与理由写在 N-99 一节的未证实里。
 
 - ~~`N-61`：要不要把构建后端从 setuptools 换成 hatchling~~ —— **已由 N-62 结案：不换**。本机在 `git worktree` 副本上真跑过：hatchling 1.32.4 两建 wheel 同为 `629d6ff7e24f`（它自己就钉 tar 成员 mtime/uid/gid 与 gzip mtime，读安装到本机 venv 的源文件核对过）；与 setuptools 的 wheel 差异只有三处——成员 55 对 56（少 `dist-info/top_level.txt`，全仓 grep 零读者）、`Requires-Dist` 只差 PEP 508 的引号风格（22 条语义同集）、`WHEEL` 的 Generator 行。净收益只是删掉 `scripts/sdist_normalize.py`（约 100 行，6 支判据与两处消费位都已落门禁），代价是 `uv.lock` 重解析、`dev` extra 对齐、wheel 侧 `recomputable` 基线重钉与所有引用产物 sha 的文档面重扫⇒ 不抵。再议的触发条件：自研归一哪天失效，或后端侧出现**别的**产品收益。
+- `N-111`：**一台彻底不再同步的节点，它名下那些仍标 AVAILABLE 的卡没人接走**。`expire_stale_hosts` 只改 host 的结论列，不碰 `gpus.status`（`allocate` 的权威是后者），所以节点整机消失后新工作区仍会被派到一张不存在的卡上。不顺手 drain 的理由是**归位那一半还没定**：`DRAINING`／`UNHEALTHY` 今天没有任何回到 AVAILABLE 的路径（只有 admin 路由 `app/routers/gpus.py` 的两个 POST 会写它们，`sync_host` 对仍在上报清单里的卡只更新 model/memory/index 不改 status，`release` 与 `recover_stuck_gpu_allocations` 只碰带 `workspace_id` 的行），于是“节点暂时看不见”一旦变成 DRAINING 就是一次不可逆的容量注销。要么先给一次成功重报定义归位语义（并回答“管理员手工 drain 的卡该不该被自动抬回来”），要么给缺席降级另设一档比 host 判死更长的阈值。
+
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
 - ~~`N-33`：`tests/test_gpu_pool_guard.py` 那两支带哨兵（缺余量时算合法跳过）~~ —— 已由 **N-41 闭合**：

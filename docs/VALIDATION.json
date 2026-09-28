@@ -4,7 +4,7 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 918
+      "count": 948
     },
     "test_run": {
       "status": "PASS",
@@ -20,7 +20,7 @@
     },
     "migration": {
       "status": "PASS",
-      "chain": 14
+      "chain": 15
     },
     "build": {
       "status": "PASS"

@@ -15,9 +15,9 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 918 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 948 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
-| Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
+| Migration | PASS（clean DB empty→head **15 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
 | Integration Docker | **PASS**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册；本轮 +3 例＝镜像层清单的接线与分流判据） |
 | Integration Browser | **PASS**（Playwright 驱动系统 Chrome 真 DOM） |
@@ -124,6 +124,8 @@
 | N-106 | **异常边界只钉了前半句**：`_reconcile_one` 里 release／`_finalize_stop` 抛错退回非终态之后，没有任何判据跑第二趟证明它真被收完（既有注入都炸在判据之前，两趟那支是健康档）。改法：三档钉「残留可点名 + 已提交的结算不被 rollback 吞掉 + 下一趟收完且不重复入账」，STOPPING 档另走一遍。 | 判据 `tests/test_reconcile_cell_isolation.py` 3 支；六臂：G2 不再结算 ⇒ 只红 R1+R2、G3 幂等键换成 `utcnow()` ⇒ 只红 R2、G4 STOPPING 不叫 release ⇒ 只红 R3、G1 边界写终态 ⇒ 四支读同一列。未证实：只注入过 mock，真 docker/k8s 的 release 错误来源未测。 |
 | N-107 | **崩溃那一趟遗留的 `test-*.db` 没人收**：N-95 只删本进程 pid 的那些，其余交给 `make clean`，而没有任何循环会跑它；实测仓根 2 个死 pid 孤儿（479 KB＋455 KB）。改法：`sweep_dead_test_dbs` 接在会话开头，只删「归属进程确定已不在」的，活／本／无后缀一律不碰。 | 判据 `tests/test_test_db_sweep.py` 5 支；七臂：谁都不收 ⇒ D1+D5、死了说活着 ⇒ D1+D2+D5、问不到说死了 ⇒ 只红 D2、不看死活 ⇒ 只红 D1、摘接线 ⇒ 只红 D3。现场 2 个孤儿被第一次运行收掉。 |
 | N-108 | **设备 `online` 永久为真**：`AgentStatus.OFFLINE` 零写入者、`last_heartbeat` 零读者，断掉的机器人一直显示在线。改法：`expire_stale_agents` 按 `settings.edge_agent_offline_after_seconds`（90 s＝18× 轮询）把超时 ONLINE 改判 OFFLINE，注册成周期表第五档；不 gate 派工（拉取式派工允许派给暂时离线设备）。 | 判据 `tests/test_edge.py` 7 支；六臂：摘状态条件 ⇒ 红幂等与阈值两支、比较号判反 ⇒ 四支、写死阈值 ⇒ 只红阈值那支、忘 commit ⇒ 三支、组合根传裸数字 ⇒ 只红接线那支。K5 首版因尺子读 docstring 而存活，改看 `ast.Attribute` 后才有牙。 |
+| N-109 | **设备端两处「没报错即成功」**：发现端点回来一个不是 JSON 数组的 200 被折成 `[]`（与“今天没活”同形，设备一路退 0 而运维看它在线空闲）；遥测上报失败被 `run_once` 折成 `("error", before, before)`，一次已发生的物理运行被读成没发生。改法：形状不符即抛；那一格保持 `ran`＋`verified` 并带 `reported=false`＋stderr，退出码跟着抬。 | 判据 `tests/test_edge_agent_client.py`＋`tests/test_edge_agent_unreported_run.py` 共 15 支；九臂：M1 6 红、M3 2 红、M8 2 红（空闲档反证），其余各 1 红。未证实：真设备断网下的上报失败（本机只有 mock 驱动）。 |
+| N-110 | **节点的 `online` 是一次开机快照**：`gpu_hosts.status` 默认 online 且唯一写入点只被开机那一脚调用；“未再上报的 GPU → DRAINING”在运行期没有驱动者。改法：证据列 `last_synced_at`（alembic 第 15 节，可空，每次同步盖章）＋`expire_stale_hosts` 只按证据改判（NULL 不动）＋周期表新增“重报 inventory”与“判 host 时效”两档（阈值 `gpu_host_offline_after_seconds=600`＝5 个刷新窗口）。 | 判据 `tests/test_gpu_host_liveness.py` 14 支；十一臂：A2 判反 5 红、A5 不提交 4 红、A7 摘注册 2 红。两支臂首版存活并按观测补判据（A8 数值相等看不出常量成装饰 ⇒ 加源码面尺子；A10 那张卡没缺席 ⇒ 改成缺席且 UNHEALTHY）。连带：`GpuHostOut` 吐证据列、周期表成员判据补“同集合”那根、openapi 工件时效判据。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）
