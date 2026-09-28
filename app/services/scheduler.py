@@ -255,7 +255,7 @@ class GpuScheduler:
 
 
 def recover_stuck_gpu_allocations(db: Session) -> None:
-    """释放所有非占用 workspace 的孤儿 GPU 绑定（幂等）。
+    """释放所有非占用 workspace 的孤儿 GPU 绑定，并让两张权威表在同一事务里一起改口。
 
     占用判据（避免误释放进行中生命周期，防止同一物理 GPU 被二次分配 → 一卡双跑）：
     - workspace 状态属于非终态 {PROVISIONING, RUNNING, STOPPING}
@@ -265,6 +265,14 @@ def recover_stuck_gpu_allocations(db: Session) -> None:
     - 或存在 active operation（workspace_operations.status ∈ {PENDING, RUNNING, RETRYING}）
     其余（workspace 不存在、终态 workspace 且无 active operation）的 GPU 绑定
     视为孤儿，予以释放。
+
+    释放的落点是两张表，不是一张：`gpus` 说"这张卡没人了"，`workspaces.gpu_id /
+    gpu_index / gpu_name` 说"这一格不持有卡"。只改前者会留下"卡已易主、格子还在
+    对外声称持有那张卡"的漂移 —— `WorkspaceOrchestrator.reconcile_all` 的节点不一致
+    分支正是按 `w.gpu_id` 反查预留 host 的，卡若已转授他人，它拿去比的就是别人的节点。
+    本函数是漂移的收口者：它判定为孤儿并放掉的那几格，列一并清掉；占用/受保护的格
+    一列都不动（那是 `_fail` / `_finalize_stop` / warm pool 各自准入路径的责任，
+    本函数不越界替它们清）。Workspace 模型没有 updated_at 列，故此处无时间戳可刷。
     """
     from ..models import OperationStatus, Workspace, WorkspaceOperation
 
@@ -295,24 +303,48 @@ def recover_stuck_gpu_allocations(db: Session) -> None:
             )
         )
     )
+    # 被本函数判定为孤儿并放了卡的格：卡与列必须成对处理，缺一即漂移
+    orphan_ids: set[str] = set()
     allocs = db.scalars(
         select(GpuAllocation).where(GpuAllocation.released_at.is_(None))
     ).all()
     for alloc in allocs:
         if alloc.workspace_id not in occupied_ids:
+            # 记名要在 delete 之前：实例进入 DELETED 态后读属性不再可靠
+            orphan_ids.add(alloc.workspace_id)
             alloc.released_at = utcnow()
             db.delete(alloc)
     # 归还所有非占用 workspace 的 GPU 绑定（occupied_ids 为空时清空所有绑定）
+    # 每个放卡分支各自记名：先读出"这次被清掉归属的是哪几格"再放行 —— UPDATE 之后无从回看。
     if occupied_ids:
+        bound_ids = db.scalars(
+            select(Gpu.workspace_id).where(
+                Gpu.workspace_id.is_not(None), Gpu.workspace_id.notin_(occupied_ids)
+            )
+        ).all()
+        orphan_ids.update(bid for bid in bound_ids if bid is not None)
         db.execute(
             update(Gpu)
             .where(Gpu.workspace_id.notin_(occupied_ids))
             .values(status=GpuStatus.AVAILABLE.value, workspace_id=None, updated_at=utcnow())
         )
     else:
+        bound_ids = db.scalars(
+            select(Gpu.workspace_id).where(Gpu.workspace_id.is_not(None))
+        ).all()
+        orphan_ids.update(bid for bid in bound_ids if bid is not None)
         db.execute(
             update(Gpu)
             .where(Gpu.workspace_id.is_not(None))
             .values(status=GpuStatus.AVAILABLE.value, workspace_id=None, updated_at=utcnow())
+        )
+    # 成对的第二半：这些格不得再声称持有已被强制放掉的卡。范围只由 orphan_ids 决定，
+    # 受保护/占用的格即使留着 gpu_id 也不在本语句的 WHERE 里。必须在 commit 之前 ——
+    # 卡与列两次提交之间存在一个"卡已放、列还指着它"的窗口，崩在那儿就是新漂移。
+    if orphan_ids:
+        db.execute(
+            update(Workspace)
+            .where(Workspace.id.in_(sorted(orphan_ids)))
+            .values(gpu_id=None, gpu_index=None, gpu_name=None)
         )
     db.commit()
