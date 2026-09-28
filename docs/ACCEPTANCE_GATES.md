@@ -111,7 +111,7 @@
 | G0.100 崩溃遗留的 test-*.db 由会话开头按进程死活收口，活库不许碰 | `pytest tests/test_test_db_sweep.py` | 死 pid 被删且第二趟无事可做；活 pid 文件逐字节不变；本 pid／无后缀／别的名字不碰；`pid_is_alive` 三极；接线与反证 | PASS（常驻） |
 | G0.101 设备在线状态由心跳背书，超时改判 offline 且心跳回来能翻回 | `pytest tests/test_edge.py` | 超时翻 OFFLINE 并幂等；阈值内不翻；从没心跳的 REGISTERED 不翻；换阈值参数结果跟着动；再心跳回 ONLINE；组合根传的是 settings 里的键 | PASS（常驻） |
 | G0.102 设备端「没报错」两向都不算背书：发现响应形状与丢失的遥测 | `pytest tests/test_edge_agent_client.py tests/test_edge_agent_unreported_run.py` | 非清单的 200 必须硬失败而 `[]` 仍是合法空闲读数；上报失败那一格必须仍是 `ran`＋`verified`＋`reported=false` 且退出码非零，上报成功侧安静照旧；同一部署下一轮不得补跑 | PASS（常驻） |
-| G0.103 节点在线由最近一次 inventory 同步背书，缺席的卡在运行期就能被看见 | `pytest tests/test_gpu_host_liveness.py` | 同步过期 ⇒ offline 且幂等、改动当场落库；阈值内／`last_synced_at IS NULL` 都不翻；换阈值参数结果跟着动；重同步把证据往前推并判回 online；两档注册的间隔取自常量（裸数字由源码面尺子点名）；少报一张卡当场 DRAINING 而不许改写 UNHEALTHY | PASS（常驻） |
+| G0.103 节点在线由最近一次 inventory 同步背书，缺席的卡在运行期就能被看见 | `pytest tests/test_gpu_host_liveness.py` | 同步过期 ⇒ offline 且幂等、改动当场落库；阈值内／`last_synced_at IS NULL` 都不翻；换阈值参数结果跟着动；重同步把证据往前推并判回 online；两档注册的间隔取自常量（裸数字由源码面尺子点名）；少报一张卡当场 DRAINING 而不许改写人工下架（`DRAINED`），健康列一律不动（N-126 之后） | PASS（常驻） |
 | G0.104 分配只看得见“节点今天同步过”的卡，且不改写卡的状态 | `pytest tests/test_gpu_allocation_visibility.py` | 失联节点上的卡不许被选中，也不许被数进“正被别人锁着”；在线节点的卡照旧分配；节点重新同步后同一张卡立刻可分配且全程未被改写过状态；release 路径不是放行口；UNHEALTHY 不因节点恢复而被放回来；谓词必须按本卡所在节点关联 | PASS（常驻） |
 | G0.105 设备的一条 `edge-run` 回报把**自己名下**那条 running 部署收口成终态 | `pytest tests/test_edge_run_closes_deployment.py` | ok=true ⇒ success、ok=false ⇒ failed 且带设备原话；越权点名／还没 run／后到的第二条／别的 kind 四种都不许动那一行；两条遥测事件都留档；线协议名与服务端常量必须相等 | PASS（常驻） |
 | G0.106 runtime 失踪那一档把串流会话与端口一起终结，且「写终态必配对终结」有尺子 | `pytest tests/test_reconcile_closes_streaming.py` | MISSING 档会话 `failed`＋两侧端口清空＋卡回池；ALIVE／UNKNOWN 两档不开火；复跑不重复入账；结构尺子在真文件读数 `[]`，并对「漏配对／上层在前／调用排在写之后」三种合成形状分别点名 2／0／1 | PASS（常驻） |
@@ -121,6 +121,7 @@
 | G0.110 池子的余量与分配器吃同一条可见性证据 | `pytest tests/test_warmpool_capacity_visibility.py` | 唯一够用的卡挂在失联节点 ⇒ `created=0` 且零行 workspace；节点重报后同一格照开；两台都在线时不开火；AST 钉“借同一条谓词、函数体内无 `GpuHost`”，并有“重抄一份／根本没有规则”两态反证 | PASS（常驻） |
 | G0.111 缺席降级要能归位，人工判决不跟着归位 | `pytest tests/test_gpu_drain_provenance.py` | 少报⇒`draining`、重报⇒`available` 且真能分配出去；`drained`／`unhealthy`／`allocated` 三档在同样的两次重报里一动不动；占用中的卡 `/drain` 回 409 并点名状态、被拒的请求不改任何东西；provenance 登记册钉“DRAINED 只有 `mark_drained`、DRAINING 只有 `sync_host`”，归位必须排在 `status == DRAINING` 谓词之下（配没守卫／守卫错判决／别的枚举三态反证） | PASS（常驻） |
 | G0.112 管理员的下架意图独立成列，占用中的卡也判得动 | `pytest tests/test_gpu_drain_provenance.py` | 占用中 `/drain` 回 204 且 `GET /api/gpus` 读得到 `drain_requested_at`、`status` 仍是 allocated；释放后落成 drained 而非 available；提前撤意图则回到 available；`/undrain` 不抬 `draining`／`unhealthy`；意图列的写入者只能是 `mark_drained`＋`mark_undrained`（合成反证：自动路径归位时顺手置 NULL 必须被点名） | PASS（常驻） |
+| G0.113 占用、健康、下架意图三件事各有一列，互不覆盖 | `pytest tests/test_gpu_drain_provenance.py` | 占用中判 `/unhealthy` ⇒ `status` 仍是 allocated 且 `health` 是 unhealthy；释放后可用性回 available 而判决仍在，且这张卡真的派不出去；缺席与重报只动可见性轴；`/undrain` 与 `/healthy` 各只解自己那一维；`health` 的写入者只能是 `mark_unhealthy`／`mark_healthy`（合成反证：`sync_host` 归位时顺手清健康必须被点名） | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

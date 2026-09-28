@@ -34,7 +34,7 @@
 | User / Organization / Role | user / admin / org_admin / instructor / student（课程模块已实现并接线） |
 | Template | slug/version/image/gpu_requirement/entrypoints/outputs/streaming/healthcheck/metadata |
 | Workspace | 生命周期 CREATED→QUEUED→PROVISIONING→RUNNING→STOPPING→STOPPED/FAILED/DELETED |
-| GpuHost / Gpu | inventory：AVAILABLE/ALLOCATED/UNHEALTHY/DRAINING/DRAINED（后两个分别是机器缺席判决与人工下架判决，只有前者会自动归位；管理员的下架意图另有证据列 `drain_requested_at`，占用中也能提出，N-125） |
+| GpuHost / Gpu | inventory：AVAILABLE/ALLOCATED/DRAINING/DRAINED（后两个分别是机器缺席判决与人工下架判决，只有前者会自动归位；管理员的下架意图另有证据列 `drain_requested_at`，占用中也能提出，N-125）；健康另有 `gpus.health` 一列，不再是状态值（N-126） |
 | CreditLedger | 不可变账本：RECHARGE/USAGE/PROMOTION/REFUND/ADJUSTMENT |
 | Course / Lab / Assignment / Submission | 高校场景 |
 | DeploymentRecord / Artifact | checkpoint→artifact→checksum→deploy→verify→run |

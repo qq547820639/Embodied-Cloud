@@ -83,7 +83,7 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
   行锁语义只在 `make test-pg` 档验证——SQLite 方言把 `FOR UPDATE` 整个丢弃（ADR 0005）。
 - 分配顺序：AVAILABLE（显存满足模板需求，含 16MiB 厂商预留容差）→ ALLOCATED；
   释放：stop/destroy → AVAILABLE。
-- UNHEALTHY／DRAINED 不参与调度也不自动归位；DRAINING（缺席降级）不参与调度，但重新被上报到即回 AVAILABLE。两个 drain 是两个判决：`DRAINED` 只由管理员写（`POST /api/gpus/{id}/drain`）、只有管理员能解除，`DRAINING` 只由 `sync_host` 的缺席降级写（N-123）。
+- 不参与调度的三种情况各一列（ADR 0010）：健康判决（`gpus.health`）、人工下架（`DRAINED`＋`drain_requested_at`）、缺席降级（`DRAINING`）；DRAINING（缺席降级）不参与调度，但重新被上报到即回 AVAILABLE。两个 drain 是两个判决：`DRAINED` 只由管理员写（`POST /api/gpus/{id}/drain`）、只有管理员能解除，`DRAINING` 只由 `sync_host` 的缺席降级写（N-123）。
 - **分配还要求"这张卡所在的节点今天看得见"**（N-112，闭 N-111）：候选语句带一个
   `EXISTS (gpu_hosts WHERE id = gpus.host_id AND status = 'online')`，"还在等锁的那把尺"
   （`still_waiting`）吃同一个谓词——两者不一致时，一张失联节点上的卡会被数进"正被别人
@@ -91,7 +91,7 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
   `/drain`、`/unhealthy` 的判决有自己的生命周期，而"节点暂时失联"必须可逆——这一对张力
   在 N-123 用两个值解开：`DRAINING` 专指缺席（重报即归位），`DRAINED` 专指人工下架（重报不动它）。N-125 又把「管理员要求下架」这件**意图**从状态列里挪进 `gpus.drain_requested_at`：占用中的卡也能被要求下架（状态仍是 allocated），释放时按意图落成 drained，`/undrain` 是唯一的解除路径。
   节点回到 online 的下一趟分配自然看得到那张卡；状态列只在"机器判决"这一档被自动改写，人工判决只有管理员能解除。
-  同一条谓词的第三个消费者是 warm pool 的补位闸门（N-122）：余量与挑卡必须吃同一份证据，否则池子会为一张开不到的卡开出预热格。
+  同一批谓词（`host_is_visible()` 与 N-126 加的 `health_is_usable()`）的消费者是 warm pool 的补位闸门（N-122）：余量与挑卡必须吃同一份证据，否则池子会为一张开不到的卡开出预热格。
 - **inventory 是周期重报的，不是开机一次的**（N-110）：worker 周期表每 120 tick 重跑
   同一个 `bootstrap_gpu_inventory`，于是"节点少报一张卡 → 那张卡 DRAINING"这段收敛在
   进程存活期内就有驱动者；`sync_host` 每次成功都给 `gpu_hosts.last_synced_at` 盖章，

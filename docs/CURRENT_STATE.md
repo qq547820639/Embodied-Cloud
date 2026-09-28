@@ -15,9 +15,9 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 1005 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 1007 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
-| Migration | PASS（clean DB empty→head **16 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
+| Migration | PASS（clean DB empty→head **17 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
 | Integration Docker | **PASS**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册；本轮 +3 例＝镜像层清单的接线与分流判据） |
 | Integration Browser | **PASS**（Playwright 驱动系统 Chrome 真 DOM） |
@@ -135,6 +135,7 @@
 | N-122 | **池子的余量与分配器吃的不是同一条证据**（闭 N-114 的 (a)）：`_free_capacities_gib`（`app/services/warmpool.py:194`）只按 `gpus.status` 数卡，N-112 之后 `allocate` 还要求节点今天可见 ⇒ 池子为一张开不到的卡开出预热格，worker 占不到卡、收割 FAILED、DESTROY、冷却，一整个预热周期白烧。改法：借同一条 `host_is_visible()`，不手写第二份；顺带更正「host.status 只有一处读者」那句假话（三处）。 | 改前复算：旧谓词 `[8,24]` 开格／新谓词 `[8]` skipped，失联节点那张卡未被改写。判据 `tests/test_warmpool_capacity_visibility.py` 5 支（决定档＋恢复档＋健康对照＋AST 钉同一谓词＋该尺三态反证）；三臂 D1 4 红／D2 只 2 支结构档红（等价拷贝）／D3 8 红（含 N-112 那 5 支重跑）。未证实：worker 侧失败代价、真机节点失联。 |
 | N-123 | **一个状态值承载两种判决**（闭 N-114 的 (b)）：`DRAINING` 既是「这次上报里没有这张卡」又是「管理员摘出去的」，于是 `sync_host` 不敢实现归位（一次抖动＝永久掉容量），`mark_draining` 的前置又让管理员对已降级的卡静默 no-op＋204。改法借 SLURM 的 DRAIN／DOWN 之分：新增 `DRAINED` 给人工判决，`DRAINING` 只表示缺席且重报即归位；`/drain` 前置不满足改回 409；release／recover 的三处批量 UPDATE 用 `case` 只把占用的卡还池，人工判决只清绑定。`gpus.status` 无 CHECK 约束⇒不迁移。 | 判据 `tests/test_gpu_drain_provenance.py` 16 支（行为八极＋HTTP 两极＋归位守卫的 AST 尺＋provenance 登记册＋四态合成反证＋前端以枚举为分母）；电池 E1 5 红／E2 4 红／E3 1 红（E4／E5 待第二轮）；`release_column_drift` 那把配对尺分母仍 3（写 `case` 不拆语句的理由）。自伤留痕：电池第一版的还原锚少了行首换行，把构造参数行也换掉了 ⇒ 后两臂读出 48 条收集错误，第二版加锚点普查与中止规则。未证实：前端未浏览器核、真机重报、PG 与 SQLite 的 `case` 差异无专判。 |
 | N-125 | **一列两主**（闭 N-124）：`gpus.status` 既答「占用」又答「管理员摘走」，所以 N-123 只能让 `/drain` 对占用中的卡回 409。改法按 K8s `spec.unschedulable`／`.status` 分栏：新增证据列 `gpus.drain_requested_at`（alembic 第 16 节，nullable、无 server default），`/drain` 占用中也判得动（当场记意图），`release`／recover 的 `case` 多一条 WHEN 把带意图的占用卡落成 drained，新增 `POST /api/gpus/{id}/undrain` 作唯一解除路径。 | 判据 `tests/test_gpu_drain_provenance.py` 21 支（本轮 +5：意图兑现、提前撤回、undrain 只撤自己的判决、HTTP 意图极、意图列写入者登记册）；五臂 F1 3 红／F2 2 红／F3 1 红／F4 1 红（只有结构档红＝结构档的存在理由）／F5 0 红。连带：迁移数 15→16、openapi 工件重生成、`/unhealthy` 覆盖占用登记为 N-126，并更正我上轮注释里把那行 `gpu_allocated` 指标说成 stuck 保护的假话。未证实：两方言该列的语义差异无专判、前端不显示「在用但已摘走」、存量库未 upgrade。 |
+| N-126 | **健康挤在状态列里**（ADR 0010 落地）：`mark_unhealthy` 没有状态前置，对一张在用的卡点 `/unhealthy` 会把 `status` 从 allocated 改成 unhealthy ⇒ 占用事实在 `gpus` 一侧消失（`gpu_allocated` 数的就是它），而格上归属还在——两张表打脸，没有判据会红。改法是三维度各一列：`status` 只答调度可用性（枚举里删掉 `UNHEALTHY`）、`gpus.health` 独立（迁移第 17 节，nullable 不回填）、下架意图仍是 `drain_requested_at`；`health_is_usable()` 与 `host_is_visible()` 同规矩只此一份，吃进候选筛选、等锁计数、池子余量与测试夹具四处；新增 `POST /api/gpus/{id}/healthy` 作唯一解除路径。 | 判据 `tests/test_gpu_drain_provenance.py` 24 支（+2：`health_writers` 登记册、前端以 `GpuHealth` 为分母），四臂 G1 7 红／G2 2 红／G3 2 红／G4 0 红，还原后与开局快照一致。连带重指 `tests/test_gpu_admin.py`／`tests/test_gpu_allocation_visibility.py`／`tests/test_gpu_host_liveness.py`／`tests/gpu_pool.py`；门禁 G0.113、链长 16→17、openapi 重生成。新登记 N-127（health 没有观察来源）。未证实：真机故障发现链路、两方言 NULL 语义无专判、`downgrade` 的一处已知不保真。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）

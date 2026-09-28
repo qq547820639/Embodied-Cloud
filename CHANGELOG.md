@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 1005 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 1007 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -1495,6 +1495,17 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 登记项 N-124 随本轮划销；新登记 N-126：`/unhealthy` 仍然**直接覆盖**占用事实（`mark_unhealthy` 没有状态前置），一张在用的卡被判 unhealthy 之后，`gpus.status` 不再能说「这张卡在用」而 `workspaces.gpu_id` 还指着它——与 N-124 是同一味药没吃完的那一半。
 - 未证实：新迁移在 PostgreSQL 上的 `batch_alter_table` 路径由本轮认证的 PG 档跑到（`tests/conftest.py:84` 每条用例走完整迁移链），但**没有**一条判据专门比 SQLite/PG 两种方言在这一列上的语义差异；前端仍不显示「在用但已被摘走」这种形状（`GPU_STATUS_CN` 按 status 上色，意图列没进表格里）；存量库（本机 `embodiedcloud.db`）没跑过 `alembic upgrade head`，本轮只在一次性库里验过 up/down/up。
 
+### 健康不再挤在状态列里：占用与判决第一次能同时为真（N-126，ADR 0010 落地）
+- 缺陷（一列两主，N-124 那味药没吃完的一半）：`gpus.status` 既回答「这张卡被占了没有」又回答「这张卡被判定不健康没有」。`mark_unhealthy` 没有状态前置，于是管理员对一张正在被用的卡点 `POST /api/gpus/{gpu_id}/unhealthy`，`status` 就从 `allocated` 变成 `unhealthy`——而 `status == allocated` 是这张卡在 `gpus` 一侧唯一的占用载体（对外的 `gpu_allocated` 指标就数它，`app/main.py:34-37`），`gpus.workspace_id` 与 `workspaces.gpu_id` 却都还在原地。两张表互相打脸，且**没有一条判据会红**：既有判据只钉「unhealthy 不许被自动路径抬回 available」那一半。
+- 形状由 `docs/adr/0010-gpu-status-is-three-dimensions.md` 在上一批定下（候选：组合值／独立列／第三方状态机库 `transitions` 0.9.3，六维对比在 ADR §2），本节是它的实现。`status` 从此只答调度可用性：`app/models.py:55-58` 新增 `GpuHealth`，`app/models.py:358` 新增 nullable 证据列 `gpus.health`，`GpuStatus` 里的 `UNHEALTHY` **删除**——留着就是一个枚举不再拥有、却仍能被写进去的值。迁移 `alembic/versions/391540c0fcb4_gpu_health_column.py`（第 17 节）：列 nullable 而不回填 `'healthy'`（回填＝宣称管理员判过每一张在册的卡，NULL 才是「从没人判过」），同时把存量 `status='unhealthy'` 翻译成 `status='drained'`＋`health='unhealthy'`，`downgrade` 以 `health` 为准反向翻译。
+- 谓词只许有一份（N-122 立的规矩）：`health_is_usable()` 住在 `app/services/scheduler.py:97`，`allocate` 的候选在 `app/services/scheduler.py:238`、`still_waiting` 的等锁计数在 `:288`、warm pool 的余量在 `app/services/warmpool.py:213`、连测试夹具数空闲卡也吃它（`tests/gpu_pool.py:106`）。少一条就会出现「夹具宣布净额够而分配器拒发」——N-85 量的正是那一格。
+- 人的判决要有人的解除路径：新增 `POST /api/gpus/{gpu_id}/healthy`（`app/routers/gpus.py:44`，admin，204）把 `health` 交回 NULL；它与 `/undrain` 同形，只清自己那一维，不替 `draining`／`drained` 改口。前端 `app/static/app.js:33` 加 `GPU_HEALTH_CN`、`:1249` 在状态徽章旁边渲染健康徽章——否则这张卡在表上只写着「可用」，等于把刚拆出来那一维又藏回去。
+- 判据 24 支（`tests/test_gpu_drain_provenance.py`，本轮 +2）。行为面：占用中判健康 ⇒ `status` 仍是 allocated 且 `health` 是 unhealthy，`release` 之后可用性回 available 而判决仍在，且这张卡**真的派不出去**；缺席与重报只动可见性轴，健康轴全程不动；`/undrain` 不抬健康判决。结构面：状态登记册去掉 `UNHEALTHY` 一项，新增 `health_writers` 登记册（`UNHEALTHY` 只由 `mark_unhealthy`、`NULL` 只由 `mark_healthy`），配「`sync_host` 写健康必须被点名」的合成反证；前端那一档分母取自 `GpuHealth` 自己。连带重指四处既有档位（`tests/test_gpu_admin.py` 的三维度流转与两条解除路径、`tests/test_gpu_allocation_visibility.py` 的两轴同读、`tests/test_gpu_host_liveness.py` 的三张缺席卡、`tests/gpu_pool.py` 的数空闲卡）。
+- 四臂电池（`/tmp/n126-battery.py`，还原一律写回注入前读到的原文，跑完与开局 `git diff` 快照逐字节相同）：G1 健康判决退回覆盖 `status` ⇒ 7 红（含 G0.103 与 G0.109 那两支既有判据，同文件控制随本轮重跑，红才是应该）；G2 分配器与等锁计数不吃健康谓词 ⇒ 2 红；G3 自动路径顺手清健康判决 ⇒ 2 红（只有登记册与那一档行为红，别的看不见）；G4 只改注释 ⇒ 0 红。
+- 门禁 G0.113；§2 新行 N-126；G0.103 那行的「不许改写 UNHEALTHY」按新词汇更正为「人工判决（`DRAINED`）不被缺席降级覆盖，健康列一律不动」；CURRENT_STATE §1 迁移链长 16→17（这条由常驻用例 `test_the_status_page_agrees_with_the_committed_report` 机核）；`docs/ARCHITECTURE.md`／`docs/PRODUCT_SPEC.md`／`docs/API.md`／`docs/OPERATIONS.md` 四处把健康从状态词汇里摘出来；`docs/openapi.json` 由 `make api-docs` 重生成（`GpuOut` 多一列＋新路径）。新登记 N-127：`gpus.health` 今天**只有人在写**，provider 与设备侧没有任何观察来源——拆出这一列只是把判决放对了格子，没有凭空造出「谁来发现一张卡坏了」这条链路。
+- 未证实：真机硬件故障的发现链路（本机没有 NVIDIA 设备，provider 只会报同样的 8 张卡）；第 17 节在真 PG 上的整链执行由本轮认证的 `pg_integration` 档跑（`tests/conftest.py` 每条 PG 用例走完整迁移链），但没有一条判据专门比两方言在 `health != unhealthy` 上的 NULL 语义（`or_` 那一条在两侧都实测过谓词形状，方言差异本身未单独钉）；`gpu_allocated` 指标没有「按健康单独上报」的 gauge，本轮不做；`downgrade` 的一处已知不保真：upgrade 之后新写入的「真 drain ＋ 又被判不健康」的卡，在 `downgrade -1` 时会按 `health='unhealthy'` 抬回 `status='unhealthy'`——`drained` 与「不健康的存量判决」在 `status` 上同形，是 ADR 0010 §3 让 `drained` 承接存量判决的代价。
+
+
 
 
 ### 记账脚本在仓内留一个 tmp/，就把文档门顶红了（N-118）
@@ -1555,7 +1566,9 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 
 - `N-124`：**占用中的卡挂不上人工判决——「占用」与「判决」被挤在同一列**。`mark_unhealthy`（`app/services/scheduler.py:366`）没有状态前置，可以直接把一张 allocated 的卡判成 unhealthy，而 `gpus.status == allocated` 正是本仓的占用权威（`app/main.py:36` 的 stuck 保护与一批常驻断言读它）；N-82 那一族「两张表互相打脸」在这张表内部还有一份。N-123 因此把 `/drain` 限定为只作用于池子里的卡（占用中回 409）。—— **N-125 已闭本项**：意图单独立列 `gpus.drain_requested_at`（alembic 第 16 节），`/drain` 占用中也判得动、`release` 时兑现成 drained，`/undrain` 是唯一解除路径；本项剩下的那一半另记 N-126。没有把同样的覆盖动作带给 drained。要同时表达“在用”与“已被摘走”，得把意图单独立一列（K8s 的 `spec.unschedulable` 与 `.status` 分工）：新迁移＋`GpuOut`＋`docs/openapi.json`＋模型↔迁移对账门都会跟着动。先要拍的是“谁有权把一张在用的卡从池子里摘走，以及摘走之后那笔 GPU 秒还计不计费”。
 
-- `N-126`：**`/unhealthy` 仍然直接覆盖占用事实**——N-124 那味药没吃完的一半。`mark_unhealthy`（`app/services/scheduler.py:375-380`）没有状态前置，一张正在被用的卡被判定不健康之后，`gpus.status` 就不再表示「这张卡在用」（对外的 `gpu_allocated` 指标少一张，`app/main.py:34-37`），而那一格的 `workspaces.gpu_id` 仍指着它；N-125 给 drain 立了意图列，健康判决却还是走覆盖这条路。要拍的是：unhealthy 应该同样变成一列（`health` 与 `occupancy` 与 `admin intent` 三分），还是像 drain 那样要求先结束占用。两种都要动 `GpuOut` 与前端表格。**形状已定（ADR 0010，`docs/adr/0010-gpu-status-is-three-dimensions.md`，2026-09-28）**：选「`health` 独立成列」那一支，`status` 从此只答调度可用性，并配一条 admin 的 `POST /api/gpus/{gpu_id}/healthy` 解除路径；实现与判据按该 ADR §3／§4 做（含迁移第 17 节）。顺带一条本行的自证：这一项 20:13 落账时写的 `app/services/scheduler.py:366` 在我自己改完注释后已漂到 375——正是 N-120 未闭的那一半，指针的「行还在、说的不是它」在这里当场复现一次。
+- `N-126`：**`/unhealthy` 仍然直接覆盖占用事实**——N-124 那味药没吃完的一半。`mark_unhealthy`（`app/services/scheduler.py:375-380`）没有状态前置，一张正在被用的卡被判定不健康之后，`gpus.status` 就不再表示「这张卡在用」（对外的 `gpu_allocated` 指标少一张，`app/main.py:34-37`），而那一格的 `workspaces.gpu_id` 仍指着它；N-125 给 drain 立了意图列，健康判决却还是走覆盖这条路。~~要拍的是：unhealthy 应该同样变成一列（`health` 与 `occupancy` 与 `admin intent` 三分），还是像 drain 那样要求先结束占用。两种都要动 `GpuOut` 与前端表格。~~ —— **本项已由 N-126 闭合**：选「`health` 独立成列」那一支（`alembic/versions/391540c0fcb4_gpu_health_column.py` 第 17 节），`mark_unhealthy` 从此只写 `gpus.health`，并配 `POST /api/gpus/{gpu_id}/healthy` 作解除路径；读数见上面 N-126 一节。**形状已定（ADR 0010，`docs/adr/0010-gpu-status-is-three-dimensions.md`，2026-09-28）**：选「`health` 独立成列」那一支，`status` 从此只答调度可用性，并配一条 admin 的 `POST /api/gpus/{gpu_id}/healthy` 解除路径；实现与判据按该 ADR §3／§4 做（含迁移第 17 节）。顺带一条本行的自证：这一项 20:13 落账时写的 `app/services/scheduler.py:366` 在我自己改完注释后已漂到 375——正是 N-120 未闭的那一半，指针的「行还在、说的不是它」在这里当场复现一次。
+
+- `N-127`：**`gpus.health` 只有人在写，没有任何观察来源**。ADR 0010 把判决放对了格子，但「谁发现一张卡坏了」这条链路仍然不存在：mock provider 永远报同样的 8 张卡，`sync_host` 只带 model/memory/index，edge agent 的遥测里也没有温度／ECC 一类健康信号。于是今天的运维现实是：卡坏了没人知道，只有人点了 `/unhealthy` 才算数——而 `draining` 那一档已经证明「有观察、有归位」是可以做的（`health_is_usable()` 与它同层）。要收口得先回答两件事：观察从哪来（provider 上报？设备遥测新增字段？），以及一次坏是否要像缺席那样自动恢复（若自动恢复，就必须再分一档「人工确认过坏了」）。
 
 - `N-115`：**跑完却再也报不上来的部署，今天没有人负责**。N-113 的收口是事件驱动的：设备 POST 一条 `edge-run` 才改判。于是三种形状都会一直停在 `running`——设备跑完即被掐（N-109 的 `reported=false` 档）、设备掉了而部署没重下、以及人工在库外把部署推到 running。要么给 `running` 配一个时效判决，要么在写入侧要求设备在 run 前重新登记；两条都要先回答“谁有权把一条运行判成超时失败”。另外 `DeploymentRecord.updated_at` 带 `onupdate`，它是“最后一次被改动”而不是“最后一次被看见”，不能直接当证据列用——这一格与 N-110 的差别正在这里，故登记不收口。
 
