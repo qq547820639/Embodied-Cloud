@@ -796,6 +796,12 @@ class WorkspaceOrchestrator:
             elif state == RuntimeState.ALIVE:
                 stats["kept"] += 1  # adopt：继续运行
             elif state == RuntimeState.MISSING:
+                # runtime 自己没了 ⇒ 这一格的串流会话与端口也必须一起终结。STOP 与
+                # DESTROY 两档本来就调它，只有这条"没人叫过 stop"的路劲漏了：结果是
+                # workspaces 说 FAILED、streaming_sessions 还说 connected，
+                # `GET /api/streaming/workspace/{id}` 与前端那行端口成了假活（N-116）。
+                # 该函数只动库（不叫 provider）、无活动会话时返回 0，重复调用同结果。
+                self.streaming.terminate_for_workspace(db, w.id)
                 self._settle_running_segment(db, w)
                 self.scheduler.release(db, w.id)
                 w.status = WorkspaceStatus.FAILED.value
