@@ -357,3 +357,9 @@ mock 驱动装载并跑一次 → 以 `kind=edge-run` 回报遥测。任一步�
 
 真机驱动接入点是 `edge_agent/drivers.py:build_driver`，目前只有 `mock`。
 
+那一条 `edge-run` 遥测不只是给运维看的：控制面收到它就把自己名下那条 `running` 的部署
+收口成 `success`/`failed`（`DeploymentService.complete_from_agent_report`，N-113）。所以
+"部署莫名变成 success"的第一因是**设备报的**，去 `GET /api/edge/agents/{id}/telemetry`
+找那条 `edge-run` 的 `ok`/`detail`；反过来，一条停在 `running` 的部署意味着设备还没报或
+报丢了（N-109 那一档），不是控制面卡住。
+

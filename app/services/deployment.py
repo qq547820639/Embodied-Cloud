@@ -385,6 +385,51 @@ class DeploymentService:
         db.commit()
         return deployment
 
+    def complete_from_agent_report(
+        self, db: Session, agent: EdgeAgent, report: dict | None
+    ) -> DeploymentRecord | None:
+        """ADR 0007 承诺的那一半：控制面按设备回传的 `edge-run` 收口 running → 终态。
+
+        此前这条链只走了一半——设备把运行结果写成遥测，控制面写进 `telemetry_events`
+        之后就没有然后了：`RUNNING` 的唯一出口是用户手工 `POST /deployments/{id}/complete`。
+        也就是说一条真跑完的部署会一直挂着，而 ADR 里那句"控制面据此收口"没有实现者。
+
+        授权看**行**，不看 payload：条件 UPDATE 的 WHERE 同时钉着
+        `id == report["deployment_id"]`、`status == running`、`edge_agent_id == agent.id`。
+        - 越权（这条部署不是你的）：rowcount 0，那一行原样不动；
+        - 重复上报：第二条同样 rowcount 0 —— 终态一旦写下，后到的读数改不动它
+          （遥测事件本身仍然全部留档，`GET /api/edge/agents/{id}/telemetry` 看得见）；
+        - 状态不对（还没 run 就报结果）：不动，不许凭空判成功。
+
+        信任边界如实写明：`ok` 与 `detail` 是设备自报的，控制面无法在本机之外复核
+        机器人是否真的动了——这是 ADR 0007 选择"由设备回报收口"时就已经接受的代价，
+        设备此时能做的最坏事情是把**自己名下**的部署判成 success/failed，
+        碰不到别人的行（WHERE 里的归属列），也改不了已成的终态。
+        """
+        deployment_id = str((report or {}).get("deployment_id") or "")
+        if not deployment_id:
+            return None
+        success = bool((report or {}).get("ok"))
+        detail = str((report or {}).get("detail") or "")
+        result = db.execute(
+            update(DeploymentRecord)
+            .where(
+                DeploymentRecord.id == deployment_id,
+                DeploymentRecord.status == DeploymentStatus.RUNNING.value,
+                DeploymentRecord.edge_agent_id == agent.id,
+            )
+            .values(
+                status=DeploymentStatus.SUCCESS.value if success else DeploymentStatus.FAILED.value,
+                error_message=None if success else (detail or "reported failed"),
+            )
+            # SQL 层比较，避开 ORM 的 in-Python evaluator（同 begin_agent_download）
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        if int(cast("CursorResult[Any]", result).rowcount or 0) != 1:
+            return None
+        return db.get(DeploymentRecord, deployment_id)
+
     @staticmethod
     def _fail(db: Session, deployment: DeploymentRecord, message: str) -> DeploymentRecord:
         deployment.status = DeploymentStatus.FAILED.value

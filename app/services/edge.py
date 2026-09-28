@@ -15,6 +15,12 @@ from ..models import AgentStatus, EdgeAgent, Role, TelemetryEvent, User
 from ..security import generate_token, hash_token
 from ..utils import utcnow
 
+#: 设备回报"这一格跑完了"的那类遥测的线协议名。
+#: 与控制面包 `edge_agent/agent.py` 里同名常量是一对**跨包**重复——设备包刻意不 import
+#: 服务端（`edge_agent/drivers.py` 的模块 docstring 写了理由），所以相等关系由常驻判据
+#: 钉住（tests/test_edge_run_closes_deployment.py），而不是靠共享模块。
+RUN_TELEMETRY_KIND = "edge-run"
+
 
 class EdgeService:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from ..deps import DB, CurrentUser, deployment_service, edge_service
 from ..models import EdgeAgent
 from ..schemas import DeploymentOut, EdgeAgentOut, EdgeAgentRegisterIn, EdgeHeartbeatIn, TelemetryOut
-from ..services.edge import get_agent_from_header
+from ..services.edge import RUN_TELEMETRY_KIND, get_agent_from_header
 from .deployments import get_deployment_for_agent
 
 router = APIRouter(prefix="/edge", tags=["edge"])
@@ -55,7 +55,12 @@ def heartbeat(agent_id: str, payload: EdgeHeartbeatIn, db: DB, agent: Agent):
 def telemetry(agent_id: str, payload: TelemetryIn, db: DB, agent: Agent):
     if agent.id != agent_id:
         raise HTTPException(404, "agent not found")
-    return edge_service.report_telemetry(db, agent, payload.kind, payload.payload)
+    event = edge_service.report_telemetry(db, agent, payload.kind, payload.payload)
+    if payload.kind == RUN_TELEMETRY_KIND:
+        # ADR 0007 的后半句「控制面据此收口」的落点：收口的是**这张卡名下的那条部署**，
+        # 授权与幂等都在 `complete_from_agent_report` 的条件 UPDATE 里，不在这里判。
+        deployment_service.complete_from_agent_report(db, agent, payload.payload)
+    return event
 
 
 @router.get("/agents/{agent_id}/deployments/assigned", response_model=list[DeploymentOut])
