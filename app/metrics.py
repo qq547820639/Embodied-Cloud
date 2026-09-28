@@ -120,8 +120,16 @@ def record_warm_pool_claim_duration(template_id: str, seconds: float) -> None:
     WARM_POOL_CLAIM_SECONDS.labels(template_id=template_id).observe(seconds)
 
 
-def record_gpu_seconds(seconds: int) -> None:
-    GPU_SECONDS.inc(seconds)
+def record_gpu_seconds(delta_seconds: int) -> None:
+    """将账本次新增的 GPU 秒数累进 `gpu_seconds_total`（Counter）。
+
+    入参必须是**账本的增量**（`_settle_run_delta` 的第二个读数），不是"这一段值多少秒"，
+    也不是重算出来的 elapsed（N-75）：counter 不幂等，同一个运行段在 stop 重试或
+    reconcile 再来一趟时那个段值仍是同一个数，加两次就让暴露量与账本分叉。
+    增量恒 ≥ 0（账本 append-only）；真拿到负数时 `Counter.inc` 自己抛 ValueError，
+    这里不夹平也不改类型——宁可红，不静默。
+    """
+    GPU_SECONDS.inc(delta_seconds)
 
 
 def is_pool_runtime(workspace: Any) -> bool:

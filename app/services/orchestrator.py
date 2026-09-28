@@ -511,16 +511,37 @@ class WorkspaceOrchestrator:
     def _settle_run(self, db: Session, workspace: Workspace) -> int:
         """结算当前运行段，并把累计秒数重算为账本投影（幂等）；返回账本实际入账的秒数。
 
+        契约（N-74 的 C1 立的极，本轮不动）：返回的是**账本认下的那一段的秒数**，
+        不是重放时重算出来的 elapsed。要"账本这一次净新增了多少"的是指标那一侧，
+        它走 `_settle_run_delta`（N-75），不要拿本方法的返回值当它。
+        """
+        booked, _delta = self._settle_run_delta(db, workspace)
+        return booked
+
+    def _settle_run_delta(self, db: Session, workspace: Workspace) -> tuple[int, int]:
+        """结算当前运行段，返回 `(账本认下的这一段秒数, 账本本次净新增秒数)`。
+
         idempotency_key = usage:{workspace.id}:{started_at.isoformat()}，
         与 settle_workspace_run 内部一致：同一运行段重复结算不会重复扣款。
         累计列不靠 `+=` 维护（N-64）：幂等键只保证不重复扣款，重放时 `run_seconds`
         会按已经流逝的时间变得更大，`+=` 会让展示用量与配额门禁比账本多算一截。
-        取自账本的投影既能自愈这类历史膨胀值，也让返回值与扣款同源——下游
-        （`record_gpu_seconds` 指标、hold 转正）据此行动，不再拿账本没认过的数当事实。
-        无 started_at（尚未开始运行）时返回 0，且不产生账本/累计副作用。
+        取自账本的投影既能自愈这类历史膨胀值，也让返回值与扣款同源——hold 转正
+        据此行动（`capture_hold(usage_seconds=booked)`），不再拿账本没认过的数当事实。
+
+        第二个读数是为 N-75 加的：`GPU_SECONDS` 是 **Counter**，而"这一段值多少秒"在
+        重放时照样是 30（幂等键命中已有行，`entry.gpu_seconds` 读的就是那一行），
+        拿它去 `inc` 就把同一段计两次——实测 stop 重试与 reconcile_all 两路都是 60 vs 账本 30。
+        Counter 只能单调增，所以它该加的是**账本的增量**：结算前后各读一次
+        `settled_gpu_seconds`，`delta = after - before`。首结算 `delta == booked`；
+        重放时行已存在 ⇒ `after == before` ⇒ `delta == 0`，不新增也不重复新增。
+        账本是 append-only（本模块与 ledger 的教义：永不 UPDATE/DELETE 已入账行），
+        两次读数之间只有 `settle_workspace_run` 写，所以 `delta` 不会为负；
+        真为负就是账本被人动过，`Counter.inc` 会抛 ValueError 而不是被静默夹平（宁可红）。
+        无 started_at（尚未开始运行）时返回 `(0, 0)`，且不产生账本/累计副作用。
         """
         if not workspace.started_at:
-            return 0
+            return 0, 0
+        before = self.ledger.settled_gpu_seconds(db, workspace.id)
         started = workspace.started_at
         if started.tzinfo is None:
             started = started.replace(tzinfo=UTC)
@@ -530,7 +551,8 @@ class WorkspaceOrchestrator:
             db, workspace, run_seconds, workspace.started_at.isoformat()
         )
         # record() 内部提交，所以这里读到的 SUM 已含刚写入的那一行
-        workspace.accumulated_seconds = self.ledger.settled_gpu_seconds(db, workspace.id)
+        after = self.ledger.settled_gpu_seconds(db, workspace.id)
+        workspace.accumulated_seconds = after
         booked = (entry.gpu_seconds or 0) if entry is not None else 0
         # §18：hold 随结算转正。**无条件**收口：不足 1 秒的运行段不产生 usage 条目
         # （settle_workspace_run 对 0 秒返回 None），若只在有账本条目时 capture，
@@ -542,19 +564,20 @@ class WorkspaceOrchestrator:
                 usage_seconds=booked,
                 ledger_usage_key=entry.idempotency_key if entry is not None else None,
             )
-        return booked
+        return booked, after - before
 
     def _finalize_stop(self, db: Session, workspace: Workspace) -> None:
         """结算运行段 + 释放 GPU + STOPPED（幂等；reconcile 与 stop 共用）。"""
         now = utcnow()
         had_start = workspace.started_at is not None
-        booked = self._settle_run(db, workspace)
+        _booked, delta = self._settle_run_delta(db, workspace)
         if had_start:
-            # §25：实际计费 GPU 秒指标（仅存在运行段时记录；记的是账本认下的秒数，
-            # 不是本次重算出来的 elapsed）
+            # §25：实际计费 GPU 秒指标（仅存在运行段时记录）。记的是**账本本次净新增**
+            # （N-75），既不是重算出来的 elapsed，也不是"这一段值多少秒"——后者在重放时
+            # 仍然是那 30 秒，而 counter 不幂等，stop 重试/reconcile 再来一趟就翻倍。
             from ..metrics import record_gpu_seconds
 
-            record_gpu_seconds(booked)
+            record_gpu_seconds(delta)
         # 释放 GPU（stop 后释放；幂等）
         self.scheduler.release(db, workspace.id)
         workspace.status = WorkspaceStatus.STOPPED.value
