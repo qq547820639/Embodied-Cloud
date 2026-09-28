@@ -85,6 +85,13 @@ class OperationWorker:
     PERIODIC_WARM_POOL_EVERY = 30
     # §18：pending hold 回收扫描（比 lease 慢得多即可，泄漏窗口由 expires_at 界定）
     PERIODIC_HOLD_SWEEP_EVERY = 60
+    # §12/N-98：被释放准入拒下的格要有周期驱动者。跑在 worker 线程里，所以是**定向档**
+    # （只看队列没在做、且比阈值老的格，一趟最多 `RECONCILE_CELLS_PER_PASS` 格）：
+    # 每格一次 provider 往返（本机实测 docker inspect 中位 93.6 ms／p95 217 ms），
+    # 不设上界的话，一格慢就把同线程的用户操作一起拖住。
+    PERIODIC_RECONCILE_EVERY = 30
+    RECONCILE_STUCK_OLDER_THAN_SECONDS = 60
+    RECONCILE_CELLS_PER_PASS = 8
 
     def __init__(
         self,

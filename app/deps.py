@@ -79,6 +79,20 @@ def _warm_pool_maintain() -> None:
         warm_pool.maintain(db)
 
 
+def _reconcile_stuck_cells() -> dict[str, int]:
+    """§12 的周期驱动者（N-98）：把被释放准入拒下的老格重新拿回来收敛一次。
+
+    为什么必须由这里发起：`OperationType.RECONCILE` 早就有消费者（orchestrator.py 的
+    `reconcile_all()`），但全仓没有任何入队点，而 STOP 打满 `MAX_ATTEMPTS` 之后进程内
+    没人再试 —— 那一格就永久钉着一张卡。定向参数（阈值＋每趟上界）在 `OperationWorker`
+    的常量里，改口径只改一处。
+    """
+    return orchestrator.reconcile_all(
+        limit=OperationWorker.RECONCILE_CELLS_PER_PASS,
+        older_than_seconds=OperationWorker.RECONCILE_STUCK_OLDER_THAN_SECONDS,
+    )
+
+
 provider = make_provider()
 orchestrator = WorkspaceOrchestrator(
     SessionFactory,
@@ -100,6 +114,8 @@ worker = OperationWorker(
         (OperationWorker.PERIODIC_WARM_POOL_EVERY, _warm_pool_maintain),
         # §18：回收超时未 capture 的 pending hold（控制面在 hold 与结算之间崩溃的残留）
         (OperationWorker.PERIODIC_HOLD_SWEEP_EVERY, orchestrator.release_expired_holds),
+        # §12/N-98：被拒的老格由周期驱动者重新拿回来（定向档，见 `_reconcile_stuck_cells`）
+        (OperationWorker.PERIODIC_RECONCILE_EVERY, _reconcile_stuck_cells),
     ],
 )
 # §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用。

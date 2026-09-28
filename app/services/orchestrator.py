@@ -640,7 +640,12 @@ class WorkspaceOrchestrator:
     # ------------------------------------------------------------------
     # reconciliation（替代 crash_recovery 的"停掉所有 RUNNING"）
     # ------------------------------------------------------------------
-    def reconcile_all(self) -> dict[str, int]:
+    def reconcile_all(
+        self,
+        *,
+        limit: int | None = None,
+        older_than_seconds: int | None = None,
+    ) -> dict[str, int]:
         """把 DB 状态收敛到 runtime 事实。幂等：连续执行多次结果一致。
 
         规则：
@@ -658,14 +663,37 @@ class WorkspaceOrchestrator:
         - UNKNOWN（mock 无真实 runtime）→ 不动，避免误杀
         - 任意一格本轮抛错 → 记 `errors` 并继续看其余格（N-90：一格的故障
           不得把整趟收敛 abort 掉，否则后面的 runtime 这轮没人看）
+        - `older_than_seconds` / `limit` 都给定时走**定向档**（周期驱动者用，N-98 的代价那一条）：
+          只碰「比阈值老」且**队列没有在做**的格，且一趟最多看 `limit` 格。不抢队列的格既是
+          正确性要求（同一格两个判决源会互相退让），也是成本要求：每格一次 provider 往返
+          （本机实测 `docker inspect` 中位 93.6 ms／p95 217 ms），而这趟是在 worker 线程里跑的。
+          两个参数都不给＝今天的全量扫描，`run_crash_recovery` 与既有判据走的就是这一档。
+
+        `scanned` 是本轮真正看过的格数、`skipped` 是因定向档被让过的格数；全量档下
+        `skipped` 恒为 0（两格都在返回值里，形状不随档位变）。
         """
-        stats = {"adopted": 0, "failed": 0, "stopped": 0, "requeued": 0, "kept": 0, "errors": 0}
+        stats = {
+            "adopted": 0,
+            "failed": 0,
+            "stopped": 0,
+            "requeued": 0,
+            "kept": 0,
+            "errors": 0,
+            "scanned": 0,
+            "skipped": 0,
+        }
         with self.session_factory() as db:
             for w in list(db.scalars(select(Workspace).order_by(Workspace.created_at))):
                 if w.deleted_at is not None:
                     continue  # tombstone：不参与 reconcile
                 if w.status in {WorkspaceStatus.STOPPED.value, WorkspaceStatus.FAILED.value}:
                     continue
+                if not self._reconcile_cell_admitted(db, w, older_than_seconds):
+                    stats["skipped"] += 1
+                    continue
+                if limit is not None and stats["scanned"] >= limit:
+                    break  # 有界：一趟最多看 limit 格，其余留给下一趟（按 created_at 轮转）
+                stats["scanned"] += 1
                 try:
                     self._reconcile_one(db, w, stats)
                     # 当场落库：下一格炸掉时的 `db.rollback()` 不能把**已经收敛完的格子**
@@ -682,6 +710,28 @@ class WorkspaceOrchestrator:
             db.commit()
             recover_stuck_gpu_allocations(db)
         return stats
+
+    def _reconcile_cell_admitted(
+        self, db: Session, w: Workspace, older_than_seconds: int | None
+    ) -> bool:
+        """定向档的准入判定：队列没在这格上做事、且这格比阈值老。
+
+        `older_than_seconds=None`（全量档）一律准入，`reconcile_all` 的默认行为因此一位未变。
+        「队列没在做」既是正确性也是礼貌：一个 STOP operation 还在 pending/retrying 时，
+        它的格子由 worker 的 claim/lease/attempts 那条路负责；这里再插一脚就是两个判决源
+        互相回退。等 attempts 打满 `MAX_ATTEMPTS` 变成 FAILED 之后，活跃谓词不再为真，
+        这一档才接手——那正是 N-98 里「被拒的格没人再试」的那一站。
+        """
+        if older_than_seconds is None:
+            return True
+        if self._has_active_operation(db, w.id):
+            return False
+        # 时间基准取"最后一次真实状态变化"：STOPPING 格看 stopped_at（若有）否则 started_at，
+        # 再兜到 created_at（该列非空，所以这里不需要再兜 None）。
+        reference = w.stopped_at or w.started_at or w.created_at
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=UTC)
+        return (utcnow() - reference).total_seconds() >= older_than_seconds
 
     def _reconcile_one(self, db: Session, w: Workspace, stats: dict[str, int]) -> None:
         """一格 workspace 的收敛判决——`reconcile_all` 的循环体逐字搬进来。

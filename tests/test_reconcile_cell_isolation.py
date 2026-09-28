@@ -199,6 +199,8 @@ def test_a_healthy_pass_reports_no_errors_and_is_idempotent() -> None:
 
     assert first["errors"] == 0 and second["errors"] == 0, (first, second)
     assert first["failed"] == len(ids)
+    # 第二趟扫到 0 格：三格都已是终态，终态过滤在准入判定**之前**（N-99 给 `reconcile_all`
+    # 加的 scanned/skipped 两格因此在这里也一起被钉住——形状不随定向档变化）。
     assert second == {
         "adopted": 0,
         "failed": 0,
@@ -206,6 +208,8 @@ def test_a_healthy_pass_reports_no_errors_and_is_idempotent() -> None:
         "requeued": 0,
         "kept": 0,
         "errors": 0,
+        "scanned": 0,
+        "skipped": 0,
     }, second
     assert all(_status(i) == WorkspaceStatus.FAILED.value for i in ids)
 
