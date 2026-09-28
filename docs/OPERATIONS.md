@@ -42,7 +42,8 @@
 
 - 数据库：Alembic 迁移，SQLite 本地 / PostgreSQL 生产（**生产仅支持 PostgreSQL**：
   SQLite 方言丢弃 `FOR UPDATE`，行锁类并发保证拿不到；见 ADR 0005）。
-- 预授权（credit_holds）：`billing_hold_ttl_minutes`（默认 60）界定崩溃残留的泄漏窗口，
+- 预授权（credit_holds）：**出厂默认开启**（`billing_enforce_preauthorization=True`，N-83）。余额必须 ≥ `billing_minimum_launch_minutes × 60` 才能启动，并真的圈住这笔额度；演示/离线部署可显式设 `false` 回到旧行为。注册时向个人池发 `billing_signup_credits`（默认 300 ＝ 一次最低启动窗口）—— 生产没有别的充值入口，不发这笔就等于「谁开机都是白嫖」。运行中的透支仍由配额 monitor 兜（一个扫描间隔的宽限）。
+- 预授权超时回收：`billing_hold_ttl_minutes`（默认 60）界定崩溃残留的泄漏窗口，
   worker 每 60s 扫一次超时 pending 并退回；RUNNING 的 workspace 不回收，等结算转正。
 - 迁移新增列/约束忘了写：`tests/test_migrations.py` 的模型↔迁移对账（`compare_metadata`）
   会在默认档直接红，不需要等生产库暴露。
@@ -80,6 +81,14 @@
   kubeconfig，请用本项而不是改环境变量。
 
 ## 7. 验证档位与前置条件
+
+> 记账脚本的落盘纪律（N-87 踩过）：往 Markdown 表格插行时，**每支新行必须自带行尾换行**。
+> 把「带换行的上一行」换成「带换行的上一行 + 新行」而新行不带换行，会让新行与它下面那行
+> 粘成一行；`## ` 标题一旦被吞进行尾，表的后续行就跑到下一节去了。这类粘连骗得过所有
+> 「按行首前缀取数」的门禁与自检读数（`docs_row_order`／`docs_state_rows` 只会少看一支，
+> 不会判红），所以写后必须用 `tests/test_docs_table_rows.py` 里那两把尺复算：`row_seams`
+> （行内第二个行起点或被吞的标题）与 `unterminated_rows`（`| G` 开头却不以 `|` 收尾）。
+> 结构性重排还要证内容守恒：去掉全部换行后逐字节相等，或逐行多重集不变。
 
 `make test` 一次跑全部档位；单档可点名单跑。缺前置条件的档位是**整档 skip +
 在 `dist/VALIDATION_RUN.json` 记 PENDING(原因)**（提交面 `docs/VALIDATION.json` 按设计
@@ -181,6 +190,9 @@ kind 集群写进临时 KUBECONFIG（不合并 `~/.kube/config`）并在退出�
   而 `POST /api/workspaces` 会占住一张、用例结束不还。新加"批量建 workspace"的文件
   能把后面的 GPU 用例饿死（报错是 `No GPU available with >= 8 GB VRAM`，不是断言失败）。
   需要空闲卡的用例请显式达成前置条件：`tests/gpu_pool.py:ensure_free_gpus`。
+  **净额口径（N-85）**：光数 AVAILABLE 行会撒谎——队列里那些「已入队、还没被执行」的 provision op 每一个
+  都会吃掉一张卡，所以 `ensure_free_gpus` 判的是 `空闲数 − 未执行 provision op 数 ≥ need`，失败消息把两个数
+  都打出来。返回值仍是原始 AVAILABLE 数（调用点语义不变）。`tests/workspace_progress.py` 那种自己 tick 队列的写法，需要卡的用例请按「本文件会排掉几支 op」来算 need。
   **还有一条引信**：app 每次启动跑 `reconcile_all()`，其中"QUEUED/CREATED 且无 active operation
   ⇒ 重新入队 PROVISION"——于是任何模块留下的 CREATED 行，都会由**下一个**起 TestClient 的模块
   的 worker 去执行、去抢卡。留下行的模块必须自己收尾（删行 + 还卡），否则它看起来"已经绿过"
@@ -291,6 +303,8 @@ RFC 5737 的 TEST-NET-1 地址（丢包≠拒连）；`hang-later` 在 PATH 前�
 | k8s 控制面 | 20.03s | 40.04s | 20.04s | 20.04s |
 
 读法：黑洞下每档只付**一次**探测超时；两个半挂列合起来才说明「谁在等」——掐 `image ls` 时只有 k8s 控制面等，掐 `image inspect` 时 docker 档最贵（它逐个探测候选镜像）、postgres 与对象存储档各付一次超时。结论由对偶剧本的角色互换支撑，而不是单一剧本的观察。
+
+- 传输卡住与「取不到」是两张脸（N-91）：`docker pull` 卡在 registry 上时，**前置**（`gate_reason`）与**判据本体**都必须把这次调用交给 `tests/docker_probe.py` 那份异常吸收，再让 `_pull_failure_action` 按两条通道定档——通道慢 ⇒ `DOCKER_VALIDATION_PENDING` ＋两条读数，第二通道逐字节说没有 ⇒ 钉错的摘要必须红。运维读法：见到这一档 PENDING 就换一条出网通道再跑 `make control-image` 定案，别把它读成「配方没问题」，也别把一次 300s 超时读成代码失败。
 关键是这两条都不会再出现 N-46 修前的形状（整档 26 条 `failed on setup`）——最坏就是上面这一列秒数，
 然后干净跳过并留下一句可行动的原因。常驻判据用同一份实现的 `TIMEOUT=2` 快档
 （`pytest tests/test_hang_probe.py`），人手动跑 `make hang-probe` 用真实超时。

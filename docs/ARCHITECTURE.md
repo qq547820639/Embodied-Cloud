@@ -102,6 +102,8 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
   没有可观测的后果（表里 pack_host 只因为它顺手浪费了小卡才落后）。
 - 孤儿回收 `recover_stuck_gpu_allocations`：只释放「无 active operation 且非
   PROVISIONING/RUNNING/STOPPING」的 workspace 的绑定（防 PROVISIONING 竞态一卡双跑）。
+  放卡是**两张表一起改口**：同一事务、commit 之前把这一格的 `gpu_id/gpu_index/gpu_name`
+  一并清空，范围只由「本函数判定为孤儿」的记名集合决定 —— 受保护的格一列都不动（N-84）。
 - 第一阶段一 Workspace 一整块 GPU，不做 MIG。
 
 ## 4. Provider 抽象
@@ -177,7 +179,7 @@ TLS 网关。
 | `template_failure_total` | `template_id` | 按模板的启动失败次数（同上，不含池内补位） |
 | `workspace_running` | — | RUNNING 状态的 workspace 数 |
 | `gpu_allocated` | — | ALLOCATED 状态的卡数 |
-| `gpu_seconds_total` | — | 已计费的 GPU 秒 |
+| `gpu_seconds_total` | — | 已计费的 GPU 秒累计；抬的是**账本本次净新增**（`_settle_run_delta`），同一运行段重放不重复计（N-88） |
 | `stream_session_total` | `workspace_id` | 流媒体会话创建次数 |
 | `stream_failure_total` | `workspace_id` | 流媒体会话失败次数 |
 | `warm_pool_ready` | — | 池内 READY 格数 |

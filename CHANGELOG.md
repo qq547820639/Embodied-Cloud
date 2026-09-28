@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 742 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 800 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702→711→723→742，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79。
+- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -943,6 +943,258 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   而 `orchestrator.py` 的节点不一致检查正是读 `w.gpu_id` 找 reserved node 的。
 - 计数面 723→742，门禁 G0.79。
 
+### 启动预授权从「建好了但默认不走」改成出厂就走（N-83，闭登记项 N-72）
+- 缺陷不是算错钱，是**一条谁都没走的路径**：§18 把预授权整套建好了（`CreditHold` 圈额度、
+  结算转正、超时回收、`reserve_launch` 要求 `available >= minimum_launch_minutes × 60`），
+  而 `Settings.billing_enforce_preauthorization` 出厂是 `False` ⇒ 生产部署里这整套一行都不跑。
+  于是启动门禁只剩 `check_launch_eligible` 的 `available < 0`（`app/services/billing.py:69`），
+  零余额账户可以开机、钱在第一次结算时变负、只靠配额 monitor 兜。
+  全仓唯一的 RECHARGE 生产写点是 `app/routers/usage.py:68` 的充值端点（也没有「注册即发额度」这一步）
+  ⇒ 新账户可用额恒为 0，也就是**每个新账户**都能白跑一段真 GPU。
+- 选型门禁（这轮真做了外部核对，两份原文本机打开读过）：
+  ① Vast.ai 计费文档 —— 新算力要先有钱「Vast requires pre-payment of credits for GPU rentals」；
+  运行中的实例耗尽时被「Your instances are stopped automatically」，并明确允许一段宽限
+  「the system allows a short grace period where your balance may go negative」
+  （腾讯云那篇《Billing Modes》只讲按小时结算口径，余额/停机策略指向另一篇《Overdue Payments》，
+  故不引它作依据 —— 这一点如实记：未在该页读到超时/隔离时长）。
+  ② 上一轮为 N-70 打开过的 docker-py `docker/errors.py`（:93 把 404 单独收成
+  `NotFound(APIError)`）说明的是同一件事：一个默认值能让一套已建好的机制整体变哑。
+  ⇒ 择一定档：**启动前圈额度（把默认打开）＋ 运行中由 monitor 兜（已有那半，正好对上宽限）**。
+  候选二「只把 `available < 0` 改成 `<= 0`」被否：它仍留着一台空转的预授权机器（默认档照旧不走），
+  且实测同样要动一批夹具；候选三「只翻默认、不发体验额度」被否：实测新增红 40 支，
+  说明整个测试语料（以及 demo 流程）默认假设「注册即可跑」，不发额度就是把它变成"注册后什么都干不了"。
+- 改法：`billing_enforce_preauthorization` 出厂改 True（演示部署显式设 false 即回旧行为）；
+  新增 `billing_signup_credits = 300`（恰好＝`minimum_launch_minutes × 60`），
+  `POST /api/auth/register` 注册时向**个人**池记一笔 RECHARGE，幂等键 `signup:<user_id>`。
+  只进个人池是 N-71 的口径 —— 组织池只数 `user_id IS NULL` 的无主行，注册时把
+  `organization_id` 一起写上就等于复现 N-65 那个双主行。
+  `BillingPolicy` 构造默认**故意保持** False：几十个夹具直接 new 它，改它等于把一堆用例静默换档；
+  要钉的是"生产那一个实例走的是 Settings 的值"，用 identity 判据（§8 立的规矩）。
+- 判据 `tests/test_launch_pricing_default_is_enforced.py`（9 支）：出厂默认＝True（读 `FieldInfo.default`，
+  不是抄一个字符串）；`deps.billing.enforce_preauthorization is settings....`（恒等，专治"字段存在但
+  对象用自己的默认"）＋另两格同参数；构造默认仍是 opt-in 的另一极；注册后余额==体验额度且只有一笔；
+  带机构名注册时那一笔的 `organization_id` 必须为 None（前提用注册响应里的 `user.organization_id` 自证）；
+  把体验额度调成 0 ⇒ 启动被 402 拒且原因是预授权那一档（这一支是"默认开着"的行为证明，
+  光有字段值不算）；有额度照样 201（合规侧，防"默认开了＝谁都开不了"）；
+  结构判据按 AST 只认幂等键以 `signup:` 开头那次 `record(...)` 的归属参数，
+  配四种写法（写 org／漏 user／合规／充值那笔不开火）。
+- 连带改判（三处，全是消息/夹具面，不是判决面）：
+  `tests/test_billing_policy.py::test_preauthorization_disabled_by_default_allows_zero_balance`
+  → 更名 `..._off_in_an_explicit_deployment_allows_zero_balance`（它测的仍是"显式关档"那一极，
+  但"默认"两个字在 N-83 之后是假话）；`tests/test_api.py::test_standalone_user_usage_balance_matches_ledger`
+  从硬编码 0/500 改成"端点余额 == 账本之和"的相对式（用例主题本来就是两边对得上）；
+  `tests/test_isolation.py` 里「B 的账本必须是空表」改成「B 只看得到自己那一笔」
+  —— 隔离要断的是 A 的 1000 不出现在 B 账上，不是 B 一无所有。
+  `tests/test_courses.py::new_user` 用生产同一个 `CreditLedgerService.record` 补注册那一笔
+  （数额读 `settings.billing_signup_credits`，夹具里不写魔法数）。
+- 改前复算（`config.py` 与 `routers/auth.py` 一起换回 HEAD）：9 支里 4 开火，其中
+  `test_factory_default_enforces_preauthorization` 是干净的数值判决（`assert False is True`，
+  读的就是 `FieldInfo.default`）；另外 3 支报的是 `AttributeError: 'Settings' object has no
+  attribute 'billing_signup_credits'` —— 那是"字段在改前根本不存在"的证据，不是数值判决，
+  如实分开写。跑完从 `/tmp/n72_postfix` 还原，9 支复绿。
+- 邻面：17 个 launch 相关套件（125 例）改后只剩 1 支红，且它就是**改前基线里同一支**
+  `test_workspace_progress::test_wait_status_reaches_running_with_the_worker_thread_blocked`
+  —— 单独跑该文件 2 支全绿，红只出现在这个 17 文件子集里。当时把它记成『共库/GPU 种子池  累积占用、整轮认证里它是绿的』，**这句是错的**：随后那次整轮认证（collected 751）判红的就是这一支，读数 `provision:failed(attempts=3, error=No GPU available with >= 8 GB VRAM)`。真因由 N-85 量出来并闭合：该文件自己留了一支未执行的 provision op，正例的 tick 循环把它排掉并占走一张卡，而 `ensure_free_gpus(need=1)` 只看 AVAILABLE 卡数、看不见队列里那些还会去占卡的 op ⇒ 前置条件承诺的是 1 张、实际需要 2 张。另有 `test_config_docs`（.env.example 双向核对：新键必须写、
+  写了必须有读者）＋`test_validation_matrix`＋`test_worker` 等合跑 73 支 rc=0；
+  `ruff check app tests` All checks passed；`mypy app` Success（41 files）。
+- 未证实：真钱包/真充值渠道下的额度语义（本仓只有 demo 端点）；把 300 定成体验额度是**产品口径**，
+  我按「刚好等于一次最低启动窗口」定档，若运营要改成别的数，`billing_signup_credits` 一个键即可，
+  判据读的都是 Settings 值不写死数；402 之后是否需要引导文案（前端提示去充值）属 UI 面，本轮没做。
+- 计数面 742→751，门禁 G0.80。
+
+### 回收器强制放卡必须连格子上的绑定一起清（N-84，闭登记项 N-82）
+- 缺陷是**两张权威表互相打脸**：`recover_stuck_gpu_allocations` 删分配行、把 `Gpu` 置
+  AVAILABLE 并清 `workspace_id`，却从不碰 workspace 行上的 `gpu_id/gpu_index/gpu_name`。
+  而 `reconcile_all` 的 K8s 节点不一致判决正是拿 `w.gpu_id` 反查预留 host 的 ⇒ 卡被强制
+  放掉之后若转授他人，那一格拿去比的是**别人**的主机名。这一条是 N-81 那轮的对照表里
+  每行都打印 `workspace.gpu_id=kept` 量出来的，当时只登记（N-82）没顺手改。
+- 修法取「成对」而不是「补丁」：函数自己判定为孤儿并放掉的那几格，在**同一事务、commit
+  之前**用一条 `update(Workspace)` 把三列一起清空；受保护／占用的格不在 WHERE 里。
+  记名（`orphan_ids`）必须在 `db.delete` 之前——实例进了 DELETED 态读属性不再可靠；
+  两个放卡分支各自先 `select(Gpu.workspace_id)` 再记名，因为 UPDATE 之后无从回看。
+  清列放在 commit 之后会留下「卡已放、列还指着它」的窗口，崩在那儿就是新漂移。
+- 选型门禁跳过理由：单模块一致性修复、无新依赖、无新状态机，判据是仓内既有不变量
+  （「分配权威放卡 ⇒ 绑定成对清」），不需要外部候选对比。
+- 判据 `tests/test_recover_gpu_column_drift.py` 24 支：行为档按 workspace 状态逐档核
+  「放卡与清列成对」（FAILED／QUEUED／STOPPED 必须成对，PROVISIONING／RUNNING／带 active
+  operation 的格一列都不许动）；结构档按 AST 数 `release_sites`／`clear_sites`／
+  `unpaired_release_paths`，另钉「清列在 commit 之前」「范围只由记名集合决定」。
+  六支变异控制各自只翻一格：PRE-FIX→`unpaired=3`、少记名→`unpaired=1`、漏列→`cols=2`、
+  全局清→`scope=0`、名单混进保护集→`leak=1`、挪到 commit 之后→`before_commit=0`。
+- 我在主树亲手复算（子代理实现，判据进门禁档）：把 `app/services/scheduler.py` 换成
+  HEAD 那份 → `16 failed, 8 passed in 3.21s`；换回 → `24 passed in 3.16s`，
+  还原后 sha `acb4be6b…` 一致。邻居合跑（worker／gpu_pool_guard／scheduler／
+  stop_release_admission／k8s_node_truth／warmpool_claim_admission／provision_rollback／
+  gpu_single_authority／runtime_readiness／streaming_lifecycle 共 11 个文件）111 点全绿、
+  零 F 零 E；`ruff check app tests` All checks passed；`mypy app` Success（41 files）。
+- 一处**前提为假**由子代理读出来、我复核后如实登记：任务书里「`_fail`／`_finalize_stop`／
+  warm pool 已各自清自己那三列」只有 `_fail`（`orchestrator.py:386-388`）成立——
+  `_stop_cleanup` 的放行档（step 4）与 warm pool 认领撤销的放卡档
+  （`warmpool.py:400-405`）都不清列，主树 `orchestrator.py` 也只有 `:315-317` 一处清。
+  这两处产出的漂移**回收器看不见**（既无分配行、卡也不再指向那格），故本轮不变量的作用域
+  限定为「回收器自己放掉的格」，缺口登记为 N-86 而不是顺手改。
+- 未证实：ghost 分配（卡 ALLOCATED 但没有 workspace 行）仍会让卡钉在那儿，两条 UPDATE
+  都碰不到它——本轮未扩权，属未完成项而非机制限制；`reconcile_all` 端到端在真 provider
+  下把清列后的状态收敛没跑（真 K8s pod 侧属未做）。
+
+### 台账的表格面被自己的记账脚本粘坏了，补一把看得见接缝的尺（N-87）
+- 缺陷是我自己造出来的：多点锚点补丁把新行**不加换行**地拼在上一行之后
+  （`add(path, 带换行的整行, 带换行的整行 + NEW_ROW)`），`NEW_ROW` 于是与它下面那行物理上
+  粘成一行。`docs/ACCEPTANCE_GATES.md` 连着四轮这样落盘：G0.76（c680e12）吞掉了
+  `## G1 物理 GPU 主机预检（…）` 这行标题，G0.77／G0.79／G0.80 依次把 G0 表的后续行推到
+  标题之后、把 G0.79／G0.80 塞进下一张表的表头与分隔行之间——渲染出来的是一张错位表。
+- 第二层损失更隐蔽：**我用来复核面的读数本身瞎**。`[ln for ln in lines if
+  ln.startswith("| G0.")]` 这种前缀取数看不见被吞掉的东西，所以「GATES G0.80 行 1」
+  这类读数一路全绿而面是坏的；既有门禁同理——`docs_row_order`／`docs_state_rows`
+  都按行首前缀取数，粘连只让它们少看一支，不会让它们判红。
+- 修法：按结构边界重排那一段（把 G0.76 行与标题之间的接缝插回换行、G0 行按编号连续、
+  标题独占一行、下一张表的表头与分隔行紧随其后），并证明**内容守恒**——去掉全部换行后
+  与改前逐字节相等，且第二次挪位用「逐行多重集不变」核。全仓同类粘连普查：
+  CHANGELOG／CURRENT_STATE／OPERATIONS／ARCHITECTURE 均为 0 处。
+- 判据 `tests/test_docs_table_rows.py` 4 支，尺子是纯函数（文本进、接缝出），真文件与
+  合成反证喂同一把：两支核真面（门禁目录每支逻辑行独占一行且行尾收 `|`；状态件 §2 不吞
+  标题），两支核尺子（吞标题／吞下一支行两种真实形状各点名一次，合规排版沉默）。
+  历史面复算：b3ecdfb 接缝 0／截断行 0（沉默）→ c680e12 截断行 [87] → 79e4402 接缝 1 →
+  dcf7837（HEAD）接缝 4＋截断行 [87]，改前每一档都开火。
+- 记账纪律同步改：OPERATIONS §7 新增一条「补丁里每支新行必须自带行尾换行，写后按
+  `row_seams`/`unterminated_rows` 这两把尺复算」；本脚本自身的每条 add() 都以 \n 收尾。
+- 未证实：Markdown 渲染效果没有用浏览器量过（判据核的是物理行与逻辑行的对应关系，
+  这是缺陷的成因面）；`docs_row_order` 那把既有尺是否还会被别的形状绕过，本轮没扩测。
+
+### 计费 GPU 秒的 Counter 改吃「账本增量」，不再吃「这一段值多少秒」（N-88，闭登记项 N-75）
+- 缺陷形状是 N-74 收尾时量出来登记的那一半：`gpu_seconds_total` 是 **Counter**，而
+  `_finalize_stop` 拿 `_settle_run` 的返回值（＝账本认下的**那一段**秒数）去 `inc`。幂等键
+  让同一运行段只扣一次钱，但重放时那一段的**值**照样是 30 ⇒ counter 再加 30。探针实测
+  （真对象、默认注册表）：stop 重试 `+30/+30`、合计 60，而 `settled_gpu_seconds` SUM=30、
+  投影列=30；`reconcile_all` 那一路同样 `+30/+30/60`。钱扣一次、暴露量翻倍，看板上就是
+  「这个用户烧了两倍的卡」。
+- 选型门禁（两份原文本轮由我本机重新取回并读过，不是转述）：
+  ① prometheus.io/docs/concepts/metric_types/（curl 220027 字节）
+  「A counter is a cumulative metric that represents a single monotonically increasing
+  counter whose value can only increase or be reset to zero on restart」＋
+  「Do not use a counter to expose a value that can decrease」；
+  ② prometheus.io/docs/practices/naming/（204747 字节）「an accumulating count has total
+  as a suffix, in addition to the unit if applicable」⇒ 现名 `gpu_seconds_total` 合规，不改名；
+  ③ 本机 `prometheus_client` 0.26.0（外部包，源码不在本仓）的 `metrics.py` 第 337-341 行：`inc(amount)` 对负数抛
+  `ValueError('Counters can only be incremented by non-negative amounts.')`，且 Counter 没有
+  `set`（Gauge 有）；`metrics.py:34` 就是 `_total` 后缀那条规则的代码。
+  ⇒ 择一：**保持 Counter，喂给它账本的净增量**（不引新依赖）。候选 B「改 Gauge＋`set(账本和)`」
+  被实测否掉一半——子代理把声明换成 Gauge 后 `test_observability.py`／`test_metrics_spec.py`
+  **全绿**，也就是 §8 那把门只核族名与标签、看不见类型；这条不是否决 B 的理由（B 会把
+  「累计量」降级成「当前值」，与 Counter 的语义和 reset-on-restart 假设都不合），但它暴露了
+  一个真洞，本轮顺手补成判据（下面第三条）。候选 C「每次抓取现算的 custom collector」被
+  `tests/metrics_spec.py:95-98` 的断言否掉：非 `MetricWrapperBase` 的收集器会被归进
+  `python_/process_/bridge_` 那一组断言。
+- 改法：`_settle_run` 变薄壳（**公开契约不动**：仍返回账本认下的段值，`capture_hold` 与
+  N-74 的 C1 极都依赖它）；新增 `_settle_run_delta(db, ws) -> (booked, delta)`，结算前后各读
+  一次 `CreditLedgerService.settled_gpu_seconds`（复用 N-74 那份口径，不重写 SUM），
+  `delta = after - before`；投影列由同一个 `after` SET（少一次查询，语义不变）。首结算
+  `delta == booked`；重放行已存在 ⇒ `after == before` ⇒ `delta == 0`。账本 append-only，
+  两次读数之间只有 `settle_workspace_run` 写，所以 delta 不为负；真为负就让 `Counter.inc`
+  抛 ValueError——**宁可红，不静默夹平**。
+- 判据 `tests/test_gpu_seconds_metric_delta.py` 14 支：stop 重放只加一次、第二次 finalize
+  加 0 但段值仍是 30、`reconcile_all` 那一路重放也只加一次、hold 转正仍读段值（不是 delta）、
+  连续两段各加各的、零秒段加 0；结构档钉「counter 只在一个点被抬」（AST）；另两支把**类型**
+  钉住（Counter 而非 Gauge，且族名/标签不变）——这条就是上面那个「换 Gauge 全绿」的洞补上的门。
+- 我在主树亲手复算（判据进门禁档）：`orchestrator.py`＋`metrics.py` 一起换回 HEAD →
+  `FF..F........F`，4 支开火，名字逐一点到（`test_stop_retry_increments_the_counter_once_for_one_segment`／
+  `test_second_finalize_of_the_same_segment_reports_zero_but_keeps_the_segment_value`／
+  `test_reconcile_all_path_increments_once_even_when_it_replays`／`test_hold_capture_still_uses_the_ledger_segment_value`），
+  一手读数 `重放同一段把 counter 又加了 30.0 / assert (60.0 - 30.0) == 0`；换回后与
+  13 个邻面文件合跑 **170 点全绿 rc=0**（含 N-74 的 `test_settled_projection.py`、
+  `test_credit_holds.py`、`test_observability.py`、`test_metrics_spec.py` 与本轮 N-84 的
+  `test_recover_gpu_column_drift.py`），`ruff check app tests` All checks passed，
+  `mypy app` Success（41 files）。改前也通过的 5 支（连续两段／零秒／结构与单调性）在文件里
+  标注为护栏而非反证。
+- 两条由本轮量出、**不在本轮修**的缺口进登记表：N-89（DESTROY 与 reconcile RUNNING→FAILED
+  两条结算路实测给 counter 加 0 而账本入了 30 秒——HEAD 与本树读数相同，是既有少计，
+  不是本轮引入）；N-90（`reconcile_all` 的 per-workspace 循环里没有异常边界，:708-714 那一路
+  `scheduler.release` 抛错会穿出整趟 reconcile）。
+- 未证实：只从默认注册表读 `gpu_seconds_total`，没走 `/metrics` 那个 HTTP 面，也没覆盖
+  multiprocess 模式（测试里不用该模式，属机制限制）；License 一格我用自己的读法没读到
+  （`importlib.metadata` 的 `License` 字段返回 None，版本能读到 0.26.0），故本轮不引该结论。
+
+### 共享测试库的 GPU 池前置改成「净额」：空闲卡数要扣掉队列里欠的账（N-85）
+- 症状是认证台上那一支反复变红的用例：整轮 `collected 751` 唯一一条红就是
+  `tests/test_workspace_progress.py::test_wait_status_reaches_running_with_the_worker_thread_blocked`，
+  一手读数 `provision:failed(attempts=3, error=No GPU available with >= 8 GB VRAM)`。
+  上一轮我把这句写成"共库/GPU 种子池累积占用、整轮认证里它是绿的"——**那句是错的**（本轮开头更正），
+  因为"它是绿的"从来没人核过，而这一次它就是红的来源。
+- 机制不是"运气差"，是**夹具的承诺本身在说谎**，用一支一次性诊断插件量出来的：单跑该文件，
+  正例结束时池子是 `gpu 总=8 可用=6 分配行=2 op=2 未终态=0`，两格 workspace **都在 running** ——
+  包括那支"被动档"故意留成 queued、没执行过的 provision op。也就是说：正例自己的
+  `worker.tick_once()` 循环（`tests/workspace_progress.py:58`）替兄弟用例排掉了那支 op，
+  而那次排空吃掉一张卡。也就是说：本文件实际需要 2 张，`ensure_free_gpus(db, scheduler)` 按默认
+  `need=1` 只要 1 张就宣布满足；`tests/conftest.py:42` 那道 autouse 闸又只在
+  `count_big_enough(db, 8) == 0` 时动手 ⇒「只剩 1 张可用」是一个合法但致死的到达态。
+  N-7 那轮立的规矩（"需要空闲卡的用例显式达成前置"）方向对，**算术错**：
+  它数的是 AVAILABLE 行，没数队列里那些"还会去占卡、但还没占上"的 op。
+- 修法在共享夹具一处，不在调用点：`tests/gpu_pool.py` 新增 `unfulfilled_provision_ops(db)`
+  （`WorkspaceOperation` 里 `operation_type=provision` 且状态 ∈ {pending, running, retrying}，
+  枚举取 `app/models.py:97-102`，`models.py:480,511` 说同一格同时至多一个活动 op），
+  `ensure_free_gpus` 的触发与判决都改成 `空闲数 − 欠账 ≥ need`，失败消息把**两个数都写出来**
+  （下一个读者不必再去猜是谁拿走的卡）；返回值语义**不变**（仍是原始 AVAILABLE 数），
+  所以 `test_api.py:37`／`test_gpu_admin.py:36`／`test_workspace_credential.py:99` 三个调用点
+  一字未动。`tests/conftest.py` 那道 autouse 闸同改净额口径（是原"raw 0"档的严格超集）。
+- 判据 3 支进 `tests/test_gpu_pool_guard.py`：欠账吃掉最后一张时 `ensure_free_gpus` 必须不许原样返回／
+  净额本来就够时不许误触发（防「只要有队列就回收」的假合规）／失败消息必须同时报两个数。
+  数欠账用的是一份**就地独立重数**（`_queue_debt`），不 import 被测的那个新函数——
+  否则改前那一档只会得到 ImportError，那不是开火。
+- 我在主树亲手复算：把 `tests/gpu_pool.py`＋`tests/conftest.py` 换回 HEAD（sha 等于
+  `f3cdc7e7…`／`1450f5b3…`）→ 同一批判据 `2 failed`，一手读数
+  `原始空闲 1 张 − 未执行 provision op 1 个 = 净额 0 < need=1，ensure_free_gpus 却原样返回 1`；
+  换回后 `tests/test_gpu_pool_guard.py`＋`tests/test_workspace_progress.py` 合跑 10 点全绿 rc=0，
+  六个邻面文件（gpu_pool_guard／workspace_progress／gpu_admin／workspace_credential／scheduler／worker）
+  合跑 45 点 rc=0；`ruff check tests` All checks passed。子代理那边另有一组一手读数：
+  受控排水（真 `GpuScheduler.allocate` 挂走 7 张、只剩 1 张）下改前
+  `1 failed, 2 passed` 且报错与认证台那条逐字同形，改后同一对 `3 passed`（17.5s → 2.62s），
+  并且**真全套跑过 `free=1 + debt=1` 这一档**（`[conftest] … 回收 7 张` 那行不是我造的）。
+- 两处由我改判（超出子代理补丁）：`test_gpu_pool_guard.py` 的 `rig` 原先手写"≥2 张"，
+  现改成同一套净额口径；`test_ensure_free_gpus_leaves_draining_cards_alone` 的
+  `== free_before - 1` 前面补一道**净余量前提**断言。理由：那条等式把"当时恰好没欠账"
+  钉成了现状（as-is 断言），一旦真出现"卡停在放不掉"的缺陷态，它会以"DRAINING 判据坏了"
+  的面貌报红，把一个真实缺陷伪装成夹具故障；补上named前提后，缺这一档就直说缺这一档。
+- 未证实：子代理只开了 76 个模块里的 34 个（其余 42 个由本轮收尾的整轮认证覆盖）；
+  另外三个调用点在"净余量不足"这一档只是**传递性**成立（它们调同一个 helper，但没有各自的
+  排水档）；`reclaim_gpus` 之外还有没有别的"合法但致死"的到达态（例如 ≥6 张停在
+  DRAINING/UNHEALTHY）本轮没有判据——那属于"有卡停在放不掉"的缺陷族，与本条不同轴。
+
+### 断言本体也得走那条异常吸收：registry 卡住记 PENDING，不是记一条代码失败（N-91）
+- 认证台这一轮的红不是 GPU 池那支（那条已由 N-85 闭合、整轮没再出现），而是
+  `tests/test_docker_provider_integration.py::test_pinned_base_of_the_control_plane_recipe_is_fetchable`
+  报 `subprocess.TimeoutExpired: Command '['docker', 'pull', 'ghcr.io/astral-sh/uv:0.12.19@sha256:04d0…']'
+  timed out after 300 seconds`。同一台 daemon 上我随后实测：`docker pull` 同一条引用 **7.4s 回 rc=0**、
+  `docker manifest inspect` **10.3s 回 1308 字节** —— 也就是 300s 预算被一次外网抖动吃掉，
+  而这轮的宿主 load 只有 3.76／10 核，不是 CPU 争用。
+- 缺陷不是"超时太短"，是**这一处绕过了本仓已经立好的那份异常吸收**。
+  `tests/docker_probe.py` 的模块 docstring 写的就是同一件事（"daemon 卡住时
+  `subprocess.run(timeout=…)` 抛 TimeoutExpired，异常穿过前置检查，整档用例以 failed on setup 收场"），
+  而四个 docker 档的 `gate_reason()` 都接了它；唯独这条**断言本体**用裸 `_docker("pull", …, timeout=300)`，
+  于是它绕过了自己文件里那套已经写好的三档分流（`_pull_failure_action`：第二通道说没有⇒钉错、
+  说存在⇒通道故障记 PENDING、两边都定不了案⇒记 PENDING 并打两条读数）。
+  全仓扫过同一形状：54 处裸 `_docker(` 里，只有这一处是"替判据本体决定环境读数"的
+  （其余是前置——已接吸收——与测试体内真实的容器操作），所以修一处而不是加一层通用兜底。
+- 改法：这两次调用改走模块内的 `_docker_probe`（吸收 TimeoutExpired ⇒ rc=124 ＋
+  「命令超时（300s）」），读数于是进到既有的三档分流里去定案。**没有**改判据强度，也**没有**
+  改成 `manifest inspect`（那会把"构建用的那条传输取得到"降级成"registry 认这个摘要"），
+  也**没有**加大超时——加大超时是把进度外包给外网，与 N-58／N-59 已定过的口径相反。
+  换来的差别是：通道慢的那一轮，这一格从"代码失败"变成"本轮未获证（PENDING）＋两条读数"。
+- 判据 4 支进 `tests/test_docker_gate_hardening.py`（该文件本来就管这件事，只是覆盖面缺了断言本体）：
+  卡住的 pull 必须落进"定不了案 ⇒ 记 PENDING"那一档（断 `GATE_SENTINEL` 在原因里）；
+  反向极性——daemon 卡住但第二通道逐字节说"没有"时**必须红**（不许把坏摘要洗成跳过）；
+  合规侧对照——健康 pull 既不跳也不红（防止把修复写成无条件跳过这块橡皮章）；
+  分流第一根轴——吸收器留下的「命令超时（300s）」必须被 `registry_reading` 判成 `no-answer`
+  （判成 `absent` 就等于把慢通道当存在性主张，判成 `unreadable` 会让一次抖动落 red_undecided）。
+  引用串一律由配方现取（`_base_refs` ＋ `_is_pinned`），判据里不写死镜像。
+- 落地证明（我自己跑的两极）：只把那一行换回裸 `_docker` ⇒ 该支当场
+  `subprocess.TimeoutExpired … timed out after 300 seconds`，**与认证台那条一手读数逐字同形**；
+  还原后 `tests/test_docker_gate_hardening.py` 12 点全绿。`ruff check app tests` All checks passed，
+  `mypy app` Success（41 files），全套收集数 796→800。
+- 未证实：真把 ghcr 拖到 300s 以外做不到（那是外网条件，不是本机可造），所以我证的是
+  「同一异常形状被吸收后落在哪一档」而不是「今晚的 ghcr 会不会再抖」；第二通道
+  （`_independent_digest_read`）在这三档里都被替换成桩，真实通道的判别力由同文件既有的
+  `test_independent_digest_read_discriminates_present_from_absent` 钉着，不重复立项。
+
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
@@ -952,12 +1204,13 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - ~~`N-68`：reconcile 的节点不一致分支把卡放了，却没停那个 pod（同类第三实例）~~ —— **已由 N-77 闭合**：该分支改走 `_stop_cleanup`（`app/services/orchestrator.py:556-575`），认账了才置 FAILED；provider 仍自述 ALIVE 时保持 RUNNING 不写终态、卡不回池，下一轮接着停。判据 `tests/test_k8s_node_truth.py` 的夹具改成有状态（`stop` 计数＋`reconcile` 随停没停改口），诚实档读 `stop_calls == 1`／撒谎档读 `failed == 0`＋`Gpu` 仍 ALLOCATED＋第二趟 `stop_calls == 2`；接线棘轮 `reconcile_consumers` 1→2 并把反向对照改成 2/1/0 三档。改前就地换面复算 `...FF.........FF...`（19 支里 4 开火），一手读数 `节点不一致没有去停那个 pod（stop_calls=0）`。
 - ~~`N-69`：warm pool 认领失败那一路把销毁失败只记日志，然后照样放卡并写成终态（第四实例，且三重不可见）~~ —— **已由 N-80 闭合**：撤销分支的放卡改由 `orchestrator._release_admitted` 认账（报错档只认 MISSING、成功档不再是 ALIVE；与 `_stop_cleanup` 的 `:366`/`:370` 同形），不认账时不放卡、不清 `container_name`、不写终态，`_cleanup_failed` 选择集扩成 `in_([FAILED, DRAINING])`（`app/services/warmpool.py:236-268`）使 DRAINING 那一格有了重试驱动者，`billing.release_hold` 保持无条件（计费轴与资源轴分家）。判据 `tests/test_warmpool_claim_admission.py`（11 def／收集 12 例）＋重判的 `test_warmpool_claim.py::test_warm_pool_rotation_failure_only_when_admitted`；我主线换面复算 `FF...FFF.FFF`（8 开火），一手读数「destroy 抛错、provider 说的是 alive，卡却被放回池子里了」（`alloc/gpu_free` 三键全反）。原任务书里「清列等于永远停不掉」的机制已被 N-78 降级，两处文字按现状改写。
 - ~~`N-70`：`DockerProvider.reconcile` 用 DB 列推断「容器不存在」，而同一个 provider 的 destroy 会按命名约定把名字推出来 ⇒ 假缺席~~ —— **已由 N-78 闭合**：容器名推导收成一处 `DockerProvider._name()`（start/stop/destroy/inspect/logs/wait_ready/exec/pull_artifact 同源），`inspect` 失败按 stderr 分 absent／unknown（本机实测两形状同为 rc=1：`error: no such object` vs `Cannot connect to the Docker daemon at …`），`reconcile` 把 unknown 读成 UNKNOWN ⇒ `_release_admitted(command_succeeded=False)` 在 daemon 不可达时拒绝放卡；`KubernetesProvider.start/stop` 的空列静默空转同批改掉。判据 `tests/test_provider_absence_evidence.py` 8 支（含真引擎档 `tests/test_docker_provider_integration.py::test_reconcile_asks_the_engine_when_the_name_column_is_empty`）；改前单元档 `F.FFFF..`（5 开火）、真引擎档红在「空列被当成缺席：引擎说这个容器在跑」。
-- `N-72`：**可用额为 0 时仍允许开机**（出厂默认档）。`billing.check_launch_eligible` 只挡  `available < 0`（`app/services/billing.py:~80`），而 `app/config.py:56` 出厂默认  `billing_enforce_preauthorization=False` ⇒ 零余额成员可以启动，钱在第一次结算时变成负数、  靠配额 monitor 兜。这是应然问题（要不要把 0 也挡掉／出厂是否该开预授权），不是实现 bug，  N-71 的判据已把两档现状钉住：预授权开启时 0 余额必须被拒。
-- `N-75`：**`gpu_seconds_total` 在 stop 重放里加两次**（N-74 量出来的一半）。`_finalize_stop`
-  每次进入都 `record_gpu_seconds(booked)`，而重放时 `booked` 仍是那一条 USAGE 行的秒数（账本幂等
-  ⇒ 同一个数再加一次）⇒ 计数器 60、账本 30。实测 `start=0.0 after_first=+30.0 after_retry=+30.0`。
-  两条修法都要先定口径：要么让 `settle_workspace_run` 告诉调用方"这次是命中已有行还是新入账"，
-  要么把指标从 counter 改成账本 SUM 的投影。本轮没自行改设计（属主可决）。
+- ~~`N-72`：可用额为 0 时仍允许开机（出厂默认档）~~ —— **已由 N-83 闭合**：启动预授权从「建好了但默认不走」改成出厂就走（`billing_enforce_preauthorization` 默认 True），并补上它缺的那一半：注册时向**个人**池发 `billing_signup_credits=300`（＝一次最低启动窗口，幂等键 `signup:<user_id>`）。定档依据本机读过 Vast.ai 计费文档（「requires pre-payment of credits for GPU rentals」＋「stopped automatically」＋允许「a short grace period where your balance may go negative」）。`check_launch_eligible` 的 `available < 0`（`app/services/billing.py:69`）保留为第二道地板；判据 `tests/test_launch_pricing_default_is_enforced.py` 9 支（恒等判据钉 §8、0 额度 402 的行为档、个人/组织归属结构判据带四种写法对照）；改前 4 开火（`assert False is True` 是数值判决，余下 3 支报字段不存在）。
+- ~~`N-75`：`gpu_seconds_total` 在 stop 重放里加两次~~ —— **已由 N-88 闭合**：抬 counter 的那一步改吃**账本净增量**（`_settle_run_delta` 结算前后各读一次 `settled_gpu_seconds`，`delta=after-before`），重放时行已存在 ⇒ `delta==0`；`_settle_run` 的公开契约不动（仍返回账本认下的段值，`capture_hold` 照旧读它）。依据是本机重取的 Prometheus 官方两页（counter「monotonically increasing」、「Do not use a counter to expose a value that can decrease」、累计量以 `total` 为后缀）与本机 `prometheus_client` 0.26.0（外部包，源码不在本仓）的 `metrics.py` 第 337-341 行（负数 `inc` 抛 ValueError），判据 14 支（重放只加一次／第二次 finalize 加 0 而段值仍 30／reconcile 路同样只加一次／hold 读段值／counter 只在一点被抬／**类型必须是 Counter**——换 Gauge 那档实测两把既有门全绿，故补上）。我在主树换面复算 `FF..F........F`（4 开火，读数 `(60.0 - 30.0) == 0`），换回后 13 个邻面文件合跑 170 点 rc=0。顺手量出两条缺口：既有少计 N-89、reconcile 异常穿出整趟 N-90。
+
+- `N-89`：**DESTROY 与 reconcile RUNNING→FAILED 两条结算路给 counter 加 0，账本却入了 30 秒**（N-88 复算时量出来的既有少计）。抬 counter 的点按设计只有 `_finalize_stop` 一处（`test_the_counter_is_incremented_at_exactly_one_site` 钉着），而 `destroy()` 与`reconcile_all` 的 RUNNING→FAILED 档各自也会经 `_settle_running_segment` 结算；探针实测两路 `counter +0.0` 而 `settled_gpu_seconds=30`，HEAD 与本树读数相同 ⇒ 不是 N-88 引入的。要不要把这两路也抬 counter，取决于「这个指标说的是已计费秒数还是停机时计入的秒数」——抬了它才是前一句，`docs/ARCHITECTURE.md` 的指标表现在写的是「已计费的 GPU 秒」。
+
+- `N-90`：**`reconcile_all` 的逐格循环没有异常边界，一格抛错穿出整趟**（N-88 复算时观测到的）。`app/services/orchestrator.py:655` 起的 `for w in db.scalars(...)` 里，只有 `provider.inspect` 那一小段有 `try`（:672-674），而 MISSING 档（:708-714）的 `_settle_running_segment` ＋ `scheduler.release` 两次调用都没有：任一格抛错就中止整趟 reconcile，后面所有格这一轮没人看。A/B 探针第一轮 stats 全 0 就是这个形状。这与 ADR 0002 给 provider/scheduler 边界立的规矩（边界内异常转成原因、不外泄给调用面）正相反；修法是 per-workspace 兜住异常并计入 stats，另配常驻判据「一格失败不影响其余格被观测」。本轮只登记：N-88 只动 counter 的取值，不把生命周期语义的改动混进指标修复。
+
 - `N-76`：**`destroy` 的 provider 失败窗口让配额门禁把同一段算两次**（N-74 的另一半）。
   `_settle_running_segment`（`app/services/orchestrator.py:458-462`）在 status==RUNNING 时结算且
   **不清** `started_at`，而 `destroy` 是"先结算、后 `provider.destroy`（抛错故意上抛让 DESTROY 重试）"
@@ -985,14 +1238,9 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   永久卡住的 pod 把 GPU 钉死，需要配超时），本轮只登记不改：N-78 已经改了「问不到」那一档的判法，
   这一档必须连超时策略一起定。
 
-- `N-82`：**回收器强制放卡时不清 `workspace.gpu_id` ⇒ 两张表互相打脸**（N-81 顺手量到的）。
-  `recover_stuck_gpu_allocations`（`app/services/scheduler.py:305-316`）删分配行、把 `Gpu` 置
-  AVAILABLE＋`workspace_id=None`，但**从不**动 workspace 行上的 `gpu_id/gpu_index/gpu_name`；
-  而 `orchestrator.py` 的 K8s 节点不一致检查（`reconcile_all` 里 `w.gpu_id is not None` 那一段）
-  正是拿这一列去找 reserved node ⇒ 卡被强制放掉之后，这张卡若已分配给别人，那个 workspace 的
-  不一致判决会读到**别人**的主机名。实测在 N-81 的回收器对照表里每行都打印
-  `workspace.gpu_id=kept`（同一函数、真库、逐档）。要不要把清列一起做进回收器（以及"谁有权清"）
-  需要与 `_fail`/`_finalize_stop` 的清列责任一起定，本轮只登记。
+- ~~`N-82`：回收器强制放卡时不清 `workspace.gpu_id` ⇒ 两张表互相打脸~~ —— **已由 N-84 闭合**：`recover_stuck_gpu_allocations` 现在在同一事务、`commit` 之前，把自己判定为孤儿并放掉的那几格的 `gpu_id/gpu_index/gpu_name` 一起清空；受保护／占用的格一列都不动（`orphan_ids` 在 `db.delete` 之前记名，两个放卡分支各自先读 `Gpu.workspace_id`）。判据 `tests/test_recover_gpu_column_drift.py` 24 支（行为档逐状态核成对＋结构档按 AST 数 `unpaired_release_paths`＋六支变异控制各自只翻一格）；我在主树换面复算改前 `16 failed, 8 passed`、改后 `24 passed`，邻居 111 点全绿。范围只到『回收器自己放掉的格』：另外两处放卡点（`_stop_cleanup` step 4、warm pool 撤销档）仍不清列，且它们产出的漂移回收器看不见——登记为 N-86。
+
+- `N-86`：**放卡的另外两处不清列，回收器看不见它们产出的漂移**（N-84 复算时量出来的）。`_stop_cleanup` 的放行档（step 4）与 warm pool 认领撤销的放卡档（`warmpool.py:400-405`）都只 `scheduler.release`，不动 workspace 行上的 `gpu_id/gpu_index/gpu_name`；全仓 `app/` 里只有 `orchestrator.py:386-388`（`_fail`）在清。后果：STOPPED／FAILED 的格仍对外声称持有那张已经易主的卡，读者是 `schemas.py:95-97`（经 `routers/workspaces.py` 与 `courses.py` 出到API）与 `static/app.js:419`；而这类漂移**不经过回收器**（既无分配行、`Gpu.workspace_id` 也不指向那格），所以 N-84 的不变量管不到。方向是把成对清列收进 `GpuScheduler.release` 本身（它是唯一的分配权威），而不是在三处调用点各写一遍——收进 `release` 要先解决同会话身份图里的旧实例（N-84 的变异控制里『批量清列没同步进身份图』正是这一档）。同一轮顺手量的另一半：ghost 分配（卡 ALLOCATED 但没有 workspace 行）两条 UPDATE 都碰不到，卡会永久钉住。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
 - **裁决依据是查来的，不是拍的**：读 AWS IoT Jobs 的任务生命周期页
