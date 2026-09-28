@@ -5,11 +5,20 @@ from pathlib import Path
 import pg_server
 import pytest
 
-from tests.dbfiles import db_name, db_url, sweep_own_test_dbs
+from tests.dbfiles import db_name, db_url, sweep_dead_test_dbs, sweep_own_test_dbs
 
 os.environ["EMBODIEDCLOUD_PROVIDER"] = "mock"
 os.environ["EMBODIEDCLOUD_DATABASE_URL"] = db_url("embodiedcloud")
 os.environ["EMBODIEDCLOUD_WORKSPACE_ROOT"] = "/tmp/test-embodiedcloud-workspaces"  # noqa: S108 测试隔离目录
+
+
+def pytest_sessionstart(session):
+    """上一趟崩掉／被掐遗留的 `test-*-<pid>.db` 在这里收（只收归属进程已不在的那些）。
+
+    不包 try：收不上来就是要当场看见（`sweep_dead_test_dbs` 自己只对 `OSError` 静默跳过，
+    判据与活库保护都在 `tests/dbfiles.py` 那一侧）。
+    """
+    sweep_dead_test_dbs()
 
 
 def pytest_sessionfinish(session, exitstatus):
