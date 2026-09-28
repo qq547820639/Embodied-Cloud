@@ -47,7 +47,7 @@
 - 单 GPU = 1 Workspace（第一阶段）。
 - GPU 秒计费 = RUNNING 起止差（stop/delete 结算）。
 - Warm Pool 目标：P50 < 15s，P95 < 30s（需真实硬件实测调优）。
-- 容量读数里 `draining` 与 `drained` 不是一回事：前者是机器判决（这一次上报里没有这张卡），节点重报就自己回来，不必动手；后者是管理员判决，只有管理员能解除（N-123）。看到一批 `drained` 就去找人，不要等它回来；看到一批 `draining` 先查那个节点的同步。N-126 之后还要分开看两列：`status` 说这张卡在不在这个池子里，`health` 说有没有人判它坏——一张卡可以既在用又不健康，派工由 `health_is_usable()` 挡，解除只有 `POST /api/gpus/{id}/healthy`。占用中的卡也能被下架（`drain_requested_at` 非空而 `status` 仍是 allocated），它会在 workload 结束时自己变成 `drained`；撤回到 `POST /api/gpus/{id}/undrain`。
+- 容量读数里 `draining` 与 `drained` 不是一回事：前者是机器判决（这一次上报里没有这张卡），节点重报就自己回来，不必动手；后者是管理员判决，只有管理员能解除（N-123）。看到一批 `drained` 就去找人，不要等它回来；看到一批 `draining` 先查那个节点的同步。N-126 之后还要分开看两列：`status` 说这张卡在不在这个池子里，`health` 说有没有人判它坏——一张卡可以既在用又不健康，派工由 `health_is_usable()` 挡，解除只有 `POST /api/gpus/{id}/healthy`。占用中的卡也能被下架（`drain_requested_at` 非空而 `status` 仍是 allocated），它会在 workload 结束时自己变成 `drained`；撤回到 `POST /api/gpus/{id}/undrain`。这三列在管理台的 GPU 表格里都有位子（N-128）：状态徽章旁边是健康徽章，占用中挂着下架意图的卡多一枚 `已请求排水`，动作按钮按维度给极——`进入维护`／`撤回下架要求` 与 `标记异常`／`恢复健康` 各自对应上面那两条 POST。
 
 ## 4. 数据生命周期
 

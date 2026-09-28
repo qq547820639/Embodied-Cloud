@@ -133,7 +133,7 @@
 | POST | `/api/gpus/{id}/unhealthy` | 判不健康（写 `gpus.health`，**不改 `status`**，占用中也可判） |
 | POST | `/api/gpus/{id}/healthy` | 解除健康判决（`health` 回 NULL；不替 `drained`／`draining` 改口） |
 | POST | `/api/gpus/{id}/drain` | 提出下架要求（证据列 `drain_requested_at`；池子里的卡当场 `drained`，占用中的卡等释放时落成 `drained`） |
-| POST | `/api/gpus/{id}/undrain` | 撤回下架要求（`drained` 回 `available`；不解除 `draining`／`unhealthy`） |
+| POST | `/api/gpus/{id}/undrain` | 撤回下架要求（`drained` 回 `available`；不动 `gpus.health`，也不解除缺席降级 `draining`） |
 
 ## 认证方式
 

@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 1007 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 1011 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -1493,7 +1493,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 五臂电池（`/tmp/n125-battery.py`）：F1 释放不兑现意图 ⇒ 3 红（两支行为＋登记册）；F2 占用中的卡不记意图 ⇒ 2 红；F3 `undrain` 撤不回 drained ⇒ 1 红；F4 自动路径清掉管理员意图 ⇒ 1 红（只有登记册那支，行为档看不见——这正是结构档存在的理由）；F5 只改注释 ⇒ 0 红。电池第一版被自己的普查拦下：它把「开局 `app/` 必须干净」当不变量，而本轮的代码本来就还没提交，判据改成「每臂跑完 `git diff app/` 与开局快照一致」。
 - 三处更正与连带面：① 我上一轮写进注释的「`app/main.py:36` 是 stuck 保护」是假话——那一行是 `gpu_allocated` 指标，占用保护在 `recover_stuck_gpu_allocations` 里按 workspace 状态判（`app/services/scheduler.py:429-448`），注释与本节已按实况改写；② API.md 的 `/drain` 行、ARCHITECTURE 的 drain 条目、OPERATIONS 的容量读数都从「占用中的卡回 409」改成「记意图＋`/undrain` 解除」；③ 迁移数 15→16（CURRENT_STATE §1 的 Migration 行），`docs/openapi.json` 由 `make api-docs` 重生成（`GpuOut` 多一列＋新路径），读者是 `tests/test_version_consistency.py:215`；新端点的 403 档补在 `tests/test_gpu_admin.py` 的非管理员那支里。
 - 登记项 N-124 随本轮划销；新登记 N-126：`/unhealthy` 仍然**直接覆盖**占用事实（`mark_unhealthy` 没有状态前置），一张在用的卡被判 unhealthy 之后，`gpus.status` 不再能说「这张卡在用」而 `workspaces.gpu_id` 还指着它——与 N-124 是同一味药没吃完的那一半。
-- 未证实：新迁移在 PostgreSQL 上的 `batch_alter_table` 路径由本轮认证的 PG 档跑到（`tests/conftest.py:84` 每条用例走完整迁移链），但**没有**一条判据专门比 SQLite/PG 两种方言在这一列上的语义差异；前端仍不显示「在用但已被摘走」这种形状（`GPU_STATUS_CN` 按 status 上色，意图列没进表格里）；存量库（本机 `embodiedcloud.db`）没跑过 `alembic upgrade head`，本轮只在一次性库里验过 up/down/up。
+- 未证实：新迁移在 PostgreSQL 上的 `batch_alter_table` 路径由本轮认证的 PG 档跑到（`tests/conftest.py:84` 每条用例走完整迁移链），但**没有**一条判据专门比 SQLite/PG 两种方言在这一列上的语义差异；~~前端仍不显示「在用但已被摘走」这种形状~~（**已由 N-128 闭合**：`已请求排水` 徽章进状态格，健康与下架各有两颗按钮），（`GPU_STATUS_CN` 按 status 上色，意图列没进表格里）；存量库（本机 `embodiedcloud.db`）没跑过 `alembic upgrade head`，本轮只在一次性库里验过 up/down/up。
 
 ### 健康不再挤在状态列里：占用与判决第一次能同时为真（N-126，ADR 0010 落地）
 - 缺陷（一列两主，N-124 那味药没吃完的一半）：`gpus.status` 既回答「这张卡被占了没有」又回答「这张卡被判定不健康没有」。`mark_unhealthy` 没有状态前置，于是管理员对一张正在被用的卡点 `POST /api/gpus/{gpu_id}/unhealthy`，`status` 就从 `allocated` 变成 `unhealthy`——而 `status == allocated` 是这张卡在 `gpus` 一侧唯一的占用载体（对外的 `gpu_allocated` 指标就数它，`app/main.py:34-37`），`gpus.workspace_id` 与 `workspaces.gpu_id` 却都还在原地。两张表互相打脸，且**没有一条判据会红**：既有判据只钉「unhealthy 不许被自动路径抬回 available」那一半。
@@ -1507,6 +1507,18 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 
 
 
+
+
+### 管理台按维度给按钮：死比较与没有读者的列都判违规（N-128，管理台按维度给极）
+- 缺陷（N-126 留下的读者面）：`app/static/app.js:1253` 的动作门写的是 `g.status !== "unhealthy"`。健康搬进 `gpus.health` 之后状态列不再有那个值，这个条件从此恒为真——「标记异常」在任何一张卡上都不消失，而它本该只在没被判过的卡上出现。这一族缺陷的形状是「比较还在、对端已不存在」：不抛错、不影响任何既有断言，`tests/test_browser_console.py` 的六视图那支又按守卫跳过 gpus 视图，所以树上没有任何读者能看见它。
+- 同一次普查另两处缺席（都是「列有了、没人读」）：`gpus.drain_requested_at` 由 `GET /api/gpus` 吐出来（`app/schemas.py:144`）却从不渲染，管理员给占用中的卡登记了意图，表格里看不出来——N-125 那行的未证实面「前端不显示『在用但已摘走』」到本轮才真的补上；`/undrain` 与 `/healthy` 两条解除路径在控制台里根本没有按钮，而 `app/routers/gpus.py:76-77` 给 `/undrain` 写的存在理由恰恰是「不然一次误点就是一张永久掉的卡，只能改库」。
+- 改法：行模板按维度给极——健康一列给「标记异常／恢复健康」、下架一列给「进入维护／撤回下架要求」（`app/static/app.js:1252`、`:1253`，处理器 `:1271`、`:1289`，委托表 `:1330`、`:1332`），占用中的卡也给下架按钮（N-125 之后判得动），状态格在健康徽章旁边挂 `已请求排水`（`app/static/app.js:1249`）。`GPU_STATUS_CN`／`GPU_HEALTH_CN` 的分母判据（N-123／N-126 立的）不动。
+- 新判据两把（`tests/test_gpu_drain_provenance.py`，本轮 +4，含一支反证）。`gpu_row_offenders`：GPU 行模板里对 `status`／`health` 的字面量比较，被比的值必须落在**该列自己的枚举**里；别名从 `gpus.map((别名)` 现取（改名躲不过），模板体一律读到 `)` + `.join(` 收口并用 `</tr>` 自证整行读完——嵌套模板串（按钮就是这么写的）会把行读成一截，读成一截时后面的比较静默消失、判据就会在带缺陷的树上假绿；分母为空即判红（模板读不到／一处比较都没有）。`test_every_admin_gpu_verdict_has_a_console_reader`：分母由路由 AST 现取（`@router.post("/{gpu_id}/X")`），`gpu-X` 既要在行模板里、也要在 `actionHandlers` 里——只写按钮不接处理器，点了什么都不会发生，而这两种缺席在页面上同形。
+- 常驻浏览器档补上 gpus 视图（`tests/test_browser_console.py::test_admin_gpu_row_shows_the_matching_pole_of_each_verdict`）：测试自己把用户提升成 admin（`UPDATE users SET role='admin'`，rowcount 判 1）再进控制台，两个维度各走一次极性翻转，并核「占用中的卡挂上意图时 `status` 仍是 allocated、工作区停掉之后才落成 drained」；收尾断 `page_errors` 为空，所以任何一次 409／5xx 也会记在案上。
+- 四臂电池（`/tmp/n128-battery.py`，靶 `app/static/app.js`，还原写回注入前读到的原文，跑完 `git diff app/` 与开局快照逐字节相同）：A 把健康极改回死比较 ⇒ 尺子与浏览器两侧都红；B 删掉 `已请求排水` 那一档 ⇒ 只浏览器红（结构尺看不见渲染缺席，这正是两条判据互补的证据）；C 摘掉 `gpu-undrain` 处理器 ⇒ 尺子红（`actionHandlers` 少了键）＋浏览器红（点了不发请求）；D 只改确认弹窗正文 ⇒ 两侧都不红（对照：判据不许对无关字面量过敏）。四臂读数全部落在预期上。
+- 措辞面：`app/services/scheduler.py:7-11` 的模块 docstring 与 `app/services/scheduler.py:336` 的注释不再把 `unhealthy` 列成状态值；`/undrain` 的 docstring 指向 `/healthy`（`docs/openapi.json` 随 `make api-docs` 重生成，一致性由 `tests/test_version_consistency.py` 机核）；`docs/API.md` 的 `/undrain` 行、`docs/ACCEPTANCE_GATES.md` 的 G0.111 那格（还写着「占用中的卡 `/drain` 回 409」与「`unhealthy` 是一档状态」，两条都被 N-125／N-126 换掉了）与 G0.112 那格的同形措辞一并改口。
+- 记账：新增门禁 G0.114；§2 新行 N-128；本轮 +4 支（认证读数 collected 1011／failed 0，迁移链 17 节不变）。N-125 那行「未证实：前端不显示『在用但已摘走』」随本轮闭合。新登记 N-129：管理台的 GPU 表没有周期驱动者——`pollTick` 只刷工作区与指标，且在没有瞬态工作区时整体停摆，于是 `draining`／`drained` 这些由后台同步改判的事实，运维不重新进视图就看不见。
+- 未证实／限度：死比较那把尺只看「字面量在 `===`／`!==` 右边」的形状，右端换成变量或 `GPU_STATUS_CN[...]` 索引不判；它的作用域是 `gpus.map` 那一个渲染位（今日全仓只有 `refreshGpus` 一处渲染 gpus，逐处 grep 过）；确认弹窗的话术与后端语义是否一致没有判据（本轮只顺手把「已有分配不受影响」改成按 N-125 的说法）；浏览器档按可用性整档可跳过，缺 Chrome 时这一支不产读数（环境读数在 `dist/VALIDATION_RUN.md`）；端点↔按钮对账不看按钮点了以后请求真的发出去（那半边由浏览器用例覆盖，但它只在有浏览器的那一遍跑）。
 
 ### 记账脚本在仓内留一个 tmp/，就把文档门顶红了（N-118）
 - 缺陷（工具的自我遮蔽，不在产品代码里）：`scripts/validate_release.py:732 _doc_roots()` 按 `ROOT.iterdir()` 现取顶层目录当「仓内根」，而文档门的存在性核对（`doc_reference_offenders` 的 :615-621 那段划界）写死了「只核以既有仓内根目录开头的路径」——它的前提是**根面等于仓库的组成面**。记账脚本把备份落进仓内 `tmp/anchor-patch-n116/` 之后，这个前提就塌了：`tmp` 成了根，CHANGELOG 与 CURRENT_STATE 里那两句**故意不作为指针**的示例路径 `tmp/probe.py` 各产一条假悬空引用，`doc_references` 当场翻红。红因不在文档，也不在产品代码，而在量具自己的落点。
@@ -1578,6 +1590,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
+- `N-129`：**管理台的 GPU 表没有周期驱动者**。`app/static/app.js` 的 `pollTick()` 只刷工作区与指标，且 `has_transient()` 一为空就整体停摆；`refreshGpus()` 只在进视图和点完一次动作之后被叫到。于是`draining`／`drained`／`last_synced_at` 这些**由后台同步改判**的事实，管理员不重新进一次 `#/gpus` 就看不见——`docs/OPERATIONS.md` 的排查表让运维「看到一批 `draining` 先查那个节点的同步」，而它说的读法在控制台上是静态快照。N-93／N-99／N-110 立的规矩是「有周期驱动的收敛才叫被验证过」，这一格同样缺驱动者。要收口先拍两件事：刷新的作用域（只在 gpus 视图可见时轮，还是常驻轮）与节奏（后台同步本身是分钟级，秒级轮询只是把控制台的读压放大），并补一条常驻浏览器判据：卡在被同步改判之后，不改哈希、不点任何按钮，表格必须自己跟上。
 - ~~`N-33`：`tests/test_gpu_pool_guard.py` 那两支带哨兵（缺余量时算合法跳过）~~ —— 已由 **N-41 闭合**：
   夹具显式达成前置并断言，哨兵与闭集条目一并删除，条件跳过归零。
 
