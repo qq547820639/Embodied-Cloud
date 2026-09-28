@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 898 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 903 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96。
+- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898→903，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96／G0.97／G0.98。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -1389,6 +1389,19 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 牙齿（五臂，含两支基线）：无关注释臂 0 红；抛错档清列 / 抛错档直接放卡 各红 T5+T6，其中 T6 红在**夹具前提**而非自身判决（两支共用坐标系，写明而不是假装各有牙）；删掉驱动者末尾那一脚 ⇒ T3+T6（两处残留由同一个补做者收）；把回收器「成对的第二半」改成恒不执行 ⇒ warm pool 那文件 13 支里只红新加的这支。邻面 13 文件 151 支 rc=0；ruff/mypy rc=0。
 - 未证实：`hold` 与 destroy 结算那两条（N-104／N-105）本轮只登记未动手。
 
+### hold 抛错留下的那一笔 pending，第一次有人负责收（N-104，闭登记项 N-104）
+- 缺陷（覆盖缺陷）：`_fail` 第一件事是退回圈住的额度，而那一步被 try/except 包着（`orchestrator.py:360-366`「释放失败不得掩盖状态置位，盲捕获有意，见 ADR 0002」），except 里只有一条 warning——额度被**故意**留在未完成态，指望 TTL 清扫补。既有覆盖各在一头（合规档走 worker 真链路、TTL 清扫本身、清扫在周期表里注册），中间那段没有：没有任何用例让 `release_hold` 真抛错。
+- 判据 `tests/test_hold_release_failure_self_heals.py` 三档：H1 抛错不许泄给调用面、状态与原因照写，而那笔仍 PENDING、额度仍被圈住（钉的是「漏在哪张表上」，不是「没漏」）；H2 死线之前清扫不许提前收；H3 死线之后走 `orchestrator.release_expired_holds()`（`deps.py` 注册进周期表的那个入口）必须收掉并还额度。H2/H3 之间只动 `expires_at` 一个变量。
+- 牙齿（五臂）：基线与无关注释臂 0 红；E1 摘掉 try/except ⇒ 三支全红（共用夹具，红在异常穿出）；E2 把时间谓词换成恒真 ⇒ 只红 H2；E3 把 RUNNING 保护反过来 ⇒ 只红 H3。各臂 `cmp` 还原、末跑全绿；邻面 7 文件 72 支 rc=0。
+- 未证实：清扫的周期档（60 tick）与真实 TTL 时长的比例没量——本轮只证入口可达与判决正确。
+
+### 「可补偿」是一句没有归属者的主张，改成判决并钉住（N-105，闭登记项 N-105）
+- 缺陷（措辞与事实相反，不是漏账本身）：`destroy()` 的结算抛错档注释写「修复方向是「可补偿」」。查清后三个候选补做者都不在场——`reconcile_all` 的循环先跳过 tombstone（`orchestrator.py:687-688`）、`monitor_runtime_quotas` 的选择集要求 `deleted_at IS NULL`、`recover_stuck_gpu_allocations` 只管卡不管账。
+- 判决：**这一段不入账，且不许事后补**。理由住在时钟里而不是省事：唯一还能为这一段算秒数的 `_settle_run`（`:550-556`）取 `utcnow() - started_at`，对墓碑格那就是把等待时长计成运行时长——补做会多计，而多计比少计更坏（本仓 N-64／75／76 全是这条轴）。注释按这个判决重写。
+- 判据 `tests/test_streaming_lifecycle.py` 两档：E1 当场零 USAGE 条目、墓碑 `started_at` 已清、`accumulated_seconds` 不动，换回真账本再跑一趟周期驱动者仍然零条目；E2 对照档——同一夹具同一入口、账本没坏时必须正好入一段（3590–3600 秒）。E2 的另一重作用：证明 E1 那个「0」不是恒真，查询与写入面都在场。
+- 牙齿（四臂）：基线与无关注释臂 0 红；F1 让墓碑保留 `started_at` ⇒ 两支一起红（都读这一列）；F3 把 `_settle_running_segment` 的状态守卫改成恒假 ⇒ E2 红，并连带打红既有那支 `test_destroy_settle_failure_marks_auditable_and_still_releases`——它钉的「留下可审计痕迹」其实依赖结算**被尝试过**，这是本轮顺带量出的一条既有依赖。E1 的「零条目」那一面没有任何现存改动能让它红（今天没有路径为墓碑写 USAGE），它防的是尚不存在的补做者，这一点写在 docstring 里。邻面 8 文件 81 支 rc=0；ruff/mypy rc=0。
+- 未证实：真实账本故障（PostgreSQL 断连）下的行为没测——本轮注入的是 stub 抛错。
+
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
@@ -1420,8 +1433,8 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 
 - ~~`N-86`：放卡的另外两处不清列，回收器看不见它们产出的漂移~~ —— **已由 N-86 闭合**：成对清列收进 `Scheduler.release` 本体（ORM 取回 holder 后同事务清 `gpu_id/gpu_index/gpu_name`），`_stop_cleanup` 放行档与 warm pool 撤销档不再各写一遍。判据 `tests/test_release_pairs_binding.py` 7 支，改前复算 4 failed / 3 passed，一手读数「release 之后同一会话仍读到绑定」。详见上面那一节。
 
-- `N-104`：`billing.release_hold` 在 provision 失败那一档抛错时只留一条 warning（`orchestrator.py:365-366`「释放失败不得掩盖状态置位」），残留的 pending hold 由 TTL 清扫（`billing.py` 的 `release_expired_holds`，已注册进周期表）兜底。没有任何常驻用例从「release_hold 抛错」驱动到「TTL 把这一笔收掉」——`tests/test_credit_holds.py` 只驱动 TTL 到期那一档，`tests/test_periodic_loop_and_boot_wiring.py` 只断注册在位。判据形状与 N-101 同构（残留 + 补做者 + 幂等）。
-- `N-105`：`destroy()` 的结算抛错档写下「留下可审计、可补偿的痕迹」却没命名补做者（`orchestrator.py:616-621`）；`tests/test_streaming_lifecycle.py:242-266` 注入了这一档的抛错，但只断到痕迹与「释放照走」，没断补偿到底来不来。要拍的首先是应然：这一段的账是等 TTL、等 reconcile、还是根本没人补——命名了补做者才谈得上补判据。
+- ~~`N-104`：`billing.release_hold` 在 provision 失败那一档抛错时只留一条 warning（`orchestrator.py:365-366`「释放失败不得掩盖状态置位」），残留的 pending hold 由 TTL 清扫（`billing.py` 的 `release_expired_holds`，已注册进周期表）兜底。没有任何常驻用例从「release_hold 抛错」驱动到「TTL 把这一笔收掉」——`tests/test_credit_holds.py` 只驱动 TTL 到期那一档，`tests/test_periodic_loop_and_boot_wiring.py` 只断注册在位。判据形状与 N-101 同构（残留 + 补做者 + 幂等）。~~ —— **已由 N-104 闭合**：三档判据 + 五臂电池（时间谓词与 RUNNING 保护各有独立牙）。见上面 N-104 一节。
+- ~~`N-105`：`destroy()` 的结算抛错档写下「留下可审计、可补偿的痕迹」却没命名补做者（`orchestrator.py:616-621`）；`tests/test_streaming_lifecycle.py:242-266` 注入了这一档的抛错，但只断到痕迹与「释放照走」，没断补偿到底来不来。要拍的首先是应然：这一段的账是等 TTL、等 reconcile、还是根本没人补——命名了补做者才谈得上补判据。~~ —— **已由 N-105 结案：不补，改口**。判决是「这一段不入账、也不许按 utcnow()−started_at 补」（补即多计）。见上面 N-105 一节。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
 - **裁决依据是查来的，不是拍的**：读 AWS IoT Jobs 的任务生命周期页

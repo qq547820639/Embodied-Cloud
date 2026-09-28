@@ -442,7 +442,7 @@ sequenceDiagram
 
 | # | 问题 | 位置 | 修复方向 |
 |---|---|---|---|
-| P1-1 | destroy 吞掉结算异常仍置 DELETED → 静默丢账 | `orchestrator.py:339-347` | 结算失败记录 error 标记 + 告警，可审计可补偿 |
+| P1-1 | destroy 吞掉结算异常仍置 DELETED → 静默丢账 | `orchestrator.py:339-347` | 结算失败记录 error 标记 + 告警，可审计（（N-105 更正：补偿从未在场，且不许按 `utcnow()-started_at` 补；判决改为「不入账」，判据见 `tests/test_streaming_lifecycle.py`） |
 | P1-2 | deployments 路由自建第二套 Settings/engine/DI | `routers/deployments.py:20-31` | 修复 deps mypy 后回归组合根注入 |
 | P1-3 | `monitor_runtime_quotas` 硬编码 policy 且只算个人余额 | `orchestrator.py:498-516` | 复用 `self.billing`，口径统一「个人+组织」 |
 | P1-4 | warmpool 预热同步阻塞单 worker 循环 | `warmpool.py:57-93`（`:82`） | 预热改走 operation 体系或独立限流线程池 |

@@ -105,6 +105,8 @@
 | G0.94 release 自抛留下的跨表冲突可点名，并由周期驱动者收回 | `pytest tests/test_release_failure_self_heals.py` | 冲突清单非空且卡未被读成空闲；活跃 operation 时不许动；终态后收回、冲突清零、再跑幂等；不调驱动者永远停冲突 | PASS（常驻） |
 | G0.95 STOP 的 release 自抛按 provider 能否答话分两极 | `pytest tests/test_stop_release_failure_self_heals.py` | 停在 STOPPING 且两表一致；UNKNOWN 时驱动者不动；MISSING 时收完（STOPPED＋卡回池＋三列清空＋幂等） | PASS（常驻） |
 | G0.96 destroy 与 warm pool 的 release 自抛残留由回收器成对收回 | `pytest tests/test_release_failure_self_heals.py tests/test_warmpool_claim_admission.py` | 墓碑/终态行占着卡时可点名且两表一致；回收器放卡必成对清列、不动墓碑状态；再跑幂等 | PASS（常驻） |
+| G0.97 hold 释放失败的残留由 TTL 清扫收口，且死线前不许提前收 | `pytest tests/test_hold_release_failure_self_heals.py` | 抛错不泄给调用面、状态与原因照写、那笔仍 PENDING 且额度仍被圈住；死线前清扫返回 0；死线后周期入口返回 1 并还回额度 | PASS（常驻） |
+| G0.98 destroy 结算失败的段不入账、也不被按时钟补做（判决有据） | `pytest tests/test_streaming_lifecycle.py` | 失败当场零 USAGE 条目、墓碑 started_at 已清、再跑周期驱动者仍零；对照档账本正常时必须正好入一段 | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 898 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 903 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -119,6 +119,8 @@
 | N-101 | **`_fail` 的 release 自抛档故意留跨表冲突并写 will be reconciled，而没有任何用例回头看卡那一行、也没跑过那个补做入口**。改法：跨表量具抽成 `tests/gpu_drift.py`（一份而不是两份），四档钉住「冲突可点名／活跃 operation 时不许动／终态后驱动者收回并幂等／不调驱动者就永远停冲突」。 | 判据 `tests/test_release_failure_self_heals.py` 4 支；六臂变异电池：删驱动者末尾一脚只红 T3、删 active-operation 保护只红 T2、量具 holder 方向改瞎红 T1+T2、`_fail` 顺手放卡四档全红（共用前提）。未证实：本机是 mock provider。 |
 | N-102 | **STOP 那一侧的 release 自抛零覆盖**：`stop finalize failed` 那串只在生产侧一处，`tests/` 零处；形状与 provision 侧相反（两表仍互相认账、卡被队列占着）。改法：按 provider 能否答话分两极钉，S2 UNKNOWN 不许动、S3 MISSING 必须收完，两支之间只动一个变量。 | 判据 `tests/test_stop_release_failure_self_heals.py` 3 支；六臂：UNKNOWN 当没了 ⇒ 只红 S2、删 MISSING 档补做 ⇒ 只红 S3、抛错档清列 ⇒ 只红 S1、写成 FAILED ⇒ 三支全红。未证实：账本侧重复入账那一面由 `test_gpu_seconds_metric_delta.py` 守着，本轮未复算。 |
 | N-103 | **release 自抛的四处兜底只钉了两处**：`destroy()`（orchestrator.py:630-638）与 warm pool 认领撤销放行档（warmpool.py:399-409）零覆盖，两处留下的都是「卡被一个终态行占着、两表仍互相认账」。 | 判据 T5/T6 进 `test_release_failure_self_heals.py`、warm pool 那档进它自己的文件（13 支）；五臂：删驱动者末尾一脚 ⇒ T3+T6，回收器成对的第二半恒不执行 ⇒ 只红 warm pool 那支。顺带登记两条无人驱动的 promise：N-104（hold 抛错靠 TTL）、N-105（destroy 结算抛错没命名补做者）。 |
+| N-104 | **hold 释放失败留下的那笔 pending 没人认领收口**：`_fail` 里那一步被盲捕获吞掉只留一条 warning，指望 TTL 清扫补，但没有任何用例让 `release_hold` 真抛错。改法：三档钉住「残留可点名／死线前不收／死线后由周期入口收回并还额度」，H2/H3 之间只动 `expires_at`。 | 判据 `tests/test_hold_release_failure_self_heals.py` 3 支；五臂：摘 try/except ⇒ 三支全红（共用夹具）、时间谓词恒真 ⇒ 只红 H2、RUNNING 保护反过来 ⇒ 只红 H3。未证实：60 tick 与 TTL 时长的比例未量。 |
+| N-105 | **注释承诺的「可补偿」没有归属者**：destroy 的结算抛错档写「修复方向是可补偿」，而三个候选补做者都不在场（reconcile 跳过 tombstone、quota monitor 要求未删、回收器只管卡）。判决与改法：这一段不入账、也不许按 `utcnow() - started_at` 补（那会把等待时长计成运行时长），注释改成判决。 | 判据 `tests/test_streaming_lifecycle.py` 2 支（E1 零条目＋墓碑不留段；E2 对照档证明「零」非恒真）；四臂：墓碑保留 started_at ⇒ 两支一起红，状态守卫恒假 ⇒ E2 红并连带暴露既有 auditable 那支依赖「结算被尝试过」。未证实：真 PostgreSQL 断连档未测。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）
