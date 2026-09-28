@@ -538,6 +538,12 @@ class WorkspaceOrchestrator:
         两次读数之间只有 `settle_workspace_run` 写，所以 `delta` 不会为负；
         真为负就是账本被人动过，`Counter.inc` 会抛 ValueError 而不是被静默夹平（宁可红）。
         无 started_at（尚未开始运行）时返回 `(0, 0)`，且不产生账本/累计副作用。
+
+        抬 `gpu_seconds_total` 也放在这里（N-89），不放在 `_finalize_stop`：账本入一次秒数、
+        指标就动一次，而入账点不止停止那一条——`destroy()` 与 `reconcile_all` 的
+        RUNNING→MISSING→FAILED 档各自都经 `_settle_running_segment` 入账，实测两路都给 counter
+        加 0 而账本入了 30 秒（`docs/ARCHITECTURE.md` 的指标表把这一项写成"已计费的 GPU 秒"，
+        少计就是对外报小）。写在这一层，"哪条收尾路径记账"就不再是一个需要每条臂各自记住的问题。
         """
         if not workspace.started_at:
             return 0, 0
@@ -564,20 +570,19 @@ class WorkspaceOrchestrator:
                 usage_seconds=booked,
                 ledger_usage_key=entry.idempotency_key if entry is not None else None,
             )
+        # §25 的实际计费 GPU 秒指标：记的是**账本本次净新增**（N-75），且只在存在运行段时到得了
+        # 这一行（无 started_at 已在上面返回）。重放时 delta 为 0，counter 不动。
+        from ..metrics import record_gpu_seconds
+
+        record_gpu_seconds(after - before)
         return booked, after - before
 
     def _finalize_stop(self, db: Session, workspace: Workspace) -> None:
         """结算运行段 + 释放 GPU + STOPPED（幂等；reconcile 与 stop 共用）。"""
         now = utcnow()
-        had_start = workspace.started_at is not None
-        _booked, delta = self._settle_run_delta(db, workspace)
-        if had_start:
-            # §25：实际计费 GPU 秒指标（仅存在运行段时记录）。记的是**账本本次净新增**
-            # （N-75），既不是重算出来的 elapsed，也不是"这一段值多少秒"——后者在重放时
-            # 仍然是那 30 秒，而 counter 不幂等，stop 重试/reconcile 再来一趟就翻倍。
-            from ..metrics import record_gpu_seconds
-
-            record_gpu_seconds(delta)
+        # 只结算：抬 `gpu_seconds_total` 由 `_settle_run_delta` 自己负责（N-89），
+        # 这样 destroy／reconcile→FAILED 那两条同样入账的路径不会漏计。
+        self._settle_run_delta(db, workspace)
         # 释放 GPU（stop 后释放；幂等）
         self.scheduler.release(db, workspace.id)
         workspace.status = WorkspaceStatus.STOPPED.value
