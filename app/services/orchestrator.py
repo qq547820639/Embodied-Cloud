@@ -42,6 +42,19 @@ def _failure_is_terminal(operation: "WorkspaceOperation | None") -> bool:
     return operation is None or not OperationWorker.will_retry(operation)
 
 
+def _observed_runtime_state(provider: WorkspaceProvider, workspace: Workspace) -> str:
+    """给「释放准入没放行」那一档的 `error_message` 用的诊断读数。
+
+    它**不参与判决**：放不放卡只由 `_release_admitted` 一处决定。这里多问一次只为把
+    "provider 当时到底说了什么"落进库里那条原因；观测本身抛错也不许把补偿路径带崩，
+    所以兜成字符串。（与 `app/services/warmpool.py` 的同名辅助同一立场。）
+    """
+    try:
+        return str(provider.reconcile(workspace))
+    except Exception as exc:  # pragma: no cover - 诊断面，不影响判决
+        return f"unobservable ({exc})"
+
+
 class WorkspaceOrchestrator:
     def __init__(
         self,
@@ -198,6 +211,11 @@ class WorkspaceOrchestrator:
         # 分族：池内补位不是用户按下的启动（N-39，理由见 app/metrics.py 的注释）
         record_launch_start(workspace, template.id, workspace.provider)
         launch_started = time.monotonic()
+        # N-67：补偿回滚**结果**是释放准入的输入，不是可以吞掉的东西。
+        #   cleanup_attempted —— 补偿域到底进没进（只有进去了才有一次"我把它退役了"的动作）；
+        #   cleanup_error     —— 补偿 destroy 抛出来的那一句（只进诊断文案，不参与判决）。
+        cleanup_attempted = False
+        cleanup_error: str | None = None
         try:
             # 1) 原子分配 GPU（GpuScheduler 是唯一 GPU reservation 决策入口）
             gpu = self.scheduler.allocate(
@@ -245,9 +263,20 @@ class WorkspaceOrchestrator:
                     )
             except Exception:
                 # 补偿回滚：清理 provider 已创建的下游资源（容器/Pod/PVC/Service），
-                # 幂等（container_name 未落库时按 workspace.id 推导）
-                with contextlib.suppress(Exception):
+                # 幂等（container_name 未落库时按 workspace.id 推导）。
+                # 改前这里是 `with contextlib.suppress(Exception)`：destroy 成没成被原地丢掉，
+                # `_fail` 于是只能盲放卡（N-67）。现在把结果记下来，再原样上抛**原来那个**
+                # 异常 —— 补偿的错误不许换掉原始异常的类型（ADR 0002：provider/scheduler
+                # 边界不得给调用方引入新异常类型），也不许把它包成第二个异常往外抛。
+                cleanup_attempted = True
+                try:
                     self.provider.destroy(workspace)
+                except Exception as destroy_exc:
+                    cleanup_error = str(destroy_exc)
+                    logger.warning(
+                        "workspace %s compensating destroy failed: %s",
+                        workspace.id[:8], destroy_exc,
+                    )
                 raise
             workspace.ide_port = result.ide_port
             workspace.signal_port = result.signal_port
@@ -269,53 +298,110 @@ class WorkspaceOrchestrator:
         except Exception as exc:
             # 盲捕获是有意设计：provider/scheduler 边界任意异常不得泄漏到 API（ADR 0002）
             record_launch_failure(workspace, template.id, workspace.provider)
-            self._fail(db, workspace, str(exc), terminal=_failure_is_terminal(operation))
+            self._fail(
+                db,
+                workspace,
+                str(exc),
+                terminal=_failure_is_terminal(operation),
+                # 释放准入的输入（N-63 的同一条判据，判据本体见 `_release_admitted`）：
+                # 进了补偿域，就以那次补偿 destroy 的真实结果为准；没进（典型是 allocate
+                # 自己失败，provider 侧从未创建过东西）就没有"我把它退役了"的动作可背书，
+                # 走宽松档 —— 与改前一致，但 provider 亲口说 ALIVE 时照样不放卡。
+                command_succeeded=(not cleanup_attempted) or cleanup_error is None,
+                cleanup_error=cleanup_error,
+            )
             raise
         db.commit()
 
     def _fail(
-        self, db: Session, workspace: Workspace, message: str, *, terminal: bool = True
+        self,
+        db: Session,
+        workspace: Workspace,
+        message: str,
+        *,
+        terminal: bool = True,
+        command_succeeded: bool,
+        cleanup_error: str | None = None,
     ) -> None:
-        """记录这一次尝试的失败原因，并尽力释放 GPU；只有终态才写 FAILED。
+        """记录这一次尝试的失败原因；GPU 只放回 provider 认账"runtime 已退役"的那一格。
 
-        `terminal=False`（worker 还会按 attempts 重试）时，status 停在 QUEUED：
+        释放准入（N-67，同一判据在仓库里的第四处消费位，前三处是 `_stop_cleanup` 的成功档
+        与报错档、`claim` 的撤销档）：卡能不能回池，只由 `_release_admitted` 一处决定，
+        不由补偿 destroy 的返回码决定。`command_succeeded` 由调用方（`_execute_provision`
+        的补偿域）传入，语义与 `_release_admitted` 的同名参数一致。
+
+        - 放行 ⇒ 今天的全部行为：release + 清 GPU 三列 + 下面那一档状态。
+        - 不放行 ⇒ **不放卡、不清 GPU 三列**，状态写 **STOPPING**：
+          两个候选里只有它同时满足"被保护"与"有人重试"。
+          ① 保护：`recover_stuck_gpu_allocations`（scheduler.py:274-281）按状态保护
+            {PROVISIONING, RUNNING, STOPPING}；QUEUED/FAILED 都在保护集外，留在 QUEUED 会被
+            它把还有人吃的卡强制放掉，本函数的准入判据等于被绕过。
+          ② 重试：`reconcile_all` 的 STOPPING+ALIVE 档已经接了 `_stop_cleanup`
+            （:692），会真再叫一次 provider，认账了才结算＋放卡。
+          反过来 PROVISIONING 两样都不满足：`_execute_provision` 的幂等前置
+          （status ∈ {RUNNING, PROVISIONING} 直接 return）会把 durable 重试变成一次
+          空转并被 worker 记成 SUCCEEDED；而不放行时 provider 恰恰说 ALIVE，
+          `reconcile_all` 的 PROVISIONING+ALIVE 档会把它 adopt 成 RUNNING —— 一个没有
+          端口、没有凭据、provision 明确失败的 runtime 被对外的 status 宣布在跑。
+
+        `terminal=False`（worker 还会按 attempts 重试）时，放行档的 status 停在 QUEUED：
         把"还要再试"的失败写成 FAILED，等于对读者宣布一个还没下的结论——
         `workspace_operations` 在 API 层零读者，status 是"还在重试"这件事的唯一出口。
         实测形状：共享卡池被借走的那 1s 里第 1 次尝试报 `No GPU available` → 旧写法
         当场 FAILED → 第 2 次尝试成功 → 同一个 workspace 又回到 RUNNING（FAILED→RUNNING
         的复活），期间 GET /api/workspaces/{id} 读到的是假死。常驻对照见
         tests/test_worker.py::test_retryable_provision_failure_is_not_published_as_terminal。
+        不放行档不分 terminal：STOPPING 不是终态，因而它同样没有替 worker 下结论；
+        两档在这里优先的是同一件事 —— 卡不得在 runtime 还活着时回池。
 
         终态那一路的持久化要求不变：release 异常时回滚只撤销 release 的局部修改，
         随后重新置位 + error_message + 清 GPU 字段；GPU 残留由 reconcile 补做。
         """
-        settled = WorkspaceStatus.FAILED.value if terminal else WorkspaceStatus.QUEUED.value
-        # §18：启动失败 → 圈住的额度原样退回（不产生任何账本条目；重试那一轮会重新圈）
+        # §18：启动失败 → 圈住的额度原样退回（不产生任何账本条目；重试那一轮会重新圈）。
+        # 这一步在准入判据**之外**：额度轴与资源轴是两件事，卡放不放不该决定退款做不做。
         if self.billing is not None:
             try:
                 self.billing.release_hold(db, workspace.id, reason="provision failed")
             except Exception as exc:  # 释放失败不得掩盖状态置位（盲捕获有意，见 ADR 0002）
                 logger.warning("hold release failed for %s: %s", workspace.id[:8], exc)
-        workspace.status = settled
-        workspace.error_message = message
-        # 先 flush：release 成功时其内部 commit 会连同状态置位一并落库
-        db.flush()
-        try:
-            self.scheduler.release(db, workspace.id)
-        except Exception as exc:
-            db.rollback()
-            # 不得因 release 失败回滚状态置位：重新置位（release 失败可被 reconcile 补做）
-            logger.warning(
-                "workspace %s GPU release failed during fail: %s (will be reconciled)",
-                workspace.id[:8], exc,
-            )
+        if self._release_admitted(workspace, command_succeeded=command_succeeded):
+            # 放行 = provider 认账 runtime 已退役 ⇒ 今天的全部行为保持（放卡 + 清列 + 该档状态）
+            settled = WorkspaceStatus.FAILED.value if terminal else WorkspaceStatus.QUEUED.value
             workspace.status = settled
             workspace.error_message = message
-        # 这一次尝试没有留下运行时：workspace 不得继续声称占有 GPU（字段一并清除）
-        workspace.gpu_id = None
-        workspace.gpu_index = None
-        workspace.gpu_name = None
-        db.flush()
+            # 先 flush：release 成功时其内部 commit 会连同状态置位一并落库
+            db.flush()
+            try:
+                self.scheduler.release(db, workspace.id)
+            except Exception as exc:
+                db.rollback()
+                # 不得因 release 失败回滚状态置位：重新置位（release 失败可被 reconcile 补做）
+                logger.warning(
+                    "workspace %s GPU release failed during fail: %s (will be reconciled)",
+                    workspace.id[:8], exc,
+                )
+                workspace.status = settled
+                workspace.error_message = message
+            # 放行即"这一次尝试没有留下运行时"：不得继续声称占有 GPU（字段一并清除）
+            workspace.gpu_id = None
+            workspace.gpu_index = None
+            workspace.gpu_name = None
+            db.flush()
+            return
+        observed = _observed_runtime_state(self.provider, workspace)
+        workspace.status = WorkspaceStatus.STOPPING.value
+        workspace.error_message = (
+            f"{message}; GPU not released: provider reports runtime {observed} "
+            f"and the runtime was not retired "
+            f"({cleanup_error or 'compensating destroy reported success'})"
+        )
+        # 不放行时没有 `scheduler.release` 内部的那次 commit，状态与原因必须自己落库：
+        # "这张卡还被活着的 runtime 吃着"是不能只待在内存里等调用方顺手 commit 的事实。
+        db.commit()
+        logger.warning(
+            "workspace %s provision failed but GPU release is not admitted (runtime %s)",
+            workspace.id[:8], observed,
+        )
 
     # ------------------------------------------------------------------
     # stop / destroy（同步 API 语义）
@@ -369,7 +455,13 @@ class WorkspaceOrchestrator:
             # 命令报错也不等于 runtime 还在：provider 亲口说没了就照样收尾
             admitted = self._release_admitted(workspace, command_succeeded=False)
         if not admitted:
-            return stop_error or "runtime still reported ALIVE after stop"
+            # 原因里写"provider 亲口说了什么"，不写死某一种子情形：没放行有两种原因
+            # （自述还活着／压根问不到），只说其中一种的那条消息在另一种场合就是假话。
+            # `_observed_runtime_state` 只做诊断复读，判决仍由上面那一次判据决定。
+            return stop_error or (
+                f"release not admitted: provider reports runtime "
+                f"{_observed_runtime_state(self.provider, workspace)}"
+            )
         if stop_error is not None:
             logger.warning(
                 "workspace %s stop command errored (%s) but runtime is confirmed gone",
@@ -395,9 +487,23 @@ class WorkspaceOrchestrator:
 
         取径见本轮登记行（Kubernetes finalizer 的"在用资源不得判为已删除"＋
         moby Engine API 把 304/404 都算停止成功，即"停没停"由引擎自述）。
-        `command_succeeded` 语义对 destroy 同样成立，供 provision 失败那一路复用。
+        `command_succeeded` 语义对 destroy 同样成立，供 provision 失败那一路复用 ——
+        N-67 起 `_fail` 是它的第四个消费位（前三位：本函数上下两档、warm pool 的 claim 撤销档）。
+        第三种结果：问不到。provider 连"还在不在"都答不上来（`reconcile` 自己抛错）时
+        判不出，一律按"不放行"处理 —— ADR 0008 同一口径（存储问不到不等于对象不存在，
+        这里：runtime 问不到不等于卡没人吃）。这一档也必须留在这里而不是各消费位自己
+        try：`_stop_cleanup` 的报错档是在 except 处理器里第二次问的，异常从那里冒出去
+        就会穿出 ADR 0002 划的 provider/scheduler 边界。
         """
-        state = self.provider.reconcile(workspace)
+        try:
+            state = self.provider.reconcile(workspace)
+        except Exception as exc:
+            logger.warning(
+                "workspace %s release admission undecidable (provider raised: %s)"
+                " — treated as not admitted",
+                workspace.id[:8], exc,
+            )
+            return False
         if command_succeeded:
             return state != RuntimeState.ALIVE
         return state == RuntimeState.MISSING
@@ -515,7 +621,8 @@ class WorkspaceOrchestrator:
         - DB PROVISIONING + runtime ALIVE → RUNNING（adopt）
         - DB PROVISIONING + runtime MISSING → 无 active operation 则重新入队（retry）
         - DB STOPPING + runtime ALIVE → 再试停止；确认不在才结算 → 释放 → STOPPED，
-          仍未确认则保持 STOPPING 等下一轮（不释放 GPU）
+          仍未确认则保持 STOPPING 等下一轮（不释放 GPU）。provision 失败且释放准入没放行
+          的那一格（N-67，`_fail` 写 STOPPING）就靠这一档被接着退役。
         - DB STOPPING + runtime 停止/缺失 → 结算 → 释放 → STOPPED
         - QUEUED/CREATED + runtime MISSING → 重新入队 PROVISION
         - UNKNOWN（mock 无真实 runtime）→ 不动，避免误杀

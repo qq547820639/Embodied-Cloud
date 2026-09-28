@@ -240,7 +240,7 @@ def test_stop_command_succeeding_is_not_evidence_the_runtime_is_gone():
         ws = db.get(Workspace, wid)
         assert ws.status == WorkspaceStatus.STOPPING.value
         # 判决的原因来自 provider 的读数，不是那句假的"成功"
-        assert "ALIVE" in (ws.error_message or "")
+        assert "provider reports runtime alive" in (ws.error_message or "")
         assert _side_effects(db, wid) == NOT_RELEASED
     assert provider.alive is True
 
@@ -405,7 +405,7 @@ def test_quota_monitor_does_not_count_a_stop_that_was_not_admitted():
         ws = db.get(Workspace, wid)
         assert ws.status == WorkspaceStatus.STOPPING.value
         # 留下的是放行判据的原因，不是"credits exhausted"
-        assert "ALIVE" in (ws.error_message or ""), ws.error_message
+        assert "provider reports runtime alive" in (ws.error_message or ""), ws.error_message
         assert _side_effects(db, wid) == NOT_RELEASED
 
 
@@ -420,8 +420,10 @@ def release_admission_wiring(source: str) -> dict[str, int]:
     "stop_consumers": stop() 里对 _stop_cleanup 的调用数,
     "reconcile_consumers": reconcile_all() 里对 _stop_cleanup 的调用数}`。
 
-    链的形状是：判据只在 `_stop_cleanup` 里被消费一次，`stop` 走它一处、`reconcile_all`
-    走它两处（STOPPING+ALIVE 的重试档与 RUNNING 的节点不一致档）。按 AST 判而不是按文本判：
+    链的形状是：判据本体只有一份，消费位点共四处 —— `_stop_cleanup` 的成功档与报错档
+    （同一个收尾函数的两极）、`_fail` 的 provision 补偿档（N-67 接上），入口侧 `stop` 走
+    `_stop_cleanup` 一处、`reconcile_all` 走它两处（STOPPING+ALIVE 的重试档与 RUNNING 的
+    节点不一致档）。按 AST 判而不是按文本判：
     注释里出现判据名不算接上，挪动行号也不会让这条判据失效。
     """
     tree = ast.parse(source)
@@ -466,16 +468,18 @@ def _orchestrator_source() -> str:
 
 
 def test_the_release_admission_judgment_has_one_copy_both_entries_consume_it():
-    """判据恰好一份实现、只在 `_stop_cleanup` 里被消费两次；入口共三处分支接的是它。
+    """判据恰好一份实现、共三处消费；入口侧另有三处分支经 `_stop_cleanup` 接上它。
 
     N-68 之后 reconcile 的节点不一致分支也走 `_stop_cleanup`（不再自己 settle+release+FAILED），
     所以 `reconcile_consumers` 从 1 变 2 —— 这条判据是"接线位点"的棘轮，新增消费位点必须
     连同本行一起改判，不许悄悄多接或不接。
+    N-67 之后 `admitted_uses` 从 2 变 3：provision 失败那一路（`_fail`）也接上了同一份判据，
+    改前三处之外的它就是"卡被盲放"的那一处。
     """
     assert release_admission_wiring(_orchestrator_source()) == {
         "definitions": 1,
         "cleanup_definitions": 1,
-        "admitted_uses": 2,  # 成功档与失败档各问一次（command_succeeded 取值不同）
+        "admitted_uses": 3,  # `_stop_cleanup` 的成功档与报错档 + `_fail` 的补偿档
         "stop_consumers": 1,
         "reconcile_consumers": 2,
     }
@@ -518,3 +522,34 @@ def test_no_behavior_leaves_the_gpu_free_while_the_runtime_is_alive(behavior: st
     with Factory() as db:
         effects = _side_effects(db, wid)
     assert not (effects["gpu_free"] and provider.alive), (behavior, effects, provider.alive)
+
+
+class UnreachableProvider(StatefulProvider):
+    """`stop` 照常被叫，但此后连"还在不在"都答不上来（`reconcile` 自己抛）。
+
+    判据的第三种结果（ADR 0008 同一口径：问不到不等于不存在）。这一档同时钉两件事：
+    不放卡，以及异常不得穿出 ADR 0002 划的 provider/scheduler 边界 —— 由 `stop()`
+    正常返回这一隐含断言承担（`_stop_cleanup` 的报错档是在 except 处理器里第二次问的，
+    若判据不吞这个异常，它就会一路穿出 `stop()`）。
+    """
+
+    def reconcile(self, workspace):  # type: ignore[override]
+        raise RuntimeError("engine unreachable")
+
+
+def test_unobservable_runtime_does_not_release_and_does_not_escape_stop():
+    provider = UnreachableProvider(behavior="stops")
+    orchestrator, wid = _running_workspace(provider)
+
+    with Factory() as db:
+        orchestrator.stop(db, db.get(Workspace, wid))  # 不外抛 = 本条的隐含断言
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        effects = _side_effects(db, wid)
+        assert ws.status == WorkspaceStatus.STOPPING.value, ws.status
+        assert effects["allocated"] is True and effects["gpu_free"] is False, effects
+        # 原因写的是 provider 亲口的回话：没放行有两种子情形（自述活着／问不到），
+        # 只点名其中一种的消息在另一种场合就是假话。这一档必须是 unobservable。
+        msg = ws.error_message or ""
+        assert "release not admitted" in msg and "unobservable" in msg, msg

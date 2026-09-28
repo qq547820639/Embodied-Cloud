@@ -7,6 +7,13 @@
 - no orphan port（端口字段清空）
 - workspace state == FAILED
 - error persisted
+
+N-67 之后这些断言仍然成立，是因为它们全部坐在释放准入的**放行**一侧：本文件的替身
+（docker/k8s/mock 三档）补偿 destroy 都成功，且没有一档会在 destroy 之后自述 ALIVE
+（mock 恒 UNKNOWN，见 providers/mock.py:72-74；docker/k8s 的 reconcile 在无容器/404 时
+给 MISSING，问不到引擎时给 UNKNOWN，providers/docker.py:458-478、providers/k8s.py:534-549）。
+"destroy 报错或 provider 还说活着 ⇒ 不放卡"那一侧的常驻对照在
+tests/test_provision_release_admission.py，不在这里。
 """
 
 from pathlib import Path
@@ -415,7 +422,10 @@ def test_fail_persists_failed_state_when_release_raises(monkeypatch, tmp_path):
 
     with Factory() as db:
         ws = db.get(Workspace, wid)
-        orchestrator._fail(db, ws, "boom")
+        # `command_succeeded=True` = 补偿 destroy 成功那一档（本例的 mock 只会说 UNKNOWN，
+        # 即 provider 不再自述 ALIVE ⇒ 释放准入放行，走到"release 自己抛错"这一档）。
+        # 不放行档（provider 仍说 ALIVE）见 tests/test_provision_release_admission.py。
+        orchestrator._fail(db, ws, "boom", command_succeeded=True)
         db.commit()
 
     with Factory() as db:

@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 723 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 742 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702→711→723，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78。
+- 计数面 665→678→686→693→701→702→711→723→742，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -868,19 +868,87 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   本轮**没有**新开登记项（并发窗口属既有 PG 档，不重复立项）。
 - 计数面 711→723，门禁 G0.78。
 
+### provision 失败那一路的放卡也要 provider 认账（N-81，闭登记项 N-67）
+- 缺陷（N-67 登记于 N-63 那一轮；本轮由子代理实施、我在主线独立复跑与复算）：
+  `_execute_provision` 的补偿回滚用 `contextlib.suppress(Exception)` 吞掉
+  `provider.destroy` 的异常（`app/services/orchestrator.py:264-280`（`_execute_provision` 全体 :185-314）），异常信息就地丢掉；
+  随后 `_fail` 无条件 `scheduler.release` 并清 `gpu_id/gpu_index/gpu_name` ⇒
+  容器没销毁成功，卡照样回池、还写成终态。这是「释放由命令返回码背书」家族的第二实例
+  （stop 重试＝N-63、节点不一致＝N-77、warm pool＝N-80、provision 失败＝这里）。
+- 更正我自己在登记项里写错的前提：原文写「`_fail` 的三个调用点各自的 runtime 形状要先量清」。
+  实测 `WorkspaceOrchestrator._fail` 只有 `orchestrator.py:301` 一处调用（定义在 :316-404）
+  （`deployment.py:297/304/310` 的 `_fail` 是另一个类的方法，与本仓账本无关）；
+  真实的两档是同一调用点上的 `terminal=`（由 `_failure_is_terminal` :36-42 决定：
+  同步 `_start` 路径 = 终态；worker 还会重试 = 非终态）。
+- 改法：补偿域不再吞信息 —— 记 `cleanup_attempted`/`cleanup_error` 后原样 re-raise（原始异常
+  不被盖掉，ADR 0002 的边界不破）；`_fail` 新增**必填**关键字 `command_succeeded`
+  （「没进补偿域」按 lenient 档处理，与改前一致），release 与清列整体搬进
+  `if self._release_admitted(...)`（`orchestrator.py:367`）；不放行档不放卡、不清列、
+  状态写 **STOPPING** 而不是 FAILED/QUEUED，`error_message` 同时带上原始失败＋provider 亲口的
+  回话＋destroy 的错误串，并自己 `db.commit()`。`billing.release_hold` 留在门外（计费轴与资源轴分家）。
+- 为什么是 STOPPING（子代理把两个候选都量过，我核过它的读数）：留 PROVISIONING 两头都不成立——
+  幂等预筛会让 durable 重试变成 no-op 却记 SUCCEEDED，而 `reconcile_all:675-681` 会把
+  PROVISIONING＋ALIVE **adopt 成 RUNNING**（没有端口也没有凭据）；STOPPING 既在
+  `recover_stuck_gpu_allocations` 的保护集内（`scheduler.py:272-280`，我另用真函数在两档上证过：
+  stopping/provisioning/running 留卡，queued/failed 无 active operation 就被强制放卡），
+  又已被 `reconcile_all:687-692` 的 STOPPING＋ALIVE 分支真去再叫一次清理。
+  两档收敛读数：`stop_calls` 1→2→3 三趟，provider 改口那趟才 `stats["stopped"]=1`；
+  DESTROY operation 轴 `destroy_calls` 1→2（仍留卡）→3（放卡＋DELETED）。
+  我据此定档：**不给交互式 provision 孤儿另加一个 DESTROY 入队器** —— 重试驱动位点已经存在且被量到，
+  再加一个就是同一跳两个司机。
+- 判据 `tests/test_provision_release_admission.py`（17 支）＋我在合流后补的 2 支：
+  destroy 抛错＋provider 自述 alive/unknown 两档都留卡留列不写终态；destroy 抛错但 provider 说
+  MISSING（K8s 对已删 Deployment 的 404）与 destroy 成功的 missing/unknown 两档照旧放行；
+  `command_succeeded=True`＋仍 ALIVE 那一档钉「命令成功不替 runtime 背书」；retryable 档
+  terminal=False 放行时仍停 QUEUED（不抢 N-79 的立场）；原始异常形状单独钉
+  （`pytest.raises(ProvisionBoom)` 且消息里没有补偿错误串、`__cause__ is None`）；
+  结构判据按 AST 数「release 与清 GPU 列是否落在准入谓词之下」
+  （`guarded_releases`/`guarded_gpu_clears`）＋合成不守卫形状的开火控制＋真源码变异控制。
+- 我这 2 支补的是子代理如实报的那格未证实：`_fail` 里的判据没有被 `reconcile` 自己抛保护，
+  新异常会盖掉正在处理的失败。修法放在**判据本体**（`orchestrator.py` 的 `_release_admitted`
+  里 try 住 `provider.reconcile`，问不到一律按不放行，ADR 0008 同一口径），而不是在消费位各包一层 ——
+  因为 `_stop_cleanup` 的报错档是在 except 处理器里第二次问的，那里漏出去就直接穿出 ADR 0002 边界。
+  新判据两档：provision 档「问不到 ⇒ 留卡留列＋STOPPING＋原始失败仍在消息里」，
+  stop 档「问不到 ⇒ `stop()` 不外抛＋STOPPING＋原因写的是 provider 的回话」。
+  反证：把判据里那层 try 摘掉（锚点命中 1、sha 先变），两支分别红在
+  `RuntimeError: engine unreachable` 与 `assert 'provisioning' == 'stopping'`；还原 sha `ed9a1d19…`。
+- 连带改判两处既有断言（都属消息面，不是判决面）：不放行的原因原先写死
+  「runtime still reported ALIVE after stop」，而没放行其实有两种子情形（自述还活着／压根问不到），
+  只点名一种的消息在另一种场合就是假话 ⇒ 改成引用 provider 亲口值
+  （`release not admitted: provider reports runtime alive`），`test_stop_release_admission.py:243,:408`
+  的 needle 随之从 `"ALIVE" in …` 改成 `"provider reports runtime alive"`。
+  另外我第一版把 guard 写在调用位（`admitted = ...` 再 `if admitted:`），被结构判据读成
+  `guarded_releases=0` 而红 —— 这条尺子钉的是「调用直接坐在 If 测试位」这一种拼写；
+  我没有去放宽尺子，而是把异常安全搬进判据本体（更好的设计，且尺子的失效方向是**误报**不是漏报）。
+- 改前复算（`git show HEAD:app/services/orchestrator.py` 就地换面，我自己在主线跑）：
+  本文件 17 支里 `FFFF...F.FFFF..FF`＝11 开火／6 放行档与合成控制照绿，一手读数
+  `destroy 抛错、provider 说的是 alive，卡却被放回池子里了（一卡双跑）`
+  （`{'alloc': False, 'gpu_free': True} != {'alloc': True, 'gpu_free': False}`）、
+  `destroy 返回了成功，provider 却说 runtime 还在，卡却回池了`、`assert 'failed' == 'stopping'`、
+  `{'judgments': 0, 'guarded_releases': 0}`；两支真源码变异控制报的是
+  `锚点不是恰好一处（0）` —— 那是落地门在说改前源码没这段，不是尺子看见缺陷，尺子的牙在合成控制上。
+  同一臂里被改判的两支常驻（接线棘轮 `admitted_uses` 2→3、`_fail` 新必填关键字）也各自红一次，
+  所以三个文件合起来的改前红数是 13（11＋2）。
+- 邻面（我自己跑）：`test_provision_release_admission`／`test_provision_rollback`／`test_worker`／
+  `test_durable_ops`／`test_streaming_lifecycle`／`test_stop_release_admission`／`test_k8s_node_truth`／
+  `test_warmpool_claim_admission`／`test_warmpool`／`test_api` 合跑 114 支 rc=0；
+  `ruff check app tests` All checks passed；`mypy app` Success（41 files）。
+- 未证实：真 docker/k8s 守护进程下「destroy 失败之后 provider 会不会自述 ALIVE」没验（本机无卡无档，
+  替身自己声明事实，属机制限制）；retryable 不放行档现在写 STOPPING，读者侧
+  （`GET /api/workspaces/{id}`）从 QUEUED 变成 STOPPING 的对外语义我没有另开用例钉，
+  只钉了「不写终态」这一条；attempts 2/3 不会重进补偿域（`allocate` 先失败），
+  真正的再叫位点是 reconcile 的 STOPPING 档 —— 用例里如实写着，不是"修好了"。
+  新登记 N-82：`recover_stuck_gpu_allocations` 强制放卡时从不清 `workspace.gpu_id`
+  （`scheduler.py:305-316` 只动 `Gpu` 与分配行），于是 Gpu 行说"没主"、workspace 行说"我占着"；
+  而 `orchestrator.py` 的节点不一致检查正是读 `w.gpu_id` 找 reserved node 的。
+- 计数面 723→742，门禁 G0.79。
+
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
 - ~~`N-66`：hold 幂等键按 workspace 全局唯一，二次启动永远拿不到 pending hold~~ —— **已由 N-73 闭合**：键改按轮次发（`billing.py:272-291`），兜底只按 `workspace_id + status=PENDING` 收敛；实测从 `('hold:ws-A','captured',300)`＋pending 0 变成二启拿到新 pending 且 available 减 300。判据 `tests/test_hold_round_key.py` 7 支。
 
-- `N-67`：**provision 失败那一路是“释放先于确认”的第二实例**（N-63 只修了 stop/reconcile）。
-  `_execute_provision` 在 :249 用 `contextlib.suppress(Exception)` 吞掉补偿
-  `provider.destroy(workspace)` 的异常并继续 raise，随后 `_fail` 在 :304 无条件
-  `scheduler.release` 并在 :315-317 清掉 GPU 字段 ⇒ 容器若没被销毁成功，卡照样回池。
-  与 N-63 同一条判据可复用（`_release_admitted` 的 `command_succeeded` 参数就是为此留出），
-  但要先量清“destroy 失败该由谁认账、`_fail` 的三个调用点各自的 runtime 形状”，
-  不当顺手改。注意它会把 `tests/test_stop_release_admission.py` 里 `admitted_uses == 2`
-  那一格顶到 3——接同一条判据时必须同步改判那条常驻断言，不能让它悄悄变宽。
+- ~~`N-67`：provision 失败那一路是「释放先于确认」的第二实例~~ —— **已由 N-81 闭合**：补偿域不再吞信息（`cleanup_attempted`/`cleanup_error` 记下后原样 re-raise，ADR 0002 不破），`_fail` 新增必填 `command_succeeded`，release 与清 GPU 列整体搬进 `if self._release_admitted(...)`（`orchestrator.py:367`）；不放行档不放卡、不清列、状态写 STOPPING（PROVISIONING 会被 `reconcile_all:675-681` adopt 成 RUNNING 且幂等预筛会把重试记成 SUCCEEDED，两个候选都量过），`error_message` 带原始失败＋provider 回话＋destroy 错误串并自己 commit，`release_hold` 留在门外。判据 `tests/test_provision_release_admission.py` 17 支（＋我补的 2 支「provider 自己抛错 = 问不到」档，guard 落在判据本体里），改前换面 11 开火 `FFFF...F.FFFF..FF`，一手读数「卡却被放回池子里了（一卡双跑）」。登记项原文「`_fail` 的三个调用点」是错的：实测只有一个调用点，两档是同一调用点上的 `terminal=`。
 - ~~`N-68`：reconcile 的节点不一致分支把卡放了，却没停那个 pod（同类第三实例）~~ —— **已由 N-77 闭合**：该分支改走 `_stop_cleanup`（`app/services/orchestrator.py:556-575`），认账了才置 FAILED；provider 仍自述 ALIVE 时保持 RUNNING 不写终态、卡不回池，下一轮接着停。判据 `tests/test_k8s_node_truth.py` 的夹具改成有状态（`stop` 计数＋`reconcile` 随停没停改口），诚实档读 `stop_calls == 1`／撒谎档读 `failed == 0`＋`Gpu` 仍 ALLOCATED＋第二趟 `stop_calls == 2`；接线棘轮 `reconcile_consumers` 1→2 并把反向对照改成 2/1/0 三档。改前就地换面复算 `...FF.........FF...`（19 支里 4 开火），一手读数 `节点不一致没有去停那个 pod（stop_calls=0）`。
 - ~~`N-69`：warm pool 认领失败那一路把销毁失败只记日志，然后照样放卡并写成终态（第四实例，且三重不可见）~~ —— **已由 N-80 闭合**：撤销分支的放卡改由 `orchestrator._release_admitted` 认账（报错档只认 MISSING、成功档不再是 ALIVE；与 `_stop_cleanup` 的 `:366`/`:370` 同形），不认账时不放卡、不清 `container_name`、不写终态，`_cleanup_failed` 选择集扩成 `in_([FAILED, DRAINING])`（`app/services/warmpool.py:236-268`）使 DRAINING 那一格有了重试驱动者，`billing.release_hold` 保持无条件（计费轴与资源轴分家）。判据 `tests/test_warmpool_claim_admission.py`（11 def／收集 12 例）＋重判的 `test_warmpool_claim.py::test_warm_pool_rotation_failure_only_when_admitted`；我主线换面复算 `FF...FFF.FFF`（8 开火），一手读数「destroy 抛错、provider 说的是 alive，卡却被放回池子里了」（`alloc/gpu_free` 三键全反）。原任务书里「清列等于永远停不掉」的机制已被 N-78 降级，两处文字按现状改写。
 - ~~`N-70`：`DockerProvider.reconcile` 用 DB 列推断「容器不存在」，而同一个 provider 的 destroy 会按命名约定把名字推出来 ⇒ 假缺席~~ —— **已由 N-78 闭合**：容器名推导收成一处 `DockerProvider._name()`（start/stop/destroy/inspect/logs/wait_ready/exec/pull_artifact 同源），`inspect` 失败按 stderr 分 absent／unknown（本机实测两形状同为 rc=1：`error: no such object` vs `Cannot connect to the Docker daemon at …`），`reconcile` 把 unknown 读成 UNKNOWN ⇒ `_release_admitted(command_succeeded=False)` 在 daemon 不可达时拒绝放卡；`KubernetesProvider.start/stop` 的空列静默空转同批改掉。判据 `tests/test_provider_absence_evidence.py` 8 支（含真引擎档 `tests/test_docker_provider_integration.py::test_reconcile_asks_the_engine_when_the_name_column_is_empty`）；改前单元档 `F.FFFF..`（5 开火）、真引擎档红在「空列被当成缺席：引擎说这个容器在跑」。
@@ -916,6 +984,15 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   迟早就绪的 pod 会与新人共用同一张卡。要不要把这些态改成 UNKNOWN／ALIVE 是口径决定（改严会让
   永久卡住的 pod 把 GPU 钉死，需要配超时），本轮只登记不改：N-78 已经改了「问不到」那一档的判法，
   这一档必须连超时策略一起定。
+
+- `N-82`：**回收器强制放卡时不清 `workspace.gpu_id` ⇒ 两张表互相打脸**（N-81 顺手量到的）。
+  `recover_stuck_gpu_allocations`（`app/services/scheduler.py:305-316`）删分配行、把 `Gpu` 置
+  AVAILABLE＋`workspace_id=None`，但**从不**动 workspace 行上的 `gpu_id/gpu_index/gpu_name`；
+  而 `orchestrator.py` 的 K8s 节点不一致检查（`reconcile_all` 里 `w.gpu_id is not None` 那一段）
+  正是拿这一列去找 reserved node ⇒ 卡被强制放掉之后，这张卡若已分配给别人，那个 workspace 的
+  不一致判决会读到**别人**的主机名。实测在 N-81 的回收器对照表里每行都打印
+  `workspace.gpu_id=kept`（同一函数、真库、逐档）。要不要把清列一起做进回收器（以及"谁有权清"）
+  需要与 `_fail`/`_finalize_stop` 的清列责任一起定，本轮只登记。
 
 ### 边缘设备通路（§25，ADR 0007 从 Proposed 转 Accepted 并实施）
 - **裁决依据是查来的，不是拍的**：读 AWS IoT Jobs 的任务生命周期页
