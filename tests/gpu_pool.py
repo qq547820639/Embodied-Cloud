@@ -78,8 +78,8 @@ def allocated_workspaces(db: Session) -> list[Workspace]:
 def reclaim_gpus(db: Session, scheduler: GpuScheduler) -> int:
     """释放所有 ALLOCATED 的卡，返回释放张数。
 
-    只动 ALLOCATED：UNHEALTHY / DRAINING 是别的用例**故意**设出来的状态，
-    回收它们会把那些用例的前提抹掉。
+    只动 ALLOCATED：UNHEALTHY / DRAINED 是管理员判决、DRAINING 是别人故意设出来的缺席档，
+    回收它们会把那些用例的前提抹掉（N-123 之后生产代码的 `release` 同样只把占用中的卡还池）。
     """
     released = 0
     for workspace in allocated_workspaces(db):
@@ -132,7 +132,7 @@ def ensure_free_gpus(db: Session, scheduler: GpuScheduler, need: int = 1, requir
     """达成"扣掉队列欠款后仍有至少 `need` 张够用的空闲卡"，返回达成后的**原始**空闲数。
 
     出参口径是 `count_big_enough` 的原始读数（不含扣减），调用方按"现在有几张 AVAILABLE"
-    读它——`tests/test_gpu_pool_guard.py::test_ensure_free_gpus_leaves_draining_cards_alone`
+    读它——`tests/test_gpu_pool_guard.py::test_ensure_free_gpus_leaves_drained_cards_alone`
     的等值断言钉的就是这个口径。承诺的是净额：`出参 − unfulfilled_provision_ops ≥ need`。
     """
     if count_big_enough(db, requirement_gb) - unfulfilled_provision_ops(db) < need:

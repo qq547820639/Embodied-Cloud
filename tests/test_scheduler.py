@@ -128,11 +128,12 @@ def test_unhealthy_gpu_not_scheduled():
         assert gpu.gpu_uuid == "gpu-2"  # unhealthy 的 gpu-1 未被分配
 
 
-def test_draining_gpu_not_scheduled():
+def test_drained_gpu_not_scheduled():
+    """管理员下架（N-123 的 DRAINED）不参与调度；返回值必须是"判决已落地"。"""
     scheduler = _setup_two_gpus()
     with Factory() as db:
         gpu1 = db.scalar(select(Gpu).where(Gpu.gpu_uuid == "gpu-1"))
-        scheduler.mark_draining(db, gpu1.id)
+        assert scheduler.mark_drained(db, gpu1.id) is True
         _workspace(db, "wd")
         gpu = scheduler.allocate(db, "wd", gpu_requirement_gb=8)
         assert gpu.gpu_uuid == "gpu-2"

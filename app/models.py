@@ -44,7 +44,10 @@ class GpuStatus(StrEnum):
     AVAILABLE = "available"
     ALLOCATED = "allocated"
     UNHEALTHY = "unhealthy"
+    # 两个 drain 是两个判决，不是一件事的两种写法：DRAINING 只表示"这次上报里没有它"，
+    # 一次成功重报就归位；DRAINED 是管理员要求，只有管理员能解除（SLURM 的 DRAIN/DOWN 之分）。
     DRAINING = "draining"
+    DRAINED = "drained"
 
 
 class LedgerType(StrEnum):

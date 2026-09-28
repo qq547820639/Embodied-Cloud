@@ -37,8 +37,16 @@ def mark_unhealthy(gpu_id: str, db: DB, user: CurrentUser):
 
 
 @router.post("/{gpu_id}/drain", status_code=204)
-def mark_draining(gpu_id: str, db: DB, user: CurrentUser):
+def mark_drained(gpu_id: str, db: DB, user: CurrentUser):
+    """管理员把这张卡从池子里摘出去；只有管理员能解除（重新上报不会把它抬回来）。
+
+    204 只意味着"这张卡现在确实是 drained"。占用中的卡不改写状态列（`allocated` 是本仓的
+    占用权威），所以这里回 409 并点名当前状态——改前后置不满足也回 204，是「没报错即成功」
+    那一族（N-109／N-113 同族）。
+    """
     _admin(user)
-    if db.get(Gpu, gpu_id) is None:
+    gpu = db.get(Gpu, gpu_id)
+    if gpu is None:
         raise HTTPException(404, "gpu not found")
-    scheduler.mark_draining(db, gpu_id)
+    if not scheduler.mark_drained(db, gpu_id):
+        raise HTTPException(409, f"gpu {gpu_id} is {gpu.status}; drain 只作用于池子里的卡")

@@ -162,8 +162,8 @@ def test_reclaim_frees_the_cards_and_clears_the_binding(rig):
         assert not still_bound, [gpu.id for gpu in still_bound]
 
 
-def test_ensure_free_gpus_leaves_draining_cards_alone(rig):
-    """不该动的时候不动：UNHEALTHY/DRAINING 可能是别的用例故意设出来的前提。"""
+def test_ensure_free_gpus_leaves_drained_cards_alone(rig):
+    """不该动的时候不动：UNHEALTHY/DRAINED 是管理员判决，守卫与自动路径都不许碰。"""
     with SessionFactory() as db:
         free_before = count_big_enough(db, 8)
         assert free_before >= 2, (
@@ -171,20 +171,20 @@ def test_ensure_free_gpus_leaves_draining_cards_alone(rig):
         )
         # N-85：这条判据核的是"守卫不该触发回收"，它成立的前提是**净额**还够 1 张。
         # 不加这道前提，队列欠账 ≥ 空闲数时守卫会去回收，返回值就不再等于 `free_before - 1`，
-        # 而报错会指向"DRAINING 判据坏了"——那是夹具没造出这一档，不是被测系统的缺陷。
+        # 而报错会指向"DRAINED 判据坏了"——那是夹具没造出这一档，不是被测系统的缺陷。
         debt = _queue_debt(db)
         assert free_before - 1 - debt >= 1, (
-            f"本档要求「设成 DRAINING 之后净余量仍 ≥1」：原始空闲 {free_before} 张 − 1（DRAINING）"
+            f"本档要求「设成 DRAINED 之后净余量仍 ≥1」：原始空闲 {free_before} 张 − 1（DRAINED）"
             f" − 未执行 provision op {debt} 个 已经不够；换成有净余量的时刻再跑"
         )
         victim = db.scalar(select(Gpu).where(Gpu.status == GpuStatus.AVAILABLE.value))
-        victim.status = GpuStatus.DRAINING.value
+        victim.status = GpuStatus.DRAINED.value
         db.commit()
 
-        # 还有空闲卡 → 守卫不该触发回收，返回值必须就是"减去那张 DRAINING 后的现状"
+        # 还有空闲卡 → 守卫不该触发回收，返回值必须就是"减去那张 DRAINED 后的现状"
         assert ensure_free_gpus(db, scheduler, need=1) == free_before - 1
-        still = list(db.scalars(select(Gpu).where(Gpu.status == GpuStatus.DRAINING.value)))
-        assert still, "DRAINING 的卡被放回 AVAILABLE：会抹掉别的用例故意设出来的状态"
+        still = list(db.scalars(select(Gpu).where(Gpu.status == GpuStatus.DRAINED.value)))
+        assert still, "DRAINED 的卡被放回 AVAILABLE：会抹掉管理员的判决"
 
 
 # ---------------------------------------------------------------------------

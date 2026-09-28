@@ -29,7 +29,7 @@ const DEPLOY_STATUS_CN = {
 const AGENT_STATUS_CN = { registered: "已注册", online: "在线", offline: "离线" };
 const STREAM_STATUS_CN = { starting: "启动中", ready: "就绪", connected: "已连接", disconnected: "已断开", failed: "失败" };
 const LEDGER_TYPE_CN = { recharge: "充值", usage: "用量扣费", promotion: "赠送", refund: "退款", adjustment: "调整" };
-const GPU_STATUS_CN = { available: "可用", allocated: "已分配", unhealthy: "异常", draining: "维护中" };
+const GPU_STATUS_CN = { available: "可用", allocated: "已分配", unhealthy: "异常", draining: "暂时缺席", drained: "人工下架" };
 
 const fmtSec = (total) => {
   const t = Math.max(0, Math.floor(total || 0));
