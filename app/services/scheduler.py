@@ -321,9 +321,12 @@ class GpuScheduler:
         `last_synced_at IS NULL`（本列上线后还没同步过的存量行）**一律不动**——
         从没同步过不等于同步失败，把它判成 offline 与把它留在 online 一样是编造。
 
-        这里不碰调度：`allocate` 的权威是 `gpus.status`，host 的 `status` 只有一处
-        读者（admin 的 `GET /api/gpus/hosts` 与前端表格）。本函数的职责就是把那一处
-        读数变成真话——运维不该看到一台早已离开集群的节点仍然"在线"。
+        这里不碰调度，也不碰 `gpus.status`：改卡的状态会把管理员的判决一起顶掉（见
+        `host_is_visible` 的说明）。但**别把"host 的 status 只有一处读者"当成事实**——
+        这句在本仓一度成立，N-112 之后就不成立了：`allocate` 的候选与等锁计数（`:202`／`:251`）
+        都经由 `host_is_visible()`（`:81`）读它，本轮 N-122 又多了 warm pool 的容量闸门
+        （`app/services/warmpool.py:211`）。今天它的读者是「一台可见性判定」，
+        运维看到的 `GET /api/gpus/hosts` 只是其中最后一处。
         """
         moment = now or utcnow()
         threshold = moment - timedelta(seconds=offline_after_seconds)

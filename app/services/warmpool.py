@@ -41,6 +41,7 @@ from ..models import (
     WorkspaceStatus,
 )
 from ..utils import utcnow
+from .scheduler import host_is_visible
 
 if TYPE_CHECKING:
     from .orchestrator import WorkspaceOrchestrator
@@ -191,15 +192,24 @@ class WarmPoolManager:
         return stats
 
     def _free_capacities_gib(self, db: Session) -> list[int]:
-        """AVAILABLE 卡的显存（GiB）列表；只读，不改状态。
+        """**今天真的能占到**的卡的显存（GiB）列表；只读，不改状态。
 
         挑"最小的够用那张"来记账，与生产的 best_fit 分配同向（`scheduler.allocate` 的 ORDER BY），
         所以闸门模拟出来的余量与 worker 真占卡时的余量是同一个方向。
+
+        方向必须与分配器**同一个谓词**（`host_is_visible()`，N-112）：N-114 量出这里只按
+        `gpus.status` 数卡，于是失联节点上那张 AVAILABLE 的卡既被池子当成余量、又被分配器拒发——
+        结果是池子开出一格 PROVISIONING，worker 起来占不到卡，收割成 FAILED 再 DESTROY，
+        一整个预热周期白烧（还会连带把冷却/清理的循环转起来）。改成读同一条证据之后，
+        节点重新同步的下一趟 `maintain()` 自然把这一格补回来。
         """
         return [
             int(memory_mib // 1024)
             for memory_mib in db.scalars(
-                select(Gpu.memory_total).where(Gpu.status == GpuStatus.AVAILABLE.value)
+                select(Gpu.memory_total).where(
+                    Gpu.status == GpuStatus.AVAILABLE.value,
+                    host_is_visible(),
+                )
             )
         ]
 
