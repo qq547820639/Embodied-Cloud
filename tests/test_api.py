@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.deps import settings
 from app.main import app
 from tests.http_auth import auth_headers as _auth
 from tests.http_auth import register_body
@@ -222,23 +223,27 @@ def test_standalone_user_usage_balance_matches_ledger():
         token = _register(client, "standalone@example.com", "standalone-user")
         headers = _auth(token)
 
-        # 充值前 balance == 0
+        # 充值前：/api/usage 报的余额必须等于账本之和（注册那笔体验额度也在内），
+        # 而不是硬编码某个数 —— 本用例的主题是"两边对得上"，不是"余额恰好是 0"。
         usage0 = client.get("/api/usage", headers=headers)
         assert usage0.status_code == 200
-        assert usage0.json()["credits_balance"] == 0
+        base = sum(e["amount"] for e in client.get("/api/ledger", headers=headers).json())
+        assert usage0.json()["credits_balance"] == base
+        # 体验额度确实进了**个人**池（N-71 之后组织池只数无主行，这里顺带钉住不串池）
+        assert base == settings.billing_signup_credits, base
 
         # 充值 500 credits
         resp = client.post("/api/ledger/recharge", json={"amount": 500}, headers=headers)
         assert resp.status_code == 200, resp.text
 
-        # GET /api/usage → credits_balance == ledger balance == 500
+        # GET /api/usage → credits_balance == ledger balance == 起点 + 500
         usage1 = client.get("/api/usage", headers=headers)
         assert usage1.status_code == 200
-        assert usage1.json()["credits_balance"] == 500
+        assert usage1.json()["credits_balance"] == base + 500
 
         # 与 /api/ledger 聚合结果一致
         entries = client.get("/api/ledger", headers=headers).json()
-        assert sum(e["amount"] for e in entries) == 500
+        assert sum(e["amount"] for e in entries) == base + 500
 
 
 def test_lifecycle_conflict_is_reported_instead_of_faking_success():

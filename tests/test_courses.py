@@ -14,9 +14,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db import Base
-from app.deps import get_current_user, get_db, orchestrator
-from app.models import CourseMember, Role, Submission, Template, User, Workspace
+from app.deps import get_current_user, get_db, orchestrator, settings
+from app.models import CourseMember, LedgerType, Role, Submission, Template, User, Workspace
 from app.routers.courses import router
+from app.services.ledger import CreditLedgerService
 
 
 def new_user(db: Session, user_id: str, username: str) -> User:
@@ -29,6 +30,17 @@ def new_user(db: Session, user_id: str, username: str) -> User:
     )
     db.add(user)
     db.commit()
+    # N-72 之后出厂默认开了启动预授权：直建用户（绕过 POST /auth/register）必须自己补上
+    # 注册那一笔体验额度，否则"学生开实验"会被 402 挡在门外 —— 而本文件的主题是课程与
+    # 归属，不是计费。数额读生产同一个字段，夹具里不另写魔法数（写死 300 会与之漂移）。
+    CreditLedgerService(sessionmaker(bind=db.get_bind())).record(
+        db,
+        type=LedgerType.RECHARGE,
+        amount=settings.billing_signup_credits,
+        user_id=user_id,
+        description="signup credits",
+        idempotency_key=f"signup:{user_id}",
+    )
     return user
 
 

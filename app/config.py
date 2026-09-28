@@ -51,10 +51,17 @@ class Settings(BaseSettings):
     artifact_s3_secret_access_key: str = ""
 
     # --- billing（§12）---
-    # 启动预授权（生产开启）：余额必须 ≥ minimum_launch_minutes × 60 credits 才能启动，
-    # 且开启时会真的圈住这笔额度（CreditHold），结算转正、余量退回
-    billing_enforce_preauthorization: bool = False
+    # 启动预授权：默认**开启**（N-72 定档）。余额必须 ≥ minimum_launch_minutes × 60
+    # credits 才能启动，且开启时会真的圈住这笔额度（CreditHold），结算转正、余量退回。
+    # 定档依据（本机打开读过 Vast.ai 计费文档）：新算力需要先有额度
+    # 「requires pre-payment of credits for GPU rentals」，而运行中的实例在余额耗尽时被
+    # 「stopped automatically」并允许一段「balance may go negative」的宽限 —— 正好是
+    # 「启动前圈额度 + 运行中由配额 monitor 兜」这两半。改 False 是演示档（显式关掉即可）。
+    billing_enforce_preauthorization: bool = True
     billing_minimum_launch_minutes: int = 5
+    # 注册即发的体验额度（个人池，`signup:<user_id>` 幂等键）。0 = 关掉发放：
+    # 此时新账户因为不够最低启动额度会被 402 拒，这是上面那档默认的预期行为，不是回归。
+    billing_signup_credits: int = 300
     # pending hold 的最长存活时间：控制面在 hold 与结算之间崩溃时，扫描器按此回收
     # （泄漏方向是"少报可用额"，不会多扣钱）
     billing_hold_ttl_minutes: int = 60

@@ -374,8 +374,14 @@ def test_preauthorization_requires_minimum_credit():
         policy.check_launch_eligible(db, user, template)  # 不抛
 
 
-def test_preauthorization_disabled_by_default_allows_zero_balance():
-    """默认（mock/演示）不强制预授权：0 余额仍可启动（兼容现有行为）。"""
+def test_preauthorization_off_in_an_explicit_deployment_allows_zero_balance():
+    """演示档（显式关掉预授权）：0 余额仍可启动。
+
+    N-72 定档之后这不再是"默认"：`Settings.billing_enforce_preauthorization` 与
+    `BillingPolicy` 构造默认都改了口径，出厂默认是**开**。本用例保留的是"运维显式关掉
+    预授权"那一档的行为（上面那行 `enforce_preauthorization=False` 就是它的开关），
+    并靠 `test_launch_pricing_default_is_enforced` 钉住"默认＝开"这件事本身。
+    """
     ledger = CreditLedgerService(Factory)
     policy = BillingPolicy(Factory, ledger, minimum_launch_minutes=5, enforce_preauthorization=False)
     with Factory() as db:

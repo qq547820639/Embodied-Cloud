@@ -5,6 +5,7 @@
 
 from fastapi.testclient import TestClient
 
+from app.deps import settings
 from app.main import app
 from tests.http_auth import auth_headers as _auth
 from tests.http_auth import register_body
@@ -78,5 +79,8 @@ def test_ledger_and_usage_are_user_scoped():
         client.post("/api/ledger/recharge", json={"amount": 1000}, headers=_auth(token_a))
         ledger_a = client.get("/api/ledger", headers=_auth(token_a)).json()
         ledger_b = client.get("/api/ledger", headers=_auth(token_b)).json()
-        assert any(e["type"] == "recharge" for e in ledger_a)
-        assert ledger_b == []
+        assert any(e["type"] == "recharge" and e["amount"] == 1000 for e in ledger_a)
+        # N-72 之后注册用户自带体验额度 ⇒ B 名下不再是空表，而是"只有自己那一笔"。
+        # 隔离要断的是 A 的 1000 绝不出现在 B 的账上，而不是"B 什么都没有"。
+        assert all(e["amount"] != 1000 for e in ledger_b), ledger_b
+        assert [e["amount"] for e in ledger_b] == [settings.billing_signup_credits], ledger_b

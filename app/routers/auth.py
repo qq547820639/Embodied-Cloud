@@ -6,8 +6,8 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
-from ..deps import DB, CurrentUser, settings
-from ..models import Organization, Role, User, UserSession
+from ..deps import DB, CurrentUser, ledger, settings
+from ..models import LedgerType, Organization, Role, User, UserSession
 from ..schemas import AuthOut, LoginIn, RegisterIn, UserOut
 from ..security import generate_token, hash_password, hash_token, verify_password
 
@@ -56,6 +56,17 @@ def register(payload: RegisterIn, db: DB):
             org_row.owner_id = user.id
     db.commit()
     db.refresh(user)
+    # 体验额度只进**个人**池：N-71 之后组织池只数 `user_id IS NULL` 的行，
+    # 这里若把 organization_id 一起写上，这笔钱就会既算个人又算组织（同一个双主行老 bug）。
+    if settings.billing_signup_credits > 0:
+        ledger.record(
+            db,
+            type=LedgerType.RECHARGE,
+            amount=settings.billing_signup_credits,
+            user_id=user.id,
+            description="signup credits",
+            idempotency_key=f"signup:{user.id}",
+        )
 
     token, _ = _create_session(db, user.id)
     return AuthOut(token=token, user=UserOut.model_validate(user))
