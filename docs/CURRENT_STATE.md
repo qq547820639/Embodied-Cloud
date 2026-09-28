@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 984 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 1000 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **15 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -133,6 +133,7 @@
 | N-119 | **STOPPED 那一处终态写入没有自己的终结**（闭 N-117）：`_finalize_stop` 靠调用链里恰好有人终结过，而 `stop():421-427` 的幂等补做档把「STOPPED ⇒ 会话已关」当结构保证；`_stop_cleanup` 的 `try` 把终结与 `provider.stop` 同段、except 不 rollback ⇒「终结抛错＋provider 说没了」会提交 STOPPED 配 connected，重试永远补不回来。改法：终结收进本体 `:596`，写在 `:597`。 | 判据 `tests/test_finalize_stop_closes_streaming.py` 7 支（A1 现场修复／A2 真代码证前提／A3 恰好一次按 `stream_failure_total` 增量；B 组尺子宽到全 `app/`，期望应然空集＋`per_file` 分母自证）＋四臂（F1 3 红／F2 1 红／F3 1 红／F4 2 红，F3 更正「两处冗余」的猜测）。未证实：真 Docker/K8s 下终结会不会抛；指针漂移另登 N-120。 |
 | N-121 | **账面里 114 处指针没有存在性读者**：`doc_references` 只核「以仓内根目录开头」的路径，而 CHANGELOG／STATE／ARCHITECTURE／GATES／SECURITY／两份 review 里大量指针写成 `scheduler.py:NNN` 这种少前缀形式（NNN 为行号），永远不进分母。改法：102 处按形状机械改全路径，剩 12 处不带反引号的改完再调判据自己的读数逐条改（裸 count 会把 `app/routers/usage.py:36` 与 `usage.py：365`（全角冒号，避免这段说明本身命中判据）误算同一处，被边界闸门拦下）。 | 判据 `tests/test_validation_matrix.py` 3 支（真语料棘轮 0／0＋qualified≥150；合成语料四极＋边界自证；接线判据）；新函数 `unqualified_pointer_readings()` 走四态、外部写法单列计数不折成合规。五臂：C1 摘接线（**第一遍存活**⇒补第三支）1 红／C2 4 红／C3 1 红／C4 真语料插缩写 3 红／C5 插全路径按设计不红。未证实：第三种书写形状未穷举。 |
 | N-122 | **池子的余量与分配器吃的不是同一条证据**（闭 N-114 的 (a)）：`_free_capacities_gib`（`app/services/warmpool.py:194`）只按 `gpus.status` 数卡，N-112 之后 `allocate` 还要求节点今天可见 ⇒ 池子为一张开不到的卡开出预热格，worker 占不到卡、收割 FAILED、DESTROY、冷却，一整个预热周期白烧。改法：借同一条 `host_is_visible()`，不手写第二份；顺带更正「host.status 只有一处读者」那句假话（三处）。 | 改前复算：旧谓词 `[8,24]` 开格／新谓词 `[8]` skipped，失联节点那张卡未被改写。判据 `tests/test_warmpool_capacity_visibility.py` 5 支（决定档＋恢复档＋健康对照＋AST 钉同一谓词＋该尺三态反证）；三臂 D1 4 红／D2 只 2 支结构档红（等价拷贝）／D3 8 红（含 N-112 那 5 支重跑）。未证实：worker 侧失败代价、真机节点失联。 |
+| N-123 | **一个状态值承载两种判决**（闭 N-114 的 (b)）：`DRAINING` 既是「这次上报里没有这张卡」又是「管理员摘出去的」，于是 `sync_host` 不敢实现归位（一次抖动＝永久掉容量），`mark_draining` 的前置又让管理员对已降级的卡静默 no-op＋204。改法借 SLURM 的 DRAIN／DOWN 之分：新增 `DRAINED` 给人工判决，`DRAINING` 只表示缺席且重报即归位；`/drain` 前置不满足改回 409；release／recover 的三处批量 UPDATE 用 `case` 只把占用的卡还池，人工判决只清绑定。`gpus.status` 无 CHECK 约束⇒不迁移。 | 判据 `tests/test_gpu_drain_provenance.py` 16 支（行为八极＋HTTP 两极＋归位守卫的 AST 尺＋provenance 登记册＋四态合成反证＋前端以枚举为分母）；电池 E1 5 红／E2 4 红／E3 1 红（E4／E5 待第二轮）；`release_column_drift` 那把配对尺分母仍 3（写 `case` 不拆语句的理由）。自伤留痕：电池第一版的还原锚少了行首换行，把构造参数行也换掉了 ⇒ 后两臂读出 48 条收集错误，第二版加锚点普查与中止规则。未证实：前端未浏览器核、真机重报、PG 与 SQLite 的 `case` 差异无专判。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）

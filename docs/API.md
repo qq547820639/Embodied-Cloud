@@ -131,7 +131,7 @@
 | GET | `/api/gpus` | GPU inventory |
 | GET | `/api/gpus/hosts` | 主机列表 |
 | POST | `/api/gpus/{id}/unhealthy` | 标记异常（不参与调度） |
-| POST | `/api/gpus/{id}/drain` | 进入维护（不再新分配） |
+| POST | `/api/gpus/{id}/drain` | 人工下架（`drained`，不再新分配也不随重报归位；占用中的卡回 409） |
 
 ## 认证方式
 

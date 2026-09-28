@@ -83,14 +83,14 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
   行锁语义只在 `make test-pg` 档验证——SQLite 方言把 `FOR UPDATE` 整个丢弃（ADR 0005）。
 - 分配顺序：AVAILABLE（显存满足模板需求，含 16MiB 厂商预留容差）→ ALLOCATED；
   释放：stop/destroy → AVAILABLE。
-- UNHEALTHY 不参与调度；DRAINING 不再分配新 workspace。
+- UNHEALTHY／DRAINED 不参与调度也不自动归位；DRAINING（缺席降级）不参与调度，但重新被上报到即回 AVAILABLE。两个 drain 是两个判决：`DRAINED` 只由管理员写（`POST /api/gpus/{id}/drain`）、只有管理员能解除，`DRAINING` 只由 `sync_host` 的缺席降级写（N-123）。
 - **分配还要求"这张卡所在的节点今天看得见"**（N-112，闭 N-111）：候选语句带一个
   `EXISTS (gpu_hosts WHERE id = gpus.host_id AND status = 'online')`，"还在等锁的那把尺"
   （`still_waiting`）吃同一个谓词——两者不一致时，一张失联节点上的卡会被数进"正被别人
-  锁着"，容量结论就被说成了等待。这一层刻意**不写** `gpus.status`：管理员手工
-  `/drain`、`/unhealthy` 的判决有自己的生命周期（inventory 每 2 min 重报一次，
-  "重新出现即回池"会让手工 drain 活不过两分钟），而"节点暂时失联"必须可逆——
-  节点回到 online 的下一趟分配自然看得到那张卡，全程没人改写过卡的状态。
+  锁着"，容量结论就被说成了等待。这一层刻意**不把“失联”写成状态判决**：管理员手工
+  `/drain`、`/unhealthy` 的判决有自己的生命周期，而"节点暂时失联"必须可逆——这一对张力
+  在 N-123 用两个值解开：`DRAINING` 专指缺席（重报即归位），`DRAINED` 专指人工下架（重报不动它）。
+  节点回到 online 的下一趟分配自然看得到那张卡；状态列只在"机器判决"这一档被自动改写，人工判决只有管理员能解除。
   同一条谓词的第三个消费者是 warm pool 的补位闸门（N-122）：余量与挑卡必须吃同一份证据，否则池子会为一张开不到的卡开出预热格。
 - **inventory 是周期重报的，不是开机一次的**（N-110）：worker 周期表每 120 tick 重跑
   同一个 `bootstrap_gpu_inventory`，于是"节点少报一张卡 → 那张卡 DRAINING"这段收敛在
