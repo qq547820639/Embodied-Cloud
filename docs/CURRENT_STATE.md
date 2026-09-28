@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 866 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 877 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -114,6 +114,7 @@
 | N-95 | **测试库文件除手工 clean 外没人收：仓根 3497 份／1.59 GB／316 个 pid**：N-31 的 pid 后缀解决了互相清库，但每个模块级 ENGINE 都留一份（一整轮 28 份，中位数 11 份），而会话收尾只删自己那一份。改法：`sweep_own_test_dbs()` 只删尾部 pid 等于本进程的那些，扫 CWD 与 REPO_ROOT 两个落点，挂 `pytest_sessionfinish`。 | 判据 6 支，危险方向排在效率之前（别人的库必须原地不动且字节相同），接线由 AST 尺钉；并排实测同一支用例：改前树遗留 1 份、改后树 0 份。未做到：那 3497 份历史遗留没批量删（不在本轮半径内）。 |
 | N-96 | **present-but-not-running 被读成缺席 ⇒ 卡从活 runtime 底下放走**（闭登记项 N-79，并更正其一半前提）：`_release_admitted(command_succeeded=False)` 只认 MISSING，而 k8s 只读 `available_replicas`（docstring 承诺的「0 副本 → MISSING」代码没做）、docker 兜底把所有非 running 落到 MISSING。改法：缺席只认引擎亲口说的话（404／自述 exited·dead／自己缩到 0 副本），docker 用白名单不兜底；paused/restarting 实测 `Running:true`，登记原文那两半是假的。依据本机打开：moby `state.go` 七常量与 `container.go:76` 原文、pod-lifecycle.md 第 114 行、SDK 31.0.0 属性表。 | 判据 20 支（k8s 五档＋产品级两极＋docker 实测表＋AST 两 clause 各带开火与合规控制），改前 9 开火；邻面 12 文件 147 支 rc=0。代价另立 N-98。未证实：dead/removing 瞬态本机造不出来（没做到）；真 GPU 集群上 Pending 收敛未跑。 |
 | N-97 | **已入账的运行段被读者各算一次，第三个读者是前端**（闭登记项 N-76）：destroy 先结算、`provider.destroy` 抛错上抛给 DESTROY 重试 ⇒ RUNNING＋已入账＋`started_at` 未清，实测 QUOTA 门禁 60 而账本 SUM 30。改法：唯一键模板（喂原始列值、不做时区归一）＋唯一口径`workspace_seconds_used`（投影＋仅当未入账的 live），展示端点与门禁都改为调它；`WorkspaceOut` 新增 `usage_segment_booked`（赋值位点全仓唯一、非映射属性），7 个 WorkspaceOut 出口都带上，`app.js` 两处 live 只在它为假时才加。依据本机取回：Microsoft 计量 FAQ「dropped as duplicates」、AWS `MeterUsage` 幂等与 `DuplicateRequestException`。 | 判据 22 支（C1–C6，含 HTTP 一请求两极、JS 落点尺、路由接线尺、唯一赋值尺），改前 14 开火，读数 `QUOTA 门禁读到 60，账本 SUM 只有 30`；邻面 113 支 rc=0。连带改判 `test_settled_projection.py` 的排除措辞。未证实：真浏览器渲染未跑；PG 侧键形态未实测。 |
+| N-99 | **被释放准入拒下的格没有再试的人 ⇒ 一张卡可永久钉住**（闭登记项 N-98）：STOP 打满 `MAX_ATTEMPTS=3` 后进程内无人再试，`OperationType.RECONCILE` 有消费者无入队点，`reconcile_all` 也不是周期任务。改法定向档：`reconcile_all(limit=, older_than_seconds=)` 默认 None＝改前全量扫描，`_reconcile_cell_admitted` 一处准入（沿用 `_has_active_operation` 那份活跃态），`deps._reconcile_stuck_cells` 30 tick／60 s／8 格注册进既有周期表。依据本机重开：reconcile.go:44、node_lifecycle_controller.go:939 与 :850/:863、nomad config.go:273、oslo.service 的 periodic_task.py 第 202/204 行（外部包）。 | 判据 11 支（接线＋AST 界参数尺＋行为四极＋上界＋默认档全量＋消费者不拆），四臂单变量各只红对应那支；邻面 130 支 rc=0，ruff/mypy rc=0；连带补 `test_reconcile_cell_isolation.py` 的 stats 两格。未做：多副本同相位抖动（OPERATIONS.md:9 写的是 1+ 副本），量级每副本每趟 ≤8 次往返、不产生第二种判决（三条既有幂等机制，标为推断）。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）

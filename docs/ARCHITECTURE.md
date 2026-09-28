@@ -55,6 +55,13 @@ DELETED（soft delete tombstone：destroy 可从 RUNNING/STOPPED/FAILED 直达�
 - 启动恢复走 `reconcile_all()`：基于 runtime 事实收敛（DB RUNNING + runtime ALIVE → adopt；
   RUNNING + MISSING → 结算置 FAILED 并归还 GPU；PROVISIONING + MISSING → 重新入队 PROVISION；
   QUEUED/CREATED → 重新入队；mock/UNKNOWN → 保守不动）。
+- 同一套收敛还有一个**周期驱动者**（N-99）：`app/deps.py` 的 `_reconcile_stuck_cells` 注册在
+  worker 的周期表上，走的是 `reconcile_all(limit=…, older_than_seconds=…)` 的**定向档**——
+  只碰"队列没有在做"（沿用 `pending/running/retrying` 那份活跃定义）且"最后一次状态变化
+  早于阈值"的格，一趟最多看 `RECONCILE_CELLS_PER_PASS` 格。它存在的理由是：释放准入拒下一格
+  是故意的，而 STOP 打满 `MAX_ATTEMPTS` 之后若没人再来问一次，那张卡就永久钉在没人用的 runtime 上。
+  有界而不是全量，是因为每格一次 provider 往返且这趟跑在 worker 线程里；持久化的
+  RECONCILE operation 仍然是显式触发的那条路（现在既有消费者也有生产者）。
   注意最后那条"QUEUED/CREATED 且无 active op ⇒ 重新入队"是**测试夹具的引信**：任何模块留下的
   CREATED 行，都会被下一个起 TestClient 的模块的 worker 当成待办去抢共享卡池——留下行的模块
   必须自己收尾（`tests/test_gpu_pool_guard.py` 的 `rig`）。

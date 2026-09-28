@@ -100,6 +100,7 @@
 | G0.89 会话收尾只收本进程的库文件 | `pytest tests/test_test_db_sweep.py` | 按 pid 后缀归属；并发跑的别人的库必须原地不动且字节相同；`pid_of` 形状表；两个落点各删一次；AST 钉 `pytest_sessionfinish` 真调了它 | PASS（常驻） |
 | G0.90 缺席只认引擎亲口说的话，present-but-not-running 不放行 | `pytest tests/test_runtime_presence_not_absence.py` | k8s：404→MISSING／`spec.replicas==0`→MISSING／available≥1→ALIVE／Pending→UNKNOWN／其它失败→UNKNOWN；产品级放行与不放行各一支；docker 按 moby 七态白名单（只有 exited/dead 算缺席），枚举外的态不算缺席；AST 尺 C1 与 C2 各带开火对照与合规控制 | PASS（常驻） |
 | G0.91 「已用秒数」与「这一段入账没」各只有一处定义，三个读者同源 | `pytest tests/test_live_usage_not_double_counted.py` | `usage:` 键构造在 app/ 里恰好一处且在模板函数里；路由与 billing 面上不许再出现 `accumulated_seconds` 读取；HTTP 一请求两极（入账 True／未入账 False，账本侧行数各自数一遍）；`usage_segment_booked` 赋值位点唯一；7 个 WorkspaceOut 路由全部带旗标（分母现算） | PASS（常驻） |
+| G0.92 被拒的老格有周期驱动者，且扫描有界不抢队列 | `pytest tests/test_periodic_reconcile_driver.py` | 周期表里真有驱动者且间隔取自常量；两个界参数由 AST 尺盯（缺关键字／写字面量／函数不存在各开火）；被拒 STOPPING 格收住且卡回池、有活跃 operation 的格不许被抢、FAILED 之后回到驱动者、太新的格不看、limit 生效且按 created_at 轮转、默认档仍是全量、持久化 RECONCILE 消费者还在 | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

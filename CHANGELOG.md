@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 866 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 877 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91。
+- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -1325,6 +1325,45 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 未证实：真实前端渲染没在浏览器里跑（无 UI 档），JS 侧靠文本面尺＋HTTP 契约钉；
   PG 侧键形态未实测（本仓 PG 档没跑过这条路径）——SQLite 落库回读已实测。
 
+### 被拒的格有了周期驱动者，扫描是定向档而不是全量（N-99，闭登记项 N-98）
+- 缺陷是 N-96 改完之后露出来的那一半代价：释放准入拒下一格（不给卡，那是故意的），
+  而 STOP operation 打满 `MAX_ATTEMPTS=3` 之后进程内没人再试；`OperationType.RECONCILE`
+  有消费者（`orchestrator.py:163-164`）却没有任何入队点（本轮现算 grep：除消费者那一行外，
+  app/ 与 scripts/ 零命中），`reconcile_all` 也不是周期任务 ⇒ 一张卡可以永久钉在没人用的 runtime 上。
+- 选型（四个候选；依据全部本机重开原文逐字核对）：
+  ① 每格入队一条 RECONCILE operation —— 否：同 workspace 的活跃 operation 被部分唯一索引
+  （`app/models.py:520-521`）串行化，后台重试会饿死用户的 start/stop。
+  ② 周期全量扫描 —— 否：每格一次 provider 往返。本机实测 mock 侧每格 0.02 ms、200 格一趟 3.2 ms
+  （纯 DB），按 N-91 量到的 `docker inspect` p95 217 ms 外推到真引擎即 200 格 ≈43 s，
+  而这趟跑在 worker 线程里 ⇒ 一格慢把同线程的用户操作一起拖住。
+  ③ 事件驱动 watch（docker events / k8s watch）—— 未做：本仓没有可用的常驻事件通道，属另一条改造。
+  ④ 选定：**周期定向档**——只碰「队列没在做」且「比阈值老」的格，一趟最多 8 格、30 tick 一次。
+  三处一手依据各管一件事：controller-runtime `pkg/reconcile/reconcile.go:44`
+  "RequeueAfter if greater than 0, tells the Controller to requeue the reconcile key after the Duration"
+  （有意轮询与失败退避是两个通道）；`node_lifecycle_controller.go:939` 配 :850/:863 的两个 grace
+  （**扫描周期与动作阈值是两个独立旋钮**，period 5 s／grace 50 s，不是一个数）；
+  `nomad/nomad/config.go:273` "...but this sweeps up on quiescent clusters"（这类扫描的定位是静息兜底）。
+  oslo.service 的 `periodic_task.py` 第 202 与 204 行（外部包，源码不在本仓）讲的抖动是本轮没做的那一件（见下）。
+- 改法：三个常量进 `OperationWorker`（30 tick／60 s／8 格）；`reconcile_all(limit=, older_than_seconds=)`
+  两个参数默认 None ⇒ **默认档就是改前的全量扫描**（启动恢复 `main.py:52` → `run_crash_recovery` 与
+  既有判据走的就是这一档）；准入判定收在 `_reconcile_cell_admitted` 一处，活跃态沿用
+  `_has_active_operation` 那份定义（pending/running/retrying），不另起一套；
+  `deps._reconcile_stuck_cells` 注册进既有周期表，不新建线程。时间基准取
+  `stopped_at or started_at or created_at`（最后一次真实状态变化）。
+- 判据 `tests/test_periodic_reconcile_driver.py` 11 支：接线（周期表里真有它、间隔取自常量、
+  打到那个 orchestrator 单例）、AST 尺盯两个界参数（缺关键字／写成字面量／函数不存在三种破坏各开火）、
+  行为四极（被拒的老格真被收走且卡回池／队列在做的格不许抢／FAILED 之后回到驱动者手里／
+  太新的格不看）、上界（5 格 limit=2 只看最早两格）、默认档仍是全量、
+  持久化 RECONCILE 消费者不许被本轮拆掉（把调用换成 pass 就塌）。
+- 复算：四臂单变量（每臂跑完按字节还原，末尾断言全树文本一致）——摘接线只红接线那支；
+  准入恒真红「不许抢」与「阈值」两支；去掉 limit 只红上界那支；把默认值改成有界只红「默认档全量」那支。
+  邻面 10 文件 130 支 rc=0；ruff/mypy rc=0；连带把
+  `tests/test_reconcile_cell_isolation.py` 那条 stats 精确等值补上 `scanned`/`skipped` 两格（不是放宽断言）。
+- 未证实/未做：多副本同相位的抖动没做——`docs/OPERATIONS.md:9` 写的是 "Control Plane (1+ replicas)"，
+  所以这是真问题不是假想；量级是每副本每趟 ≤8 次 provider 往返，且重复扫描不产生第二种判决
+  （settle 命中同一幂等键、release 的条件更新落空、enqueue 被部分唯一索引挡住——三条从既有代码读出，
+  标为推断；重复收敛的幂等另有 N-90 的常驻用例钉着）。并发扫描若成为成本问题再加相位偏移。
+
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。
 - ~~`N-65`：**`available_credits` 把个人与组织余额直接相加，而行同时带两个归属**（充值翻倍／跨成员拿钱）**—— 已由 N-71 闭合**：读侧分池（组织池只数 `user_id IS NULL` 的行）＋抽一份 `gross_credits` 把三遍相加合一，判据 `tests/test_credit_purse_split.py` 8 支；实测读数从 `available(a1)=2000 / available(b1)=1000` 变成 `1000 / 0`。写侧单一归属（CHECK 或 `account_id` 列）另轮处理，理由是本仓账本 append-only 不回填。
@@ -1342,12 +1381,9 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - ~~`N-90`：`reconcile_all` 的逐格循环没有异常边界，一格抛错穿出整趟~~ —— **已由 N-90 闭合**：循环体搬进 `_reconcile_one`，外层每格一个 try 且**每格各自 commit**（只在循环末 commit 时，一格的 rollback 会把前面已收敛格子的判决退回——这条是判据第一轮红了才发现的，不是推理）。判据 `tests/test_reconcile_cell_isolation.py` 5 支，改前复算 4 failed / 1 passed，一手读数 RuntimeError 穿出整趟＋errors 计数缺席。
 
 - ~~`N-76`：`destroy` 的 provider 失败窗口让配额门禁把同一段算两次（N-74 的另一半）~~ —— **已由 N-97 闭合**：一段运行的身份就是它的 USAGE 幂等键（`idempotency_key` 带 unique），「这段入账了吗」收成一次点查，「已用秒数」收成 `ledger.workspace_seconds_used` 一处口径，两个旧读者（展示端点与 QUOTA 门禁）都改为调它；第三个读者在浏览器里——`WorkspaceOut` 新增 `usage_segment_booked`，前端两处 `accumulated_seconds + live` 只在它为假时才加。登记原文提的「release 失败那一档不在此列」照旧成立（状态已是 STOPPING）。判据 `tests/test_live_usage_not_double_counted.py` 22 支，改前 14 开火，一手读数 `QUOTA 门禁读到 60，账本 SUM 只有 30`。
-- `N-98`：**不放行的格没有周期驱动者，一张卡可能被永久钉住**（N-96 把 Pending 从 MISSING 改成 UNKNOWN 之后量出来的代价）。STOP 打满 `OperationWorker.MAX_ATTEMPTS = 3`（`app/services/worker.py:78`，判决在 :352）之后进程内没人再试；`reconcile_all` 里没有 UNKNOWN 分支，只有一行注释「UNKNOWN：无真实 runtime 可判定，保守不动」（按原文钉：改前 base 2dd2ba2 上是 :716，本轮 main 树实测落在 :748——这就是按行号钉会腐烂的活例），而 `reconcile_all` 本身不是周期任务；`OperationType.RECONCILE` 有消费者（`orchestrator.py:163-164` → `self.reconcile_all()`）却没有任何入队点（现算 grep：除消费者那一行外，app/ 与 scripts/ 零命中，只有常驻用例自己引用）。`docs/ARCHITECTURE.md` 把 RECONCILE 列在持久化生命周期操作里，所以「有消费者没生产者」在文档面上还是反的。修法两条候选（都涉及口径，需与 §12 的驱动者设计一起定）：给既有 RECONCILE 消费者造一个生产者（被拒的 stop 自己再排一次），或加一档「只看钉了超过阈值的格」的定向扫描。本轮实测过的成本面：DB 侧逐格约 0.07 ms，`docker inspect` 中位 93.6 ms／p95 217 ms ⇒ 256 格一趟约 24 s，60 s 周期下占空比 40%，所以「直接全量周期跑」不是免费的。
+- ~~`N-98`：不放行的格没有周期驱动者，一张卡可能被永久钉住~~ —— **已由 N-99 闭合**：`reconcile_all` 加 `limit`/`older_than_seconds` 两个默认 None 的参数（默认档＝改前全量扫描，启动恢复不受影响），`deps._reconcile_stuck_cells` 以 30 tick 注册进既有周期表，只碰「队列没在做」且「比阈值老」的格、一趟最多 8 格；登记项里那条成本读数（256 格一趟 ≈24 s）正是「不做定向档就要付的价」。判据 `tests/test_periodic_reconcile_driver.py` 11 支，四臂单变量各只红它守的那一支。多副本抖动未做，量级与理由写在 N-99 一节的未证实里。
 
-- `N-61`：~~要不要把构建后端从 setuptools 换成 hatchling`**【N-62 结案：不换】** 本机在 `git worktree` 副本上真跑过：hatchling 1.32.4 两建 wheel 同为 `629d6ff7e24f`（它自己就钉 tar 成员 mtime/uid/gid 与 gzip mtime，读安装到本机 venv 的源文件核对过）；与 setuptools 的 wheel 差异只有三处——成员 55 对 56（少 `dist-info/top_level.txt`，全仓 grep 零读者）、`Requires-Dist` 只差 PEP 508 的引号风格（22 条语义同集）、`WHEEL` 的 Generator 行。净收益只是删掉 `scripts/sdist_normalize.py`（约 100 行，6 支判据与两处消费位都已落门禁），代价是 `uv.lock` 重解析、`dev` extra 对齐、wheel 侧 `recomputable` 基线重钉与所有引用产物 sha 的文档面重扫⇒ 不抵。再议的触发条件：自研归一哪天失效，或后端侧出现**别的**产品收益。
-~~`N-34`：sdist 的 sha 随打包时刻变（setuptools 84 不把 sdist 的目录条目与 `PKG-INFO` 的 mtime 夹到
-  `SOURCE_DATE_EPOCH`，逐字节定位见上一节）。wheel 已可复算；sdist 那一半要么给 `dist/checksums.txt`
-  加"这是构建记录、不是复算承诺"的口径说明，要么换 `uv build`/后处理再验一次。（**已由 N-60 走"后处理"这一支闭合**：`scripts/sdist_normalize.py`，实测两建同 sha；口径改为"那行 sha 是归一后产物的 sha"）~~
+- ~~`N-61`：要不要把构建后端从 setuptools 换成 hatchling~~ —— **已由 N-62 结案：不换**。本机在 `git worktree` 副本上真跑过：hatchling 1.32.4 两建 wheel 同为 `629d6ff7e24f`（它自己就钉 tar 成员 mtime/uid/gid 与 gzip mtime，读安装到本机 venv 的源文件核对过）；与 setuptools 的 wheel 差异只有三处——成员 55 对 56（少 `dist-info/top_level.txt`，全仓 grep 零读者）、`Requires-Dist` 只差 PEP 508 的引号风格（22 条语义同集）、`WHEEL` 的 Generator 行。净收益只是删掉 `scripts/sdist_normalize.py`（约 100 行，6 支判据与两处消费位都已落门禁），代价是 `uv.lock` 重解析、`dev` extra 对齐、wheel 侧 `recomputable` 基线重钉与所有引用产物 sha 的文档面重扫⇒ 不抵。再议的触发条件：自研归一哪天失效，或后端侧出现**别的**产品收益。
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
 - ~~`N-33`：`tests/test_gpu_pool_guard.py` 那两支带哨兵（缺余量时算合法跳过）~~ —— 已由 **N-41 闭合**：
