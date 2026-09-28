@@ -532,18 +532,56 @@ class KubernetesProvider:
             return False
 
     def reconcile(self, workspace: Workspace) -> RuntimeState:
-        """判定 Deployment runtime 存活：available_replicas>=1 → ALIVE；404/0 副本 → MISSING；其他 → UNKNOWN。"""
+        """判定 Deployment 的 runtime 还在不在：404 → MISSING；spec.replicas==0 → MISSING（我们自己
+        退役的那一档）；status.available_replicas>=1 → ALIVE；其余（spec.replicas>0 而没有任何
+        available 副本）→ UNKNOWN。
+
+        为什么最后一档是 UNKNOWN 而不是 MISSING：K8s 自己说 Pending 不是缺席 ——
+        "`Pending` | The Pod has been accepted by the Kubernetes cluster, but one or more of the
+        containers has not been set up and made ready to run. This includes time a Pod spends
+        waiting to be scheduled as well as the time spent downloading container images over the
+        network."（kubernetes/website
+        `content/en/docs/concepts/workloads/pods/pod-lifecycle.md` 的 Pod phase 表；本机
+        2026-09-28 由 raw.githubusercontent.com 取回该文件第 114 行逐字核对）。
+        本仓的 k8s 控制面用例恰好天天造这一档：带 GPU 请求的 Pod 在 kind 集群上
+        "必然 Pending（`Insufficient nvidia.com/gpu`）"（tests/test_k8s_control_plane.py:9），
+        而 workspace 的 Deployment 确实请求 `nvidia.com/gpu`（本文件 provision 的 limits，
+        :265）加 cpu/memory（:259-260）。
+
+        改前形状：只调 `read_namespaced_deployment_status`（读不到 spec），于是
+        `available_replicas` 一缺位就 `return MISSING` —— docstring 里"404/0 副本 → MISSING"
+        承诺的那个"0 副本"区分，代码里从来没有做过。后果是 `_release_admitted`
+        （orchestrator.py:477-509）在清理命令失败那一档只认 MISSING，于是 pod 还在拉镜像/
+        等调度时卡就被放回池子（一卡双跑）。
+        """
         deployment_name = workspace.container_name or self._deployment_name(workspace)
         try:
             api = self._require_client()
-            status = api.AppsV1Api().read_namespaced_deployment_status(
+            # 一次 read 同时拿到 spec 与 status：kubernetes SDK 31.0.0 的 V1Deployment
+            # attribute_map 是 {apiVersion, kind, metadata, spec, status}（本机 .venv 实测），
+            # 所以 status-only 的那个调用不是"更便宜"，而是少读了退役证据。
+            dep = api.AppsV1Api().read_namespaced_deployment(
                 name=deployment_name, namespace=self.settings.k8s_namespace
-            ).status
+            )
         except Exception as exc:
+            # 1) 必须排在最前：404 是 API server 亲口说对象不在了，与副本数无关。
+            #    destroy 之后走这一极；不放行就是那张卡被永久钉在一个已经没有对象的 Deployment 上。
             if getattr(exc, "status", None) == 404:
                 return RuntimeState.MISSING
+            # 2) 必须紧随其后、且排在任何 spec/status 读取之前：连不上 apiserver、403、超时
+            #    都是"问不到"，问不到 ≠ 不存在（ADR 0008 同一口径）。读得到才往下判。
             return RuntimeState.UNKNOWN
-        available = getattr(status, "available_replicas", None) or 0
-        if int(available) >= 1:
+        # 3) 必须排在可用性之前：`stop()`（:321-332）把副本缩到 0 并且**保留对象**，
+        #    这一档的 status.available_replicas 合法地是 None/0 —— 先判"退役"才不会被
+        #    读成 Pending，正常停止路径放卡靠的就是这里的 MISSING。
+        if dep.spec is not None and dep.spec.replicas is not None and int(dep.spec.replicas) == 0:
+            return RuntimeState.MISSING
+        available = int(getattr(dep.status, "available_replicas", None) or 0) if dep.status else 0
+        # 4) 排在兜底之前：只有引擎自述有可用副本才说得出"活着"。
+        if available >= 1:
             return RuntimeState.ALIVE
-        return RuntimeState.MISSING
+        # 5) 兜底档：spec.replicas>0 而没有任何 available 副本 —— Pending / 拉镜像 / 建
+        #    sandbox / 等节点 device-plugin 分 GPU。present-but-not-running 不是缺席（见
+        #    docstring 的 K8s 原文）。这一格改前是 MISSING，正是"一卡双跑"的入口。
+        #    UNKNOWN 的代价写在 tests/test_runtime_presence_not_absence.py 模块 docstring。
+        return RuntimeState.UNKNOWN

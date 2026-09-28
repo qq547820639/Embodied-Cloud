@@ -19,7 +19,7 @@
 - 不放行档：destroy 报错而 provider 仍自述 ALIVE（或 UNKNOWN 到无法判定）⇒ 留卡、
   留 `container_name`、不写终态，交给 `_cleanup_failed` 的 DRAINING 档重试；
 - 放行档：destroy 报错但 provider 亲口说 MISSING（K8s 对已删 Deployment 的 404 正是这一档，
-  app/services/providers/k8s.py:531-545 的 404 → MISSING）⇒ 必须放卡，否则那张卡被
+  app/services/providers/k8s.py:563-570 的 404 → MISSING）⇒ 必须放卡，否则那张卡被
   永久钉在一个已经没有使用者的 runtime 上。
 
 最后几支是文本面（AST）判据：`scheduler.release` 这个调用**存在于** claim() 里不证明任何事，

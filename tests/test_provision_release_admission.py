@@ -419,7 +419,7 @@ def test_an_explicit_destroy_operation_re_asks_the_provider_to_destroy():
 def test_destroy_failure_the_provider_vouches_for_still_releases_and_writes_the_terminal():
     """放行档（destroy 报错 + provider 亲口说 MISSING）：放卡 + FAILED，且措辞不被改动。
 
-    K8s 对已删 Deployment 的 404 走这一极（providers/k8s.py:542-545 → MISSING）。
+    K8s 对已删 Deployment 的 404 走这一极（providers/k8s.py:566-570 → MISSING）。
     不放行就是"把 GPU 永久钉死在一张已经没有使用者的卡上"，所以这一极是必须保住的
     既有行为，不是要修的东西。
     """

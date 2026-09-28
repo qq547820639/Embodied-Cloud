@@ -458,6 +458,11 @@ class DockerProvider:
     def reconcile(self, workspace: Workspace) -> RuntimeState:
         """判定 runtime 存活：引擎说在跑 → ALIVE；引擎说不存在 → MISSING；问不到 → UNKNOWN。
 
+        MISSING 只有两个来源，都要求引擎自己把话说完：① `inspect` 说 `absent`（引擎亲口
+        没这个对象）；② 引擎自述 `exited`/`dead`（进程没了，且不会自己回来）。其余非 running
+        态一律 UNKNOWN —— 释放准入 `_release_admitted(command_succeeded=False)`
+        （orchestrator.py:477-509）只认 MISSING，把"还没起来"说成"不在了"就是放卡给活对象。
+
         改前有两处把"读不到"当成"不在了"：① `container_name` 列为空直接 return MISSING；
         ② 兜底把任何非 running 的 state（含 inspect 自己给的 unknown）落到 MISSING。
         释放准入 `_release_admitted(command_succeeded=False)` 只认 MISSING —— 于是守护进程
@@ -474,5 +479,24 @@ class DockerProvider:
         if inspect.get("running"):
             return RuntimeState.ALIVE
         if inspect.get("state") in {"unknown", None}:
+            return RuntimeState.UNKNOWN
+        # 到这里引擎是答了话的，剩下的只是它给的 `Status` 该算哪一档。改前这一格是一条
+        # `return MISSING` 兜住**所有**非 running 态，于是 `created`（还没 start 过的对象）
+        # 与 `removing`（正在删、还没删完）都被说成缺席。
+        # 状态全集不由我们猜：moby `api/types/container/state.go` 定义七个常量
+        # （StateCreated/StateRunning/StatePaused/StateRestarting/StateRemoving/StateExited/
+        # StateDead），`api/types/container/container.go:76` 的字段注释原文是 "Can be one of
+        # \"created\", \"running\", \"paused\", \"restarting\", \"removing\", \"exited\", or
+        # \"dead\""。其中 `created` 的定义是 "created, but not (yet) started" —— 引擎还持有
+        # 一个可以直接 start 的对象。
+        # 本机 2026-09-28 实测（containers ec-n79-*，`docker inspect --format '{{json .State}}'`，
+        # 事后已全部移除）：paused 与 restarting 都带 `Running:true`，因此在上面那一格就返回
+        # ALIVE，本来就没有缺陷；created/exited 是 `Running:false`，落在这一格。
+        # dead/removing 是瞬态、这一台机器上造不出来（未做到，不是未找到），按上面两处枚举取值推理。
+        # 用白名单（只有 exited/dead 算缺席）而不是黑名单：将来枚举多出来的第八个态不许默认算缺席。
+        # exited 这一档在本产品自己的 `run_argv`（:175 带 `--rm`）下通常会连对象一起消失，
+        # 于是它主要由第三方/遗留容器命中 —— 留成 MISSING 是为了不把真缺席读成 UNKNOWN。
+        process_gone = frozenset({"exited", "dead"})  # moby state.go 的 StateExited/StateDead
+        if inspect.get("state") not in process_gone:
             return RuntimeState.UNKNOWN
         return RuntimeState.MISSING

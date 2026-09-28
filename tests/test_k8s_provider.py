@@ -59,6 +59,16 @@ class FakeCoreV1Api:
         return "fake pod log"
 
 
+def fake_deployment_status() -> SimpleNamespace:
+    """两档 read 共用的那份 status：假对象里"可用副本=1"这一事实只说一次。"""
+    return SimpleNamespace(
+        replicas=1,
+        ready_replicas=1,
+        available_replicas=1,
+        conditions=[SimpleNamespace(type="Available", status="True", reason="ok", message="deployed")],
+    )
+
+
 class FakeAppsV1Api:
     def __init__(self, calls: list):
         self.calls = calls
@@ -73,14 +83,14 @@ class FakeAppsV1Api:
     def patch_namespaced_deployment_scale(self, name, namespace, body, **kwargs):
         self.calls.append(("patch_scale", namespace, name, body))
 
+    def read_namespaced_deployment(self, name, namespace, **kwargs):
+        # reconcile 走这一档：同一个对象必须同时带 spec 与 status（真 SDK 就是这么定义的），
+        # 否则假客户端会把"读得到 spec.replicas"这个前提假掉。
+        self.calls.append(("read_deployment", namespace, name))
+        return SimpleNamespace(spec=SimpleNamespace(replicas=1), status=fake_deployment_status())
+
     def read_namespaced_deployment_status(self, name, namespace, **kwargs):
-        status = SimpleNamespace(
-            replicas=1,
-            ready_replicas=1,
-            available_replicas=1,
-            conditions=[SimpleNamespace(type="Available", status="True", reason="ok", message="deployed")],
-        )
-        return SimpleNamespace(status=status)
+        return SimpleNamespace(status=fake_deployment_status())
 
 
 class FakeClientModule:
