@@ -365,6 +365,54 @@ def test_admin_gpu_row_shows_the_matching_pole_of_each_verdict(page, api, live_s
     assert page_errors == [], f"控制台出现 JS 错误或失败请求：{page_errors}"
 
 
+def test_gpu_view_follows_background_verdicts_without_renavigation(page, api, live_server, page_errors):
+    """管理台的 GPU 表自己跟上后台改判：不重新进视图、不点任何按钮（N-130，闭 N-129）。
+
+    三档按顺序互为前提：① 视图可见时确有驱动——没有这一档，③ 的「离开后没请求」是空转
+    （从未存在的轮询同样一条都不发）；② 判据对象是真缺陷本身：由 API 侧改一张卡，页面
+    完全不碰，行内极性必须在下一个周期自己翻过来；③ 驱动按视图作用域起停，不是常驻轮询。
+    """
+    email, password = api.register()
+    _promote_admin(live_server.db_path, email)
+    token = api.token(email, password)
+    free = next(
+        g
+        for g in api.get("/api/gpus", token).json()
+        if g["status"] == "available" and g["health"] is None and g["drain_requested_at"] is None
+    )
+
+    gpu_reads: list[str] = []
+    page.on(
+        "request",
+        lambda r: gpu_reads.append(r.url) if r.method == "GET" and "/api/gpus" in r.url else None,
+    )
+
+    login(page, email, password)
+    page.goto("/#/gpus", wait_until="domcontentloaded")
+    row = _gpu_row(page, free["gpu_uuid"])
+    ms = int(page.evaluate("() => GPU_POLL_MS"))
+    assert 0 < ms <= 60000, f"GPU 视图的轮询常量不合理：{ms}"
+
+    del gpu_reads[:]
+    # 一律用 wait_for_timeout 而不是 time.sleep：sync Playwright 只在等协议回包时才派发
+    # `request` 事件，纯 Python 睡眠会让这根探针一条都收不到（本会话第一版就这么红过一次）。
+    page.wait_for_timeout(ms + 3000)
+    assert gpu_reads, f"视图可见的 {ms}ms 里一次 GET /api/gpus 都没有 ⇒ 周期驱动者不在场"
+
+    api.post(f"/api/gpus/{free['id']}/unhealthy", token, {})
+    page.wait_for_selector(f'{row} [data-action="gpu-healthy"]', timeout=ms + 8000)
+    assert page.query_selector(f'{row} .badge.unhealthy') is not None, "跟上了按钮却没跟上徽章"
+    api.post(f"/api/gpus/{free['id']}/healthy", token, {})  # 别给同一 session 留一张不健康的卡
+
+    page.click('.nav-item[data-view="overview"]')
+    page.wait_for_selector("#view-overview", state="visible", timeout=20000)
+    page.wait_for_timeout(1000)  # 放行切换瞬间已在飞的那一笔，再开始计缺席
+    del gpu_reads[:]
+    page.wait_for_timeout(ms + 2000)
+    assert gpu_reads == [], f"离开 gpus 视图之后仍在轮询 GPU 表：{gpu_reads}"
+    assert page_errors == [], f"控制台出现 JS 错误或失败请求：{page_errors}"
+
+
 
 def test_register_login_and_logout_userbar(page, api):
     email, password = api.register()

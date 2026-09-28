@@ -64,6 +64,7 @@ let agentTokens = {};
 try { agentTokens = JSON.parse(localStorage.getItem(AGENT_TOKENS_KEY) || "{}"); } catch { agentTokens = {}; }
 
 let pollTimer = null;
+let gpuTimer = null;
 let toastTimer = null;
 const busy = new Set(); // 防重集合：'create:templateId' / 'stop:id' ...
 
@@ -301,6 +302,8 @@ async function showView(name) {
     else b.removeAttribute("aria-current");
   });
   window.scrollTo({ top: 0 });
+  if (name === "gpus") startGpuPolling();
+  else stopGpuPolling();
   if (name === "overview") await refreshOverview();
   else if (name === "usage") await refreshUsage();
   else if (name === "courses") await refreshCourses();
@@ -644,6 +647,20 @@ async function pollTick() {
   try {
     await Promise.allSettled([loadWorkspaces(), loadMetrics()]);
   } catch { /* 下轮重试 */ }
+}
+
+/* ---------------- GPU 视图的周期重读 ---------------- */
+// 后台改判最慢 120s 一轮（app/services/worker.py:100 PERIODIC_INVENTORY_EVERY），15s 足够让
+// 「谁改了这张卡」看起来是即时的；再密只是把同一份事实重读一遍。
+const GPU_POLL_MS = 15000;
+
+function startGpuPolling() {
+  if (gpuTimer) return; // showView 会被 nav 点击与 hashchange 各叫一次
+  gpuTimer = setInterval(() => { if (!document.hidden) refreshGpus(); }, GPU_POLL_MS);
+}
+
+function stopGpuPolling() {
+  if (gpuTimer) { clearInterval(gpuTimer); gpuTimer = null; }
 }
 
 /* ---------------- 用量与账单 ---------------- */

@@ -934,3 +934,86 @@ def test_the_inventory_sweep_is_still_driven_periodically() -> None:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert {"sync_host", "bootstrap_gpu_inventory"} & names, f"deps 里没人叫 inventory 重报：{sorted(names)}"
+
+
+# ---------------------------------------------------------------------------
+# 前端面（续）：GPU 表的刷新要有驱动者，且按视图作用域起停（N-130，闭 N-129）
+# ---------------------------------------------------------------------------
+# N-129 记的是这样一个缺口：`draining`／`drained` 由后台同步改判，而管理台只在进视图和
+# 点完动作之后重读一次——于是 `docs/OPERATIONS.md` 让运维「看到一批 draining 先查节点同步」，
+# 那句话在控制台上其实是一张静态快照。N-93／N-99／N-110 立的规矩是「有周期驱动的收敛才叫
+# 被验证过」；浏览器档按可用性整档可跳过，所以这一格另配下面这把源码级接线尺。
+
+_JS_TOP_FUNC = re.compile(r"^(?:async )?function \w+", re.M)
+
+
+def js_region(js: str, name: str) -> str:
+    """取 `function name(` 所在行到下一个顶层函数声明之前的区段（app.js 是平铺顶层布局）。
+
+    读不到就判红而不是返回空串：这条判据讲的就是接线，接线点不见了等于承诺被撤走，
+    不能与「没有违规」同形。
+    """
+    start = re.search(rf"^(?:async )?function {re.escape(name)}\b", js, re.M)
+    assert start, f"app.js 里读不到顶层函数 {name}()，这条判据没有位点"
+    nxt = _JS_TOP_FUNC.search(js, start.end() + 1)
+    return js[start.start(): nxt.start() if nxt else len(js)]
+
+
+def gpu_poll_wiring(js: str) -> dict[str, bool]:
+    """三件分开核：有周期驱动者、驱动者停得下来、起停按视图作用域接在导航入口上。"""
+    return {
+        "driver": "setInterval(" in js_region(js, "startGpuPolling")
+        and "refreshGpus" in js_region(js, "startGpuPolling"),
+        "stops": "clearInterval(" in js_region(js, "stopGpuPolling"),
+        "scoped": "startGpuPolling()" in js_region(js, "showView")
+        and "stopGpuPolling()" in js_region(js, "showView"),
+    }
+
+
+_GPU_POLL_CLEAN = """
+let gpuTimer = null;
+const GPU_POLL_MS = 15000;
+function startGpuPolling() {
+  if (gpuTimer) return;
+  gpuTimer = setInterval(() => { if (!document.hidden) refreshGpus(); }, GPU_POLL_MS);
+}
+function stopGpuPolling() {
+  if (gpuTimer) { clearInterval(gpuTimer); gpuTimer = null; }
+}
+async function showView(name) {
+  if (name === "gpus") startGpuPolling(); else stopGpuPolling();
+  await refreshGpus();
+}
+function refreshGpus() { return 1; }
+"""
+
+
+def test_the_gpu_poll_ruler_fires_on_each_broken_shape():
+    """尺子先要会开火：三种残缺形状各判自己那一格，合规形状三格全真。"""
+    assert gpu_poll_wiring(_GPU_POLL_CLEAN) == {"driver": True, "stops": True, "scoped": True}
+    no_driver = _GPU_POLL_CLEAN.replace(
+        "gpuTimer = setInterval(() => { if (!document.hidden) refreshGpus(); }, GPU_POLL_MS);",
+        "refreshGpus();",
+    )
+    assert gpu_poll_wiring(no_driver) == {"driver": False, "stops": True, "scoped": True}, (
+        "只挂一次 refreshGpus、没有 setInterval ⇒ 这就是 N-129 本体的形状，必须被 driver 抓到"
+    )
+    never_stops = _GPU_POLL_CLEAN.replace("clearInterval(gpuTimer); ", "")
+    assert gpu_poll_wiring(never_stops) == {"driver": True, "stops": False, "scoped": True}
+    always_on = _GPU_POLL_CLEAN.replace(
+        'if (name === "gpus") startGpuPolling(); else stopGpuPolling();', "startGpuPolling();"
+    )
+    assert gpu_poll_wiring(always_on) == {"driver": True, "stops": True, "scoped": False}, (
+        "起了就不按视图停 ⇒ 常驻轮询，另一视图上也在读 gpus，必须被 scoped 抓到"
+    )
+    with pytest.raises(AssertionError, match="没有位点"):
+        gpu_poll_wiring("function unrelated() { return 1; }")
+
+
+def test_the_gpu_table_is_periodically_redriven_and_view_scoped():
+    """真语料：管理台的 GPU 表必须有周期驱动者，且只在 gpus 视图可见时起停。"""
+    assert gpu_poll_wiring(APP_JS.read_text(encoding="utf-8")) == {
+        "driver": True,
+        "stops": True,
+        "scoped": True,
+    }
