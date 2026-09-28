@@ -649,108 +649,133 @@ class WorkspaceOrchestrator:
         - DB STOPPING + runtime 停止/缺失 → 结算 → 释放 → STOPPED
         - QUEUED/CREATED + runtime MISSING → 重新入队 PROVISION
         - UNKNOWN（mock 无真实 runtime）→ 不动，避免误杀
+        - 任意一格本轮抛错 → 记 `errors` 并继续看其余格（N-90：一格的故障
+          不得把整趟收敛 abort 掉，否则后面的 runtime 这轮没人看）
         """
-        stats = {"adopted": 0, "failed": 0, "stopped": 0, "requeued": 0, "kept": 0}
+        stats = {"adopted": 0, "failed": 0, "stopped": 0, "requeued": 0, "kept": 0, "errors": 0}
         with self.session_factory() as db:
-            for w in db.scalars(select(Workspace).order_by(Workspace.created_at)):
+            for w in list(db.scalars(select(Workspace).order_by(Workspace.created_at))):
                 if w.deleted_at is not None:
                     continue  # tombstone：不参与 reconcile
                 if w.status in {WorkspaceStatus.STOPPED.value, WorkspaceStatus.FAILED.value}:
                     continue
-                state = self.provider.reconcile(w)
-                # §10：K8s 路径校验 Pod 实际 nodeName == reservation.node_name
-                node_mismatch = False
-                if (
-                    w.status == WorkspaceStatus.RUNNING.value
-                    and w.provider in {"k8s", "kubernetes"}
-                    and w.gpu_id is not None
-                ):
-                    gpu = db.get(Gpu, w.gpu_id)
-                    host = db.get(GpuHost, gpu.host_id) if gpu is not None else None
-                    reserved_node = host.name if host is not None else None
-                    if reserved_node:
-                        try:
-                            runtime = self.provider.inspect(w)
-                        except Exception:
-                            runtime = {}
-                        actual_node = (
-                            runtime.get("node_name") or runtime.get("node")
-                        )
-                        if actual_node and actual_node != reserved_node:
-                            node_mismatch = True
-                            logger.warning(
-                                "workspace %s: pod on node %r but reserved %r",
-                                w.id[:8], actual_node, reserved_node,
-                            )
-                if w.status == WorkspaceStatus.RUNNING.value:
-                    if node_mismatch:
-                        # 分配节点与实际运行节点不一致 → 不得保持 RUNNING。但"卡回池"的前提
-                        # 仍然是 runtime 事实不在（N-63 的同一条准入）：改前这里是
-                        # settle + release + FAILED 三连，一次都不叫 provider.stop ⇒ pod 还在
-                        # 错的节点上吃卡，卡却已回池（同类第三实例）。现在先走 `_stop_cleanup`
-                        # 完整清理，认账了才置 FAILED；没认账就保持 RUNNING 并把原因留在
-                        # error_message 上，下一轮这条分支接着重试（RUNNING 在
-                        # recover_stuck_gpu_allocations 的保护集内，卡不会被它放掉）。
-                        w.error_message = (
-                            f"reconciled: pod node mismatch (actual={actual_node}, reserved={reserved_node})"
-                        )
-                        error = self._stop_cleanup(db, w)
-                        if error is None:
-                            w.status = WorkspaceStatus.FAILED.value
-                            stats["failed"] += 1
-                        else:
-                            logger.warning(
-                                "reconcile: node-mismatch stop not admitted for %s: %s",
-                                w.id[:8], error,
-                            )
-                    elif state == RuntimeState.ALIVE:
-                        stats["kept"] += 1  # adopt：继续运行
-                    elif state == RuntimeState.MISSING:
-                        self._settle_running_segment(db, w)
-                        self.scheduler.release(db, w.id)
-                        w.status = WorkspaceStatus.FAILED.value
-                        w.error_message = "reconciled: runtime missing"
-                        w.stopped_at = utcnow()
-                        w.started_at = None
-                        stats["failed"] += 1
-                    # UNKNOWN：无真实 runtime 可判定，保守不动
-                elif w.status == WorkspaceStatus.PROVISIONING.value:
-                    if state == RuntimeState.ALIVE:
-                        # 实际已就绪（如容器先于 DB 提交）：adopt
-                        w.status = WorkspaceStatus.RUNNING.value
-                        w.started_at = w.started_at or utcnow()
-                        w.stopped_at = None
-                        stats["adopted"] += 1
-                    elif state == RuntimeState.MISSING:
-                        if not self._has_active_operation(db, w.id):
-                            enqueue_operation(db, w.id, OperationType.PROVISION)
-                            stats["requeued"] += 1
-                elif w.status == WorkspaceStatus.STOPPING.value:
-                    if state == RuntimeState.ALIVE:
-                        # runtime 仍存活：再走一轮完整清理（含 provider.stop）。改前是
-                        # `contextlib.suppress` 吞掉停止失败后无条件 `_finalize_stop` ——
-                        # 与 stop() 的重试路径是同一个缺陷的第二处；两路现在共用
-                        # `_stop_cleanup`，准入判据只有 `_release_admitted` 一份。
-                        error = self._stop_cleanup(db, w)
-                        if error is None:
-                            stats["stopped"] += 1
-                        else:
-                            # 仍未确认：保持 STOPPING（recover_stuck_gpu_allocations 因此
-                            # 不会把这张还有人吃的卡放掉），下一轮接着试
-                            logger.warning("reconcile: stop incomplete for %s: %s", w.id[:8], error)
-                    elif state == RuntimeState.MISSING:
-                        # runtime 已停（或从未起来）：结算 + 释放
-                        self._finalize_stop(db, w)
-                        stats["stopped"] += 1
-                elif w.status in {
-                    WorkspaceStatus.QUEUED.value,
-                    WorkspaceStatus.CREATED.value,
-                } and not self._has_active_operation(db, w.id):
-                    enqueue_operation(db, w.id, OperationType.PROVISION)
-                    stats["requeued"] += 1
+                try:
+                    self._reconcile_one(db, w, stats)
+                    # 当场落库：下一格炸掉时的 `db.rollback()` 不能把**已经收敛完的格子**
+                    # 一起退回（各臂内部的 release/enqueue 自带提交，status/error_message
+                    # 这两笔在这里补上，异常边界才是可用的而不是名义上的）。
+                    db.commit()
+                except Exception as exc:  # 一格失败不得中止整趟（N-90）
+                    db.rollback()
+                    stats["errors"] = stats.get("errors", 0) + 1
+                    logger.warning(
+                        "reconcile: workspace %s 这一格本轮无法收敛（其余格照看）: %s",
+                        w.id[:8], exc,
+                    )
             db.commit()
             recover_stuck_gpu_allocations(db)
         return stats
+
+    def _reconcile_one(self, db: Session, w: Workspace, stats: dict[str, int]) -> None:
+        """一格 workspace 的收敛判决——`reconcile_all` 的循环体逐字搬进来。
+
+        单独成函数只为给**一格**一个异常边界（N-90）：`provider.reconcile` 或
+        `scheduler.release` 抛错时只本格不收敛，后面的格子照样被看过。
+        ADR 0002 给 provider/scheduler 边界立的规矩是「异常转成原因、不外泄给调用面」，
+        这里的调用面是 worker 线程与启动恢复——泄漏出去会连累其余所有 runtime。
+        """
+        state = self.provider.reconcile(w)
+        # §10：K8s 路径校验 Pod 实际 nodeName == reservation.node_name
+        node_mismatch = False
+        if (
+            w.status == WorkspaceStatus.RUNNING.value
+            and w.provider in {"k8s", "kubernetes"}
+            and w.gpu_id is not None
+        ):
+            gpu = db.get(Gpu, w.gpu_id)
+            host = db.get(GpuHost, gpu.host_id) if gpu is not None else None
+            reserved_node = host.name if host is not None else None
+            if reserved_node:
+                try:
+                    runtime = self.provider.inspect(w)
+                except Exception:
+                    runtime = {}
+                actual_node = (
+                    runtime.get("node_name") or runtime.get("node")
+                )
+                if actual_node and actual_node != reserved_node:
+                    node_mismatch = True
+                    logger.warning(
+                        "workspace %s: pod on node %r but reserved %r",
+                        w.id[:8], actual_node, reserved_node,
+                    )
+        if w.status == WorkspaceStatus.RUNNING.value:
+            if node_mismatch:
+                # 分配节点与实际运行节点不一致 → 不得保持 RUNNING。但"卡回池"的前提
+                # 仍然是 runtime 事实不在（N-63 的同一条准入）：改前这里是
+                # settle + release + FAILED 三连，一次都不叫 provider.stop ⇒ pod 还在
+                # 错的节点上吃卡，卡却已回池（同类第三实例）。现在先走 `_stop_cleanup`
+                # 完整清理，认账了才置 FAILED；没认账就保持 RUNNING 并把原因留在
+                # error_message 上，下一轮这条分支接着重试（RUNNING 在
+                # recover_stuck_gpu_allocations 的保护集内，卡不会被它放掉）。
+                w.error_message = (
+                    f"reconciled: pod node mismatch (actual={actual_node}, reserved={reserved_node})"
+                )
+                error = self._stop_cleanup(db, w)
+                if error is None:
+                    w.status = WorkspaceStatus.FAILED.value
+                    stats["failed"] += 1
+                else:
+                    logger.warning(
+                        "reconcile: node-mismatch stop not admitted for %s: %s",
+                        w.id[:8], error,
+                    )
+            elif state == RuntimeState.ALIVE:
+                stats["kept"] += 1  # adopt：继续运行
+            elif state == RuntimeState.MISSING:
+                self._settle_running_segment(db, w)
+                self.scheduler.release(db, w.id)
+                w.status = WorkspaceStatus.FAILED.value
+                w.error_message = "reconciled: runtime missing"
+                w.stopped_at = utcnow()
+                w.started_at = None
+                stats["failed"] += 1
+            # UNKNOWN：无真实 runtime 可判定，保守不动
+        elif w.status == WorkspaceStatus.PROVISIONING.value:
+            if state == RuntimeState.ALIVE:
+                # 实际已就绪（如容器先于 DB 提交）：adopt
+                w.status = WorkspaceStatus.RUNNING.value
+                w.started_at = w.started_at or utcnow()
+                w.stopped_at = None
+                stats["adopted"] += 1
+            elif state == RuntimeState.MISSING:
+                if not self._has_active_operation(db, w.id):
+                    enqueue_operation(db, w.id, OperationType.PROVISION)
+                    stats["requeued"] += 1
+        elif w.status == WorkspaceStatus.STOPPING.value:
+            if state == RuntimeState.ALIVE:
+                # runtime 仍存活：再走一轮完整清理（含 provider.stop）。改前是
+                # `contextlib.suppress` 吞掉停止失败后无条件 `_finalize_stop` ——
+                # 与 stop() 的重试路径是同一个缺陷的第二处；两路现在共用
+                # `_stop_cleanup`，准入判据只有 `_release_admitted` 一份。
+                error = self._stop_cleanup(db, w)
+                if error is None:
+                    stats["stopped"] += 1
+                else:
+                    # 仍未确认：保持 STOPPING（recover_stuck_gpu_allocations 因此
+                    # 不会把这张还有人吃的卡放掉），下一轮接着试
+                    logger.warning("reconcile: stop incomplete for %s: %s", w.id[:8], error)
+            elif state == RuntimeState.MISSING:
+                # runtime 已停（或从未起来）：结算 + 释放
+                self._finalize_stop(db, w)
+                stats["stopped"] += 1
+        elif w.status in {
+            WorkspaceStatus.QUEUED.value,
+            WorkspaceStatus.CREATED.value,
+        } and not self._has_active_operation(db, w.id):
+            enqueue_operation(db, w.id, OperationType.PROVISION)
+            stats["requeued"] += 1
+
 
     def _has_active_operation(self, db: Session, workspace_id: str) -> bool:
         return (

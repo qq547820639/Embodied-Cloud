@@ -459,7 +459,12 @@ def release_admission_wiring(source: str) -> dict[str, int]:
             and n.func.attr == "_release_admitted"
         ),
         "stop_consumers": calls_in("stop", "_stop_cleanup"),
-        "reconcile_consumers": calls_in("reconcile_all", "_stop_cleanup"),
+        # N-90：`reconcile_all` 的逐格判决被搬进 `_reconcile_one`（异常边界要落在「一格」上）。
+        # 按两个函数名一起数，缺席那一侧由 -1 哨兵顶出来（-1 + 2 == 1 ≠ 2 即红）：宁可误报
+        # 「入口没委派」，也不放过「少接一条收尾分支」。「入口确实把每交给它」由
+        # tests/test_reconcile_cell_isolation.py 的结构判据钉住，不靠这里代劳。
+        "reconcile_consumers": calls_in("reconcile_all", "_stop_cleanup")
+        + calls_in("_reconcile_one", "_stop_cleanup"),
     }
 
 
@@ -489,8 +494,8 @@ def test_the_wiring_checker_can_see_a_disconnected_consumer():
     """反向对照：`reconcile_all` 的两条收尾分支各断一次，尺子都要看见。
 
     没有这一支，上一条判据在"判据本身读不到东西"的形状下会一直绿着。
-    N-68 之后 `reconcile_all` 里有两处 `_stop_cleanup`（STOPPING+ALIVE 重试档、
-    RUNNING 节点不一致档），所以变异要分三档：全不改=2、只断一条=1、两条都退回
+    N-68 之后 reconcile 的收尾分支有两处 `_stop_cleanup`（STOPPING+ALIVE 重试档、
+    RUNNING 节点不一致档；N-90 起这两档住在 `_reconcile_one` 里），所以变异要分三档：全不改=2、只断一条=1、两条都退回
     直接 finalize=0。只数"0 与 2"会把"其中一条分支根本没接"读成通过。
     """
     source = _orchestrator_source()
