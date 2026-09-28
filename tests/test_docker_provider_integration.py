@@ -1091,7 +1091,12 @@ def test_pinned_base_of_the_control_plane_recipe_is_fetchable():
 
 
 def _assert_pinned_ref_fetchable(ref: str) -> None:
-    pulled = _docker("pull", ref, timeout=300)
+    # 走共用异常吸收（`tests/docker_probe.py`）而不是裸 `_docker`：registry 卡住时
+    # `subprocess.run(timeout=…)` 抛的 TimeoutExpired 会**绕过下面那套三档分流**，
+    # 于是"环境这一趟没走到 registry"被报成一条代码失败（2026-09-28 整轮认证实测：
+    # `docker pull` 300s 超时 ⇒ `FAILED … TimeoutExpired`，而同一条传输 7.4s 就回 rc=0）。
+    # 吸收之后它变成一个 rc=124 的读数，才有机会进 `_pull_failure_action` 定档。
+    pulled = _docker_probe("pull", ref, timeout=300)
     if pulled.returncode != 0:
         # 守护进程的 docker.io 传输今天走的是它配置里的第三方镜像站（错误串里能看见
         # `docker.1panel.live`），而镜像站对**有效**的摘要也会回 `not found`（2026-09-26 实测：
@@ -1108,7 +1113,9 @@ def _assert_pinned_ref_fetchable(ref: str) -> None:
         raise AssertionError(message)
 
 
-    info = _docker("image", "inspect", "--format", "{{.Architecture}}|{{.Os}}|{{.Id}}", ref, timeout=60)
+    info = _docker_probe(
+        "image", "inspect", "--format", "{{.Architecture}}|{{.Os}}|{{.Id}}", ref, timeout=60
+    )
     assert info.returncode == 0, f"pull 成功但 inspect 读不到：{info.stderr[-200:]}"
     arch, os_name, image_id = info.stdout.strip().split("|")
     assert arch and os_name == "linux" and image_id.startswith("sha256:"), info.stdout
