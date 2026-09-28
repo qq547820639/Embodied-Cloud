@@ -117,6 +117,7 @@
 | G0.106 runtime 失踪那一档把串流会话与端口一起终结，且「写终态必配对终结」有尺子 | `pytest tests/test_reconcile_closes_streaming.py` | MISSING 档会话 `failed`＋两侧端口清空＋卡回池；ALIVE／UNKNOWN 两档不开火；复跑不重复入账；结构尺子在真文件读数 `[]`，并对「漏配对／上层在前／调用排在写之后」三种合成形状分别点名 2／0／1 | PASS（常驻） |
 | G0.107 文档门的「仓内根」面不含被 git 忽略的 scratch 目录 | `pytest tests/test_validation_matrix.py` | 自建 `tmp/` 时根面不含 `tmp`、活调用 `dangling_doc_reference_offenders()` 为 `[]`、`paths>=200`；`.gitignore` 的 `tmp/` 行有文本面读者 | PASS（常驻） |
 | G0.108 每一处写 `WorkspaceStatus` 终态的函数自己带齐终结 | `pytest tests/test_finalize_stop_closes_streaming.py` | 崩溃现场重试能修回来；真代码证到前提（一次 stop 后即 `failed`）；正常档恰好关一次；全 `app/` 尺子读数 `set()` 且分母自证 4＋1 处 | PASS（常驻） |
+| G0.109 账面指针一律写成仓内全路径，缩写与歧义都判违规 | `pytest tests/test_validation_matrix.py` | 真语料四桶读数 缩写 0／歧义 0／已限定 ≥150／外部 ≥1；合成语料四极各判各的（含长行号边界）；门禁本体确实把这条并进 offenders | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

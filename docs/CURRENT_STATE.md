@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 976 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 979 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **15 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -131,6 +131,7 @@
 | N-116 | **runtime 失踪那一档只放卡不收会话**：`_reconcile_one:805` 的 MISSING 档结算、放卡、写 `FAILED`，唯独不叫 `terminate_for_workspace`（STOP `:448`／DESTROY `:618` 都叫），于是 workspace 说死了、`streaming_sessions` 还说连着一条流。改法：在该档结算之前终结会话（`:811`，只动库、幂等）。 | 判据 `tests/test_reconcile_closes_streaming.py` 6 支（行为三极＋复跑；结构尺子「写终态前必须配对终结」真文件读数 `[]`，反向对照 2／0／1）＋三臂（P1 2 红／P2 1 红／P3 2 红，P3 的红在 `tests/test_streaming_lifecycle.py:137`／`:186`，量出尺子只覆盖 `_reconcile_one`）。扫描分母：全仓写 `WorkspaceStatus` 终态 5 处，补完 4/5 配对，剩 `_finalize_stop` 登记 N-117。未证实：真机流媒体面。 |
 | N-118 | **量具自己的落点把文档门顶红**：`_doc_roots()` 按 `ROOT.iterdir()` 现取「仓内根」，记账脚本在仓内建一个 `tmp/` 备份目录，`CHANGELOG:328`／`CURRENT_STATE` 里那句示例路径 `tmp/probe.py` 就被读成悬空引用，`doc_references` 当场红——机制隔离复算：只加一个根名就多 2 条假红。 | 判据 `tests/test_validation_matrix.py` 新增 1 支（自建 `tmp/` ⇒ 根面不含它、活调用读数 `[]`、`paths>=200` 防收坏分母）＋并入 1 条文本面断言（`.gitignore` 的 `tmp/`）；反向对照复用 :763 那支不新开。三臂：B1 摘过滤 ⇒ 1 红／B2 删 `.gitignore` 两行 ⇒ 2 红／B3 根面收成空 ⇒ 3 红。未证实：非 git 检出时过滤器不生效（同日行为）。 |
 | N-119 | **STOPPED 那一处终态写入没有自己的终结**（闭 N-117）：`_finalize_stop` 靠调用链里恰好有人终结过，而 `stop():421-427` 的幂等补做档把「STOPPED ⇒ 会话已关」当结构保证；`_stop_cleanup` 的 `try` 把终结与 `provider.stop` 同段、except 不 rollback ⇒「终结抛错＋provider 说没了」会提交 STOPPED 配 connected，重试永远补不回来。改法：终结收进本体 `:596`，写在 `:597`。 | 判据 `tests/test_finalize_stop_closes_streaming.py` 7 支（A1 现场修复／A2 真代码证前提／A3 恰好一次按 `stream_failure_total` 增量；B 组尺子宽到全 `app/`，期望应然空集＋`per_file` 分母自证）＋四臂（F1 3 红／F2 1 红／F3 1 红／F4 2 红，F3 更正「两处冗余」的猜测）。未证实：真 Docker/K8s 下终结会不会抛；指针漂移另登 N-120。 |
+| N-121 | **账面里 114 处指针没有存在性读者**：`doc_references` 只核「以仓内根目录开头」的路径，而 CHANGELOG／STATE／ARCHITECTURE／GATES／SECURITY／两份 review 里大量指针写成 `scheduler.py:NNN` 这种少前缀形式（NNN 为行号），永远不进分母。改法：102 处按形状机械改全路径，剩 12 处不带反引号的改完再调判据自己的读数逐条改（裸 count 会把 `app/routers/usage.py:36` 与 `usage.py：365`（全角冒号，避免这段说明本身命中判据）误算同一处，被边界闸门拦下）。 | 判据 `tests/test_validation_matrix.py` 3 支（真语料棘轮 0／0＋qualified≥150；合成语料四极＋边界自证；接线判据）；新函数 `unqualified_pointer_readings()` 走四态、外部写法单列计数不折成合规。五臂：C1 摘接线（**第一遍存活**⇒补第三支）1 红／C2 4 红／C3 1 红／C4 真语料插缩写 3 红／C5 插全路径按设计不红。未证实：第三种书写形状未穷举。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）

@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 976 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 979 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -1482,6 +1482,18 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 顺带把上一轮账面里被这次插行挪动的位点指回实物（`:611→:618`、`:789→:796`、`:798→:805`、`:804→:811`、`:807→:814`、`:830→:837`、`:839→:846`、`:590→:597`），逐条打印读到原文核对；同一抽样暴露出历史账面里三条指针已指向无关行（`:800`/`:833`/`:615`），本轮只登记不修，见 N-120。
 - 未证实：真实 Docker／K8s 下 `terminate_for_workspace` 会不会抛（桩替的是协作者，A2 证的是「抛了之后终态写入不被阻断、且会话必须已关」这一半）；尺子不看终结调用是否被包在会吞异常的 `try` 里，也不看它是否真写完（`_stop_cleanup:448`、`destroy:618` 都包着）；值经局部变量的间接写不在射程内。
 
+### 账面里 114 处指针从来没有存在性读者（N-121）
+- 缺陷（账面自身的可读性，不在产品代码里）：`doc_references` 的划界是「只核以既有仓内根目录开头的路径」。一手普查读数：`CHANGELOG.md`／`docs/CURRENT_STATE.md`／`docs/ARCHITECTURE.md`／`docs/ACCEPTANCE_GATES.md`／`docs/SECURITY.md`／两份 review 里共 **114 处**指针写成少前缀形式（`scheduler.py:NNN`、`providers/k8s.py:NNN`、`billing.py:NNN` 这一类，NNN 是行号）——它们不进分母，所以**从来没有存在性读者**：那些文件改名或删掉，账面照样全绿。歧义 0 处，外部写法 2 处（`moby` 的引擎 API 文件、site-packages 里的 SDK）。
+- 为什么这不是「文档风格问题」：本轮 N-116／N-119 的修法全靠 `file:行` 自证（每条判词都能被别人 `grep -n` 复算）。缩写形式把这条复算路径掐掉了一半——复算的人得先猜那是哪个文件，而「猜」正是这几轮一直在消的东西。
+- 改法两步：① 按反引号形状机械改 102 处（basename 唯一命中才改、代码围栏内不动）；② 剩下 12 处是**不带反引号**写的，第一轮正则根本看不见 ⇒ 改成调判据自己的读数逐条改。这里踩到并当场拦下一次：拿「`app/routers/usage.py` 的缩写名＋冒号＋行号前缀」当裸子串去数，会把同一文件里行号更长的另一处（365 行）算成同一处，改成带边界断言的正则（前不接 `[\w./-]`、后不接数字）才让「命中数 = 判据列出的条数」这道闸门成立。改后读数：已限定 200／缩写 0／歧义 0／外部 2。
+- 新判据 `unqualified_pointer_readings()`（`scripts/validate_release.py`）是四态机器，关键在**不把看不见折成合规**：已限定只计数（交给既有三类指针判据）；缩写＝违规；basename 有 ≥2 候选＝违规并在理由里列候选（按名字猜会指到别的文件）；外部形状（`moby`／含 `...`／`nvcr.io`／`site-packages`，或该 basename 全仓没有）走豁免但**单独计数**进门禁 note。`dangling_doc_reference_offenders()` 把它的 offenders 并进总清单。
+- 常驻判据 3 支（`tests/test_validation_matrix.py`，本轮 collected 976→979）：`test_pointer_spellings_are_fully_qualified_today` 钉真语料棘轮（缩写 0、歧义 0、已限定 ≥150 防分母被收坏、外部 ≥1 证明豁免面有东西在豁免）；`test_the_spelling_clause_fires_on_each_pointer_shape` 用合成语料＋合成索引走四极，外加「`app/routers/usage.py:36` 与 usage.py：365 并存」的边界自证（这里用全角冒号，是为了不把这段说明写成新判据要抓的那种形状）；`test_the_gate_forwards_the_spelling_clause` 钉接线。
+- 五臂电池：C1 摘掉门禁对新判据的接线 ⇒ **第一遍存活**——既有两支各自直接调读数函数，所以「报告面不再核」这件事在测试面完全看不见（判据成死码的形状）。这一条就是本轮补第三支判据的直接证据，补上之后 C1 ⇒ 1 红。C2 取消外部豁免 ⇒ 4 红；C3 把歧义阈值从 2 抬到 3 ⇒ 1 红；C4 往 `docs/SECURITY.md` 尾上插一条真缩写指针 ⇒ 3 红（牙齿在真 shipped 文件上证，不只在自己写的夹具里证）；C5 插一条全路径指针 ⇒ 按设计不红。恢复后复跑 0 红。
+- 这条棘轮上线第一次就抓到写它的人：本轮刚落盘的同一份账面自己带出 4 处缩写指针（都是我解释「裸 count 会误算同一处」时举的那个文件例子，两个面各写两遍），判据逐条点名之后我把例子里的冒号改成全角——**没有放宽判据，也没有把例子删掉**。
+- 连带更正登记项 N-120：它有两半，本轮闭了「缩写形式没有存在性读者」那一半，**指错行**那一半仍未闭（判据只看边界与存在，不看那句话说的符号在不在这一行所在的作用域里）。
+- 未证实：普查按「反引号包住」与「裸写」两种形状各扫一遍，仍有第三种形状（表格单元里、行尾无空格粘连）理论上能躲过 `DOC_POINTER_ANY_RE`；本轮没有对第三种做穷举，只保证现存 200 处已限定。外部那 2 处的豁免靠形状而不是白名单文件清单，未来若上游文档改名会落到「basename 不在索引里」那一支，仍不判违规。
+
+
 
 
 ### 本轮新增的待收口项
@@ -1512,7 +1524,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 
 - ~~`N-117`：**`_finalize_stop` 是全仓唯一一处「本函数不终结会话却写终态」的位置，它的配对证据在调用链上**。`app/services/orchestrator.py:597` 写 `STOPPED` 而函数体里没有 `terminate_for_workspace`；两个正常入口都先在同一趟里终结过（`_stop_cleanup:448` → `:472`；reconcile 的 STOPPING 档 `:837` → `:846`），所以今天的读数不出错。但 `stop():421-427` 那一档是「已 STOPPED 就只补做结算与释放」，它假定「STOPPED 蕴含会话已闭」，而这句既没有判据守着、也不是结构性质：`_stop_cleanup` 的 `try` 把 `terminate_for_workspace` 与 `provider.stop` 放在同一段（`:446-452`），except 不 `db.rollback()`（`:453-456`），于是「终结那一半抛错、provider 又说 runtime 没了（`admitted=True`）」这一形状会把 STOPPED 与仍为 `connected` 的会话一起提交，此后每次重试 stop 都只走那条幂等档，永远补不回来。修法候选：把终结收进 `_finalize_stop` 本体（它是 STOPPED 的唯一写点、函数幂等），并把结构尺子从 `_reconcile_one` 扩到全部 5 处终态写入；动手前要先补一支能开火的判据把上面那个形状做出来——现无任何用例走「终结抛错＋admitted」这一档，所以本轮只登记不修。~~ —— **已由 N-119 闭合**：终结收进 `_finalize_stop` 本体（`app/services/orchestrator.py:596`，写在 `:597`），尺子从 `_reconcile_one` 宽成全 `app/` 逐 def 扫、读数 `set()`；判据 `tests/test_finalize_stop_closes_streaming.py` 7 支＋四臂（F1 3 红／F2 1 红／F3 1 红／F4 2 红）。F3 更正了上面那句猜测：两处并存不是冗余——早期抛错只损失端口回收，晚期抛错会把整段收尾退回非终态。
 
-- `N-120`：**账面里的 `file:行号` 指针会随每轮插行漂移，而没有任何读者**。`doc_references` 门只判「文件在不在、行有没有越界」（`scripts/validate_release.py:637` 那条比较），所以指错了行照样全绿。本轮一手抽样三条全错：`CHANGELOG.md:1406`（N-106 轮）说 `_reconcile_one` 里的 `scheduler.release` 在 `:800`、`_finalize_stop` 在 `:833`，今天读到的是日志格式串与一句注释（真位在 `:812`／`:846`）；`CHANGELOG.md:1295` 说 destroy 的结算在 `:615`，今天是 `return  # 已 tombstone，幂等`。本轮只把自己写下的那批指针修回实物（改前/改后八个位点逐条打印核对），历史账面不回填——回填会把「当时读到什么」这条证据抹掉。可做的修法：给文档门的判据从「行不越界」加严成「指针所在的函数名与句子里点名的符号一致」（句子得带符号名，这需要先在写法上立规矩），或改成引用 `def` 名＋相对偏移这种不因插行漂移的锚形。
+- `N-120`：**账面里的 `file:行号` 指针会随每轮插行漂移，而没有任何读者**。`doc_references` 门只判「文件在不在、行有没有越界」（`scripts/validate_release.py:637` 那条比较），所以指错了行照样全绿。本轮一手抽样三条全错：`CHANGELOG.md:1406`（N-106 轮）说 `_reconcile_one` 里的 `scheduler.release` 在 `:800`、`_finalize_stop` 在 `:833`，今天读到的是日志格式串与一句注释（真位在 `:812`／`:846`）；`CHANGELOG.md:1295` 说 destroy 的结算在 `:615`，今天是 `return  # 已 tombstone，幂等`。本轮只把自己写下的那批指针修回实物（改前/改后八个位点逐条打印核对），历史账面不回填——回填会把「当时读到什么」这条证据抹掉。可做的修法：给文档门的判据从「行不越界」加严成「指针所在的函数名与句子里点名的符号一致」（句子得带符号名，这需要先在写法上立规矩），或改成引用 `def` 名＋相对偏移这种不因插行漂移的锚形。本轮 N-121 闭了第一半（缩写指针 114 处全部改成全路径，并加棘轮：新增缩写即红），第二半——「行还在、说的是别的东西」——仍未闭，缺的是符号一致性判据，而它的语料需要先能区分「句子里点名的符号」与「指针所在作用域」，实测只能给下界（已限定的 200 处里，句子里带可点名符号的只有约一半能判）。
 
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
