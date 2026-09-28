@@ -94,6 +94,12 @@
 | G0.83 计费 GPU 秒的 Counter 吃账本净增量，且类型钉死 | `pytest tests/test_gpu_seconds_metric_delta.py` | 同一运行段 stop 重放只抬一次、第二次 finalize 抬 0 而段值仍是原秒数；`reconcile_all` 那一路同样只抬一次；hold 转正读的是账本段值不是 delta；连续两段各记各的、零秒段抬 0；AST 钉「counter 只在一个点被抬」；指标类型必须是 Counter（族名与标签不变）——换 Gauge 这一档此前两把既有门全绿，故单独钉住 | PASS（常驻） |
 | G0.84 共库 GPU 池的前置按净额算：空闲数要扣掉队列欠账 | `pytest tests/test_gpu_pool_guard.py` | 「只剩 1 张 AVAILABLE 且队列里还有 1 个未执行的 provision op」这一档必须**不**被 `ensure_free_gpus(need=1)` 判成满足；净额本就够时不得误触发回收（防「只要有队列就回收」的假合规）；失败消息必须同时给出原始空闲数与欠账数；`conftest` 的 autouse 闸用同一条净额规则；判据内独立重数欠账，改前那档红在行为而不是 ImportError | PASS（常驻） |
 | G0.85 registry 卡住时「取不取得到」这条断言记 PENDING，不冒充代码失败 | `pytest tests/test_docker_gate_hardening.py` | 把 `_docker` 换成抛 TimeoutExpired 的替身后，钉死摘要的 fetchable 断言必须落到带 `DOCKER_VALIDATION_PENDING` 的跳过档并把两条读数写进原因；同一条卡住但第二通道逐字节回 absent 时必须 `AssertionError`（坏摘要不许被洗白）；健康 pull 既不跳也不红；吸收器留下的「命令超时（300s）」必须被判成 `no-answer` 而非 `absent`／`unreadable` | PASS（常驻） |
+| G0.86 放卡与清格子上的绑定成对，且只由分配权威一处写 | `pytest tests/test_release_pairs_binding.py` | `Scheduler.release` 内部同事务清 `gpu_id`／`gpu_index`／`gpu_name`；两个调用点各自走真 release 后三列都为空；结构判据钉「清列只住在 release 里」 | PASS（常驻） |
+| G0.87 账本入账即抬 counter，两条旁路不再少计 | `pytest tests/test_gpu_seconds_booked_paths.py` | destroy 与 reconcile RUNNING→FAILED 两路都给 `gpu_seconds_total` 加**净增量**；重放不重复抬；停机那一路读数与 N-88 一致 | PASS（常驻） |
+| G0.88 reconcile 的每格各有异常边界，且判决互不退回 | `pytest tests/test_reconcile_cell_isolation.py` | 一格抛错时其余格照看、`stats[errors]` 计数；每格各自 commit，先前格子的收敛不被后面的 rollback 抹掉 | PASS（常驻） |
+| G0.89 会话收尾只收本进程的库文件 | `pytest tests/test_test_db_sweep.py` | 按 pid 后缀归属；并发跑的别人的库必须原地不动且字节相同；`pid_of` 形状表；两个落点各删一次；AST 钉 `pytest_sessionfinish` 真调了它 | PASS（常驻） |
+| G0.90 缺席只认引擎亲口说的话，present-but-not-running 不放行 | `pytest tests/test_runtime_presence_not_absence.py` | k8s：404→MISSING／`spec.replicas==0`→MISSING／available≥1→ALIVE／Pending→UNKNOWN／其它失败→UNKNOWN；产品级放行与不放行各一支；docker 按 moby 七态白名单（只有 exited/dead 算缺席），枚举外的态不算缺席；AST 尺 C1 与 C2 各带开火对照与合规控制 | PASS（常驻） |
+| G0.91 「已用秒数」与「这一段入账没」各只有一处定义，三个读者同源 | `pytest tests/test_live_usage_not_double_counted.py` | `usage:` 键构造在 app/ 里恰好一处且在模板函数里；路由与 billing 面上不许再出现 `accumulated_seconds` 读取；HTTP 一请求两极（入账 True／未入账 False，账本侧行数各自数一遍）；`usage_segment_booked` 赋值位点唯一；7 个 WorkspaceOut 路由全部带旗标（分母现算） | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |
