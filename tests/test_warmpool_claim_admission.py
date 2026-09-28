@@ -53,10 +53,11 @@ from app.security import WorkspaceCredentialCipher
 from app.services.orchestrator import WorkspaceOrchestrator
 from app.services.providers.base import RuntimeState
 from app.services.providers.mock import MockProvider
-from app.services.scheduler import recover_stuck_gpu_allocations
+from app.services.scheduler import GpuScheduler, recover_stuck_gpu_allocations
 from app.services.warmpool import WarmPoolManager
 from app.services.worker import OperationWorker
 from tests.dbfiles import db_url
+from tests.gpu_drift import gpu_ownership_disagreements
 
 ENGINE = create_engine(
     db_url("warmpool-claim-admission"), connect_args={"check_same_thread": False}
@@ -346,6 +347,47 @@ def test_claim_abort_still_releases_when_the_provider_says_the_runtime_is_gone()
         assert ws.container_name is None
         assert ws.ide_port is None and ws.signal_port is None and ws.media_port is None
         assert ws.user_id is None and ws.password is None
+
+
+def test_claim_abort_with_release_raising_leaves_a_reclaimable_terminal_holder(monkeypatch):
+    """放行档里 `scheduler.release` 自己抛错那一支（`warmpool.py:399-409`，本轮之前零覆盖）。
+
+    形状：准入已放行（provider 亲口说 MISSING），于是撤销档写 FAILED + 清寻址字段，
+    而「卡回池 + 三列一起清」住在 `Scheduler.release` 本体里（N-86）—— 抛错就没执行。
+    此刻两张表仍互相认账：格上还绑着卡、卡还指着这一格，只是这张卡被一个**终态行**占着。
+    终态不在 `recover_stuck_gpu_allocations` 的保护集内 ⇒ 它必须能把这一格收掉，
+    并且收的时候成对清列（否则就成了 N-82 当年那个形状）。
+
+    牙齿（W1 臂，2026-09-28 实测）：把 `recover_stuck_gpu_allocations` 里
+    「成对的第二半」（`if orphan_ids: db.execute(...)`）改成恒不执行 ⇒ 本文件 13 支里
+    **只有这一支红**，其余 12 支照绿；恢复后 `cmp` 逐字节相同、`git diff app/` 为空。
+    也就是说：既有那些档读的是"卡放没放"，只有这一支读的是"卡放了之后格上还绑不绑着"。
+    """
+
+    def _boom(self, db, workspace_id):
+        raise RuntimeError("simulated release failure")
+
+    monkeypatch.setattr(GpuScheduler, "release", _boom)
+    provider = ClaimAbortProvider(reports="missing", destroy_raises=True)
+    _manager, wid, _container = _abort_claim(provider)
+
+    with Factory() as db:
+        ws = db.get(Workspace, wid)
+        assert _effects(db, wid) == HELD, (
+            "release 抛错却被读成已放卡：分配器会把这张还有分配的卡发给别人"
+        )
+        assert ws.status == WorkspaceStatus.FAILED.value, "release 的错不该把终态置位一并带回"
+        assert ws.container_name is None, "寻址字段的清理在 release 之外，抛错也必须做完"
+        assert ws.gpu_id is not None, "残留形状变了：这一档量的就不是「卡被终态行占着」"
+        assert gpu_ownership_disagreements(db) == [], "两张表此刻应仍互相认账（两侧都没清）"
+
+    with Factory() as db:
+        recover_stuck_gpu_allocations(db)
+
+    with Factory() as db:
+        assert _effects(db, wid) == RELEASED, "回收器没把终态行占着的卡收回来"
+        assert db.get(Workspace, wid).gpu_id is None, "放卡没成对清列（N-86 那条规矩）"
+        assert gpu_ownership_disagreements(db) == []
 
 
 def test_claim_abort_releases_when_the_destroy_command_succeeded():
