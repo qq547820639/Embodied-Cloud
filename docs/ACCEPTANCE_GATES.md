@@ -108,6 +108,8 @@
 | G0.97 hold 释放失败的残留由 TTL 清扫收口，且死线前不许提前收 | `pytest tests/test_hold_release_failure_self_heals.py` | 抛错不泄给调用面、状态与原因照写、那笔仍 PENDING 且额度仍被圈住；死线前清扫返回 0；死线后周期入口返回 1 并还回额度 | PASS（常驻） |
 | G0.98 destroy 结算失败的段不入账、也不被按时钟补做（判决有据） | `pytest tests/test_streaming_lifecycle.py` | 失败当场零 USAGE 条目、墓碑 started_at 已清、再跑周期驱动者仍零；对照档账本正常时必须正好入一段 | PASS（常驻） |
 | G0.99 逐格异常边界退回非终态后，下一趟必须收完且不重复入账 | `pytest tests/test_reconcile_cell_isolation.py` | 第一趟：errors=1、本格留原状态、卡与绑定不动、两表一致、usage 恰一条；第二趟：终态 + 卡回池 + 三列清 + 冲突零 + usage 仍一条 | PASS（常驻） |
+| G0.100 崩溃遗留的 test-*.db 由会话开头按进程死活收口，活库不许碰 | `pytest tests/test_test_db_sweep.py` | 死 pid 被删且第二趟无事可做；活 pid 文件逐字节不变；本 pid／无后缀／别的名字不碰；`pid_is_alive` 三极；接线与反证 | PASS（常驻） |
+| G0.101 设备在线状态由心跳背书，超时改判 offline 且心跳回来能翻回 | `pytest tests/test_edge.py` | 超时翻 OFFLINE 并幂等；阈值内不翻；从没心跳的 REGISTERED 不翻；换阈值参数结果跟着动；再心跳回 ONLINE；组合根传的是 settings 里的键 | PASS（常驻） |
 ## G1 物理 GPU 主机预检（BLOCKED_EXTERNAL_DEPENDENCY：本机无 NVIDIA 设备/容器运行时；docker daemon 本身可用，见 G0.19）
 
 | Gate | 脚本 | 期望 PASS 条件 |

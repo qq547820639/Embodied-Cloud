@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 906 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 918 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -574,7 +574,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
   `provider.destroy` 的异常，随后 `_fail` 在 :304 无条件 `scheduler.release`），它得先量清
   "destroy 失败该由谁认账"，登记为 N-67 而不是顺手改。③ 物理 GPU 上的真容器没验（本机无卡）：
   本轮核的是控制面判决与权威表一致，不是 docker 真把容器停了。
-- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898→903→906，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96／G0.97／G0.98／G0.99。
+- 计数面 665→678→686→693→701→702→711→723→742→751→775→779→793→796→800→807→812→818→824→844→866→877→898→903→906→918，门禁 G0.72／G0.73／G0.74／G0.75／G0.76／G0.77／G0.78／G0.79／G0.80／G0.81／G0.82／G0.83／G0.84／G0.85／G0.86／G0.87／G0.88／G0.89／G0.90／G0.91／G0.92／G0.93／G0.94／G0.95／G0.96／G0.97／G0.98／G0.99／G0.100／G0.101。
 
 ### 两个钱包终于不相交：成员行不再被算进组织池（N-71，闭合登记项 N-65）
 - 缺陷（本轮先量后改，/tmp 探针跑真对象）：`billing.py:191-198` 把
@@ -1407,6 +1407,20 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 判据 `tests/test_reconcile_cell_isolation.py` 三档：R1 release 在 RUNNING+MISSING 档抛错 ⇒ `errors=1`、本格留 RUNNING、卡与格上绑定都不动、两表一致，而**已提交的结算不被 `db.rollback()` 一起吞掉**（usage 恰好一条；结算自己 commit，边界只能退回未提交的那半）；R2 第二趟（release 已放行）必须收完：FAILED + 卡回池 + 三列清 + 冲突零 + usage 仍只有一条；R3 STOPPING+MISSING 档同形状走一遍。
 - 牙齿（六臂变异电池）：无关注释臂 0 红；G2 让 RUNNING 档不再结算 ⇒ 只红 R1+R2；G3 把幂等键从 `started_at.isoformat()` 换成 `utcnow().isoformat()` ⇒ **只红 R2**（「补做不得把同一段算两次」这一面有独立的牙）；G4 让 STOPPING 档不叫 release ⇒ **只红 R3**；G1 让异常边界顺手写 FAILED ⇒ R1+R2 红并连带打红既有两支「本格留在原状态」的判据与 R3（四支读同一列，不是四支各有牙）。各臂 `cmp` 还原、`git diff app/` 为空；邻面 8 文件 86 支 rc=0。
 - 未证实：这一档跑在 mock provider 上；docker/k8s 里 release 抛错的真实成因（daemon 断连、APIServer 5xx）未注入过——形状相同但错误来源不同，登记在本轮的「未证实」而不是缺陷。
+
+### 崩溃那一趟遗留的库文件，从今天起有人收（N-107）
+- 缺陷：N-95 的清扫只删「本进程 pid」的那些，docstring 把崩溃／被掐那一趟的遗留交给 `make clean`——而本仓没有任何循环会跑它。实测仓根就留着 2 个死 pid 的孤儿（本会话 N-99 基准那一趟 479 KB、更早一轮 n74b 探针 455 KB）：1.59 GB 那次堆积的机制从未被堵住，只是慢一点。
+- 改法：新增 `sweep_dead_test_dbs`，接在 `pytest_sessionstart`（收尾那一脚只管本趟）。判据单边保守——只删「名字带 pid 且该 pid 确定已不在」的 `test-*.db`；无后缀／本进程 pid／活着（EPERM 与其它 OSError 一律算活着）全部不碰，所以 pid 被复用只会更保守。
+- 判据 5 支（`tests/test_test_db_sweep.py`）＋七臂电池：H2 谁都不收 ⇒ D1+D5；H4 死了说活着 ⇒ D1+D2+D5；H5 问不到说死了 ⇒ 只红 D2；H1 不看死活 ⇒ 只红 D1；H3 摘接线 ⇒ 只红 D3。H1／H4 为了不在真仓库根上按改过的规则删文件，同时中和了 hook，故 D3 那一笔红记成「安全中和」而非臂的语义；首轮 H1 的 expect 写成 D1+D2+D5，实测只有 D1+D3 ⇒ expect 按观测改、判据一字未动。
+- 现场证据：本档第一次跑之前仓根有 2 个孤儿，`pytest_sessionstart` 一落地就收掉（同一次运行 2→0）。
+
+### 设备 `online` 要有心跳背书，超时改判 offline；`OFFLINE` 第一次有了写入者（N-108）
+- 缺陷：`AgentStatus.OFFLINE` 零写入者、`last_heartbeat` 零读者——`heartbeat` 一写 online 就永久停在那儿，断掉的设备在控制面与页面上一直在线。运维看到的是一台可以派活的机器人，而控制面早就没听到过它的声音。与本仓反复修的那条教义同形：存在性主张要由事实背书，不能由「没报错」背书。
+- 改法：`EdgeService.expire_stale_agents(db, offline_after_seconds=…)` 只把「ONLINE 且心跳早于阈值」改成 OFFLINE；阈值只有一个来源 `settings.edge_agent_offline_after_seconds`（默认 90 s＝设备端 5 s 一轮 × 18；对照 AWS IoT 对 MQTT 的 1.5× keep-alive 判死口径，本机打开读过 device-connectivity-status 页），组合根把它传进周期表第五档。这里不 gate 派工：本设计是设备侧拉取，派给暂时离线的设备是正常用法，状态列只负责说真话。
+- 判据 7 支（`tests/test_edge.py`）＋六臂电池：K1 摘状态条件 ⇒ 红幂等与阈值两支（「从没通过话」那支的保护其实来自 `last_heartbeat IS NULL`，这是 K1 量出来的）；K2 比较号判反 ⇒ 四支红；K3 写死阈值 ⇒ 只红阈值那支；K4 忘 commit ⇒ 红三支靠重读库的；K5 组合根传裸数字 ⇒ 只红接线那支。
+- K5 第一版是**存活**的：接线尺子当时用 `ast.dump(fn)` 找设置名，而闭包 docstring 里正好写着它——注释把代码的洞填平了；改成只看 `ast.Attribute` 的访问名之后才真红。教训写在尺子函数里。
+- 连带：`.env.example` 补该档（`test_config_docs` 当场拦下「设了没写进样例」）；周期表成员判据从 four 改名 five 并加一行——成员是精确等值断言，新增注册必须同步改它，登记为有意的行为变化。
+- 未证实：真设备断网／断电下的行为未测（本机只有 mock 驱动）；本轮证的是控制面在「心跳不再到达」这一事实下的判决。
 
 ### 本轮新增的待收口项
 - ~~`N-64`：`accumulated_seconds` 的累加在账本的幂等保护之外（扣一次、展示与配额算两次）~~ —— **已由 N-74 闭合**：这一列改由账本投影（`app/services/ledger.py:97-109` 新读数口径、`app/services/orchestrator.py:405-439` 结算后 SET 而非 `+=`，返回值同步改成账本认下的秒数）。改前两臂复算都是 `FFF.F.F.`（8 支里 5 开火），一手读数 `列=60、账本=30`。判据 `tests/test_settled_projection.py` 8 支。量出来的两格残留另登记 N-75（指标计数器重放加两次）／N-76（destroy 失败窗口 live 重复计）。

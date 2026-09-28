@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 906 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 918 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **14 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -122,6 +122,8 @@
 | N-104 | **hold 释放失败留下的那笔 pending 没人认领收口**：`_fail` 里那一步被盲捕获吞掉只留一条 warning，指望 TTL 清扫补，但没有任何用例让 `release_hold` 真抛错。改法：三档钉住「残留可点名／死线前不收／死线后由周期入口收回并还额度」，H2/H3 之间只动 `expires_at`。 | 判据 `tests/test_hold_release_failure_self_heals.py` 3 支；五臂：摘 try/except ⇒ 三支全红（共用夹具）、时间谓词恒真 ⇒ 只红 H2、RUNNING 保护反过来 ⇒ 只红 H3。未证实：60 tick 与 TTL 时长的比例未量。 |
 | N-105 | **注释承诺的「可补偿」没有归属者**：destroy 的结算抛错档写「修复方向是可补偿」，而三个候选补做者都不在场（reconcile 跳过 tombstone、quota monitor 要求未删、回收器只管卡）。判决与改法：这一段不入账、也不许按 `utcnow() - started_at` 补（那会把等待时长计成运行时长），注释改成判决。 | 判据 `tests/test_streaming_lifecycle.py` 2 支（E1 零条目＋墓碑不留段；E2 对照档证明「零」非恒真）；四臂：墓碑保留 started_at ⇒ 两支一起红，状态守卫恒假 ⇒ E2 红并连带暴露既有 auditable 那支依赖「结算被尝试过」。未证实：真 PostgreSQL 断连档未测。 |
 | N-106 | **异常边界只钉了前半句**：`_reconcile_one` 里 release／`_finalize_stop` 抛错退回非终态之后，没有任何判据跑第二趟证明它真被收完（既有注入都炸在判据之前，两趟那支是健康档）。改法：三档钉「残留可点名 + 已提交的结算不被 rollback 吞掉 + 下一趟收完且不重复入账」，STOPPING 档另走一遍。 | 判据 `tests/test_reconcile_cell_isolation.py` 3 支；六臂：G2 不再结算 ⇒ 只红 R1+R2、G3 幂等键换成 `utcnow()` ⇒ 只红 R2、G4 STOPPING 不叫 release ⇒ 只红 R3、G1 边界写终态 ⇒ 四支读同一列。未证实：只注入过 mock，真 docker/k8s 的 release 错误来源未测。 |
+| N-107 | **崩溃那一趟遗留的 `test-*.db` 没人收**：N-95 只删本进程 pid 的那些，其余交给 `make clean`，而没有任何循环会跑它；实测仓根 2 个死 pid 孤儿（479 KB＋455 KB）。改法：`sweep_dead_test_dbs` 接在会话开头，只删「归属进程确定已不在」的，活／本／无后缀一律不碰。 | 判据 `tests/test_test_db_sweep.py` 5 支；七臂：谁都不收 ⇒ D1+D5、死了说活着 ⇒ D1+D2+D5、问不到说死了 ⇒ 只红 D2、不看死活 ⇒ 只红 D1、摘接线 ⇒ 只红 D3。现场 2 个孤儿被第一次运行收掉。 |
+| N-108 | **设备 `online` 永久为真**：`AgentStatus.OFFLINE` 零写入者、`last_heartbeat` 零读者，断掉的机器人一直显示在线。改法：`expire_stale_agents` 按 `settings.edge_agent_offline_after_seconds`（90 s＝18× 轮询）把超时 ONLINE 改判 OFFLINE，注册成周期表第五档；不 gate 派工（拉取式派工允许派给暂时离线设备）。 | 判据 `tests/test_edge.py` 7 支；六臂：摘状态条件 ⇒ 红幂等与阈值两支、比较号判反 ⇒ 四支、写死阈值 ⇒ 只红阈值那支、忘 commit ⇒ 三支、组合根传裸数字 ⇒ 只红接线那支。K5 首版因尺子读 docstring 而存活，改看 `ast.Attribute` 后才有牙。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）
