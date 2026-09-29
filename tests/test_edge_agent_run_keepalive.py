@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 import edge_agent.__main__ as agent_main
-from edge_agent.agent import RoundOutcome
+from edge_agent.agent import RUN_HEARTBEAT_SECONDS, RoundOutcome
 from edge_agent.client import AgentClientError
 from edge_agent.drivers import MockRobotDriver
 from edge_agent.keepalive import THREAD_NAME, RunKeepalive
@@ -199,6 +199,23 @@ def test_the_liveness_beat_carries_no_device_info(tmp_path: Path) -> None:
     assert ctrl.beat_device_infos, "一个心跳都没发，这条判据没有分母"
     assert all(info is None for info in ctrl.beat_device_infos[1:]), ctrl.beat_device_infos
     assert ctrl.beat_device_infos[0] is not None, "轮首那次仍应带设备画像（原有行为）"
+
+
+def test_the_run_heartbeat_cadence_stays_a_fraction_of_the_liveness_threshold() -> None:
+    """两个数必须成比例，否则运维把间隔调大一点，这层保护就静消失了。
+
+    下限取"判活窗口里至少落得下三次心跳"：MQTT 的口径是 1.5× keep-alive 才判死
+    （`[MQTT-3.1.2-24]`，本轮亲开原文），Kubernetes 的租约续期是 lease 的 0.25 倍，
+    systemd 建议超时的一半——三家都要求"至少好几拍"，而不是"刚好一拍"。
+    阈值不抄常数：读 `settings.edge_agent_offline_after_seconds` 那唯一的源。
+    """
+    from app.deps import settings
+
+    threshold = settings.edge_agent_offline_after_seconds
+    assert threshold >= RUN_HEARTBEAT_SECONDS * 3, (
+        f"运行期心跳 {RUN_HEARTBEAT_SECONDS} s 与判活阈值 {threshold} s 的比例不到 3:1，"
+        "一次慢心跳或一次重试就会把这段窗口清空"
+    )
 
 
 @pytest.mark.parametrize("bad", [0, -1, -0.5])
