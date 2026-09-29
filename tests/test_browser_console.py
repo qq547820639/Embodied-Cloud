@@ -390,7 +390,7 @@ def test_the_host_row_renders_the_sync_credential(page, api, live_server, page_e
         "els => els.map(e => e.textContent.trim())",
     )
     assert len(cells) == len(hosts), (cells, [h["name"] for h in hosts])
-    for host, cell in zip(hosts, cells):
+    for host, cell in zip(hosts, cells, strict=True):
         if host["last_synced_at"]:
             assert cell not in ("", "—", "从未同步"), (host["name"], cell)
         else:

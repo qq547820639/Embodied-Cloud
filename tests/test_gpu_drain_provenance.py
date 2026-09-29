@@ -1053,7 +1053,8 @@ const html = `<table>
 
 _HOST_ROW_NO_NULL_FACE = """
 const html = `<table>
-  <tbody>${hostList.map((h) => `<tr><td>${esc(h.name)}</td><td>${fmtTime(h.last_synced_at)}</td></tr>`).join("")}</tbody></table>`;
+  <tbody>${hostList.map((h) => `<tr><td>${esc(h.name)}</td>
+    <td>${fmtTime(h.last_synced_at)}</td></tr>`).join("")}</tbody></table>`;
 """
 
 
