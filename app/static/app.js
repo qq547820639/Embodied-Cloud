@@ -1253,8 +1253,8 @@ async function refreshGpus() {
     gpus = gpuList;
     gpuHosts = hostList;
     hostsEl.innerHTML = `<table>
-      <thead><tr><th>主机</th><th>地址</th><th>Provider</th><th>状态</th></tr></thead>
-      <tbody>${hostList.map((h) => `<tr><td>${esc(h.name)}</td><td>${esc(h.address)}</td><td>${esc(h.provider)}</td><td>${esc(h.status)}</td></tr>`).join("")}</tbody></table>`;
+      <thead><tr><th>主机</th><th>地址</th><th>Provider</th><th>状态</th><th>最后同步</th></tr></thead>
+      <tbody>${hostList.map((h) => `<tr><td>${esc(h.name)}</td><td>${esc(h.address)}</td><td>${esc(h.provider)}</td><td>${esc(h.status)}</td><td class="muted">${h.last_synced_at ? fmtTime(h.last_synced_at) : "从未同步"}</td></tr>`).join("")}</tbody></table>`;
     gpusEl.innerHTML = `<table>
       <thead><tr><th>UUID</th><th>型号</th><th>主机</th><th>显存(MiB)</th><th>状态</th><th>占用</th><th>操作</th></tr></thead>
       <tbody>${gpus.map((g) => `

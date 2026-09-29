@@ -365,6 +365,40 @@ def test_admin_gpu_row_shows_the_matching_pole_of_each_verdict(page, api, live_s
     assert page_errors == [], f"控制台出现 JS 错误或失败请求：{page_errors}"
 
 
+def test_the_host_row_renders_the_sync_credential(page, api, live_server, page_errors):
+    """主机表格把 `status` 的凭证也摆出来（N-135）。
+
+    `docs/OPERATIONS.md` 让运维"看到 `offline` 先查该档的同步源"，而它指的凭证是
+    `GET /api/gpus/hosts` 的 `last_synced_at`——此前表格里只有 主机／地址／Provider／状态 四列，
+    那个凭证对人类读者不可见，页面只剩 `status` 一个词可信（N-110 当初要避免的正是这个）。
+    两个极性都钉：同步过的行给真时刻，没同步过的行给"从未同步"，两者都不许被空串或破折号冒充；
+    末行是分母自证——一台都没同步过时，第一句断言就是空转。
+    """
+    email, password = api.register()
+    _promote_admin(live_server.db_path, email)
+    token = api.token(email, password)
+    hosts = api.get("/api/gpus/hosts", token).json()
+    assert hosts, "一次性控制面没注册任何 GPU 主机，前提塌了"
+
+    login(page, email, password)
+    page.goto("/#/gpus", wait_until="domcontentloaded")
+    page.wait_for_selector("#gpu-hosts table tbody tr", timeout=30000)
+    headers = page.eval_on_selector_all("#gpu-hosts thead th", "els => els.map(e => e.textContent)")
+    assert "最后同步" in headers, headers
+    cells = page.eval_on_selector_all(
+        f'#gpu-hosts tbody tr td:nth-child({headers.index("最后同步") + 1})',
+        "els => els.map(e => e.textContent.trim())",
+    )
+    assert len(cells) == len(hosts), (cells, [h["name"] for h in hosts])
+    for host, cell in zip(hosts, cells):
+        if host["last_synced_at"]:
+            assert cell not in ("", "—", "从未同步"), (host["name"], cell)
+        else:
+            assert cell == "从未同步", (host["name"], cell)
+    assert any(h["last_synced_at"] for h in hosts), "没有一台同步过：上面那一句只是在测空集"
+    assert page_errors == [], f"控制台出现 JS 错误或失败请求：{page_errors}"
+
+
 def test_gpu_view_follows_background_verdicts_without_renavigation(page, api, live_server, page_errors):
     """管理台的 GPU 表自己跟上后台改判：不重新进视图、不点任何按钮（N-130，闭 N-129）。
 

@@ -805,18 +805,30 @@ _GPU_ROW_TEMPLATE = re.compile(r"gpus\.map\(\((\w+)\)\s*=>\s*`(.*?)`\)\.join\(",
 _LITERAL_COMPARE = r'{alias}\.(status|health)\s*[!=]==\s*["\']([^"\']+)["\']'
 
 
+def row_template(js: str, array: str) -> tuple[str, str]:
+    """取 `<array>.map((别名) => ` … `).join(` 这段行模板，返回 (别名, 模板体)。
+
+    两条判据（比较的合法值、状态凭证有没有被渲染）共用同一个提取式，所以它们共用同一份
+    "整行读完了"的自证：模板体里合法地嵌着别的模板串，收口锚必须落在 `` ` `` + `).join(`
+    这一对上，并要求以 `</tr>` 结尾——读成一截时后面的内容会静默消失，判据就能在带缺陷的树上假绿。
+    """
+    rx = re.compile(rf"{re.escape(array)}\.map\(\((\w+)\)\s*=>\s*`(.*?)`\)\.join\(", re.S)
+    row = rx.search(js)
+    assert row, f"app.js 里读不到 `{array}.map((别名) => …)` 这段行渲染，这条判据没有分母"
+    body = row.group(2)
+    assert body.rstrip().endswith("</tr>"), (
+        f"行模板只读到一截（末尾 {body[-40:]!r}）：再往后的内容会静默漏掉，判据就不能算读过"
+    )
+    return row.group(1), body
+
+
 def gpu_row_comparisons(js: str) -> list[tuple[str, str]]:
     """GPU 行模板里对 `status`／`health` 的字面量比较，返回 (列名, 被比的值)。
 
     读不到模板、或模板里一处比较都没有 ⇒ 直接判红：这条判据的分母必须由被测量对象自己
     提供，否则"没有违规"与"提取式坏了/渲染块被删了"在终端上同形。
     """
-    row = _GPU_ROW_TEMPLATE.search(js)
-    assert row, "app.js 里读不到 `gpus.map((g) => ` … `)` 这段行渲染，这条判据没有分母"
-    alias, body = row.group(1), row.group(2)
-    assert body.rstrip().endswith("</tr>"), (
-        f"行模板只读到一截（末尾 {body[-40:]!r}）：再往后的比较会静默漏掉，判据就不能算读过"
-    )
+    alias, body = row_template(js, "gpus")
     found = [
         (m.group(1), m.group(2))
         for m in re.finditer(_LITERAL_COMPARE.format(alias=re.escape(alias)), body, re.S)
@@ -1017,3 +1029,65 @@ def test_the_gpu_table_is_periodically_redriven_and_view_scoped():
         "stops": True,
         "scoped": True,
     }
+
+
+# ---------------------------------------------------------------------------
+# 前端面（续）：主机那一行要把 `status` 的凭证也摆出来（N-135）
+# ---------------------------------------------------------------------------
+# `GpuHostOut.last_synced_at` 的注释写着"读端自己就能核结论，不必信那一列单边写的词"
+# （`app/schemas.py:156-158`），`docs/OPERATIONS.md` 的排查表也指着它。管理台就是那个"读端"，
+# 但主机表格只有 主机／地址／Provider／状态 四列——一个人类读者拿不到凭证，
+# 只能信 `status` 那个词，正是 N-110 当初要避免的形状。
+
+_HOST_ROW_CLEAN = """
+const html = `<table>
+  <thead><tr><th>主机</th><th>最后同步</th></tr></thead>
+  <tbody>${hostList.map((h) => `<tr><td>${esc(h.name)}</td>"
+    "<td>${h.last_synced_at ? fmtTime(h.last_synced_at) : "从未同步"}</td></tr>`).join("")}</tbody></table>`;
+"""
+
+_HOST_ROW_NO_EVIDENCE = """
+const html = `<table>
+  <tbody>${hostList.map((h) => `<tr><td>${esc(h.name)}</td><td>${esc(h.status)}</td></tr>`).join("")}</tbody></table>`;
+"""
+
+_HOST_ROW_NO_NULL_FACE = """
+const html = `<table>
+  <tbody>${hostList.map((h) => `<tr><td>${esc(h.name)}</td><td>${fmtTime(h.last_synced_at)}</td></tr>`).join("")}</tbody></table>`;
+"""
+
+
+def host_row_offenders(js: str) -> list[str]:
+    """主机行必须 ① 读 `last_synced_at`，② 给它一个"从没同步过 ≠ 同步失败"的兜底写法。
+
+    ②是 ADR 0008 那一半：`last_synced_at IS NULL` 是"未知"，把它渲染成一个时间或渲染成
+    缺席都是编造。这里只钉渲染式里有那条兜底分支，NULL 那一支的真运行没在浏览器里测
+    （要造它就得改控制面自己写下的证据列，反而会给周期任务留一个竞态）。
+    """
+    _, body = row_template(js, "hostList")
+    out = []
+    if "last_synced_at" not in body:
+        out.append("主机行没渲染 `last_synced_at`：状态列的凭证对人类读者不可见")
+    if "从未同步" not in body:
+        out.append("主机行缺 NULL 的兜底写法：未知会被渲染成缺席或一个假时间")
+    return out
+
+
+def test_the_host_row_ruler_fires_on_each_missing_half():
+    """三态反证：合规／没有凭证／有凭证但没兜底，各自开火在自己那一格；模板读不到判红。"""
+    assert host_row_offenders(_HOST_ROW_CLEAN) == []
+    # 两格要各自能单独开火：缺凭证那一格在下一支里是"两条一起"，缺兜底那一格单独出现
+    assert host_row_offenders(_HOST_ROW_NO_EVIDENCE) == [
+        "主机行没渲染 `last_synced_at`：状态列的凭证对人类读者不可见",
+        "主机行缺 NULL 的兜底写法：未知会被渲染成缺席或一个假时间",
+    ]
+    assert host_row_offenders(_HOST_ROW_NO_NULL_FACE) == [
+        "主机行缺 NULL 的兜底写法：未知会被渲染成缺席或一个假时间"
+    ]
+    with pytest.raises(AssertionError, match="没有分母"):
+        host_row_offenders("const t = `<p>没有表</p>`;")
+
+
+def test_the_host_row_shows_the_sync_credential():
+    """真语料：`docs/OPERATIONS.md` 让运维去看的那一列，表格里必须真的在。"""
+    assert host_row_offenders(APP_JS.read_text(encoding="utf-8")) == []
