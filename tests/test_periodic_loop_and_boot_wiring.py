@@ -260,11 +260,12 @@ def test_start_is_idempotent_and_a_second_start_does_not_double_the_loop() -> No
 # ---------------------------------------------------------------------------
 
 
-def test_all_seven_background_tasks_are_registered_with_their_constants() -> None:
-    """C1 配额／warm pool／hold 回收／reconcile／edge 时效／inventory 重报／host 时效：七条都要在表上。
+def test_all_eight_background_tasks_are_registered_with_their_constants() -> None:
+    """C1 配额／warm pool／hold 回收／reconcile／edge 时效／inventory 重报／host 时效／运行预算：八条都要在表上。
 
     间隔写成字面量的话常量就成了没人读的装饰（N-99 的 A 组同一条理由），所以这里同时钉"是谁"与"多久"。
-    N-108 加第五条时把这条从 four 改名为 five 并加了一行。
+    N-108 加第五条时把这条从 four 改名为 five 并加了一行；N-134 加第八条时同样改名并加行——
+    名字里的数与表上的条数必须一起动，否则这条判据自己就成了过期文档。
     """
     from app import deps
 
@@ -278,6 +279,7 @@ def test_all_seven_background_tasks_are_registered_with_their_constants() -> Non
         ("edge 时效判定", deps._expire_stale_edge_agents, OperationWorker.PERIODIC_EDGE_SWEEP_EVERY),
         ("GPU inventory 重报", deps._refresh_gpu_inventory, OperationWorker.PERIODIC_INVENTORY_EVERY),
         ("host 时效判定", deps._expire_stale_gpu_hosts, OperationWorker.PERIODIC_HOST_SWEEP_EVERY),
+        ("运行预算判定", deps._fail_overdue_runs, OperationWorker.PERIODIC_RUN_DEADLINE_EVERY),
     ]
     for label, callable_, cadence in expected:
         matched = [(n, c) for n, c in entries if c == callable_]

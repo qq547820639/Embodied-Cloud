@@ -2886,6 +2886,18 @@
               }
             ],
             "title": "Edge Agent Id"
+          },
+          "run_deadline_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Deadline Seconds"
           }
         },
         "type": "object",
@@ -2959,6 +2971,29 @@
             ],
             "title": "Error Message"
           },
+          "run_deadline_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Deadline Seconds"
+          },
+          "run_started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Started At"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -2982,6 +3017,8 @@
           "status",
           "edge_agent_id",
           "error_message",
+          "run_deadline_seconds",
+          "run_started_at",
           "created_at",
           "updated_at"
         ],

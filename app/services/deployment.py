@@ -8,6 +8,7 @@
 import hashlib
 import shutil
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,6 +27,7 @@ from ..models import (
     TemplateVersion,
     Workspace,
 )
+from ..utils import utcnow
 from .artifact_store import (
     ArtifactNotFoundError,
     ArtifactStore,
@@ -156,10 +158,14 @@ class DeploymentService:
         artifact: Artifact,
         robot_type: str,
         edge_agent=None,
+        run_deadline_seconds: int | None = None,
     ) -> DeploymentRecord:
         """创建部署记录 (status=pending).
 
         幂等: 同 (workspace, artifact, robot_type) 已存在 PENDING/RUNNING 则返回现有记录.
+        `run_deadline_seconds` 是这次运行自带的时长预算（N-134）；只在**新建**那一行写，
+        幂等复用的旧行不接新预算——改一条已经在飞的运行的时钟，等于让第二次 POST
+        悄悄推翻第一次的判决前提。
         """
         self._ensure_owner(db, user, workspace)
         existing = db.scalar(
@@ -194,6 +200,7 @@ class DeploymentService:
             checksum=artifact.checksum,
             status=DeploymentStatus.PENDING.value,
             edge_agent_id=edge_agent.id if edge_agent is not None else None,
+            run_deadline_seconds=run_deadline_seconds,
         )
         db.add(deployment)
         db.commit()
@@ -358,7 +365,14 @@ class DeploymentService:
         return deployment
 
     def run_policy(self, db: Session, deployment: DeploymentRecord, agent=None) -> DeploymentRecord:
-        """verified → running; 绑定执行 agent (可选)."""
+        """verified → running; 绑定执行 agent (可选).
+
+        进 running 的那一刻给 `run_started_at` 盖章（N-134）：这条部署自己的预算
+        `run_deadline_seconds` 只能相对它量，而 `updated_at` 带 `onupdate`，任何一次与运行
+        无关的写都会把它顶新——那等于让每个写者都能重置这条运行的时钟。
+        已在 running 的重复调用不重盖章：重跑 `/run` 悄悄把预算窗口拉回起点，
+        等于用一个幂等 POST 续命一条永远不会结束的 running。
+        """
         if deployment.status == DeploymentStatus.RUNNING.value:
             if agent is not None:
                 deployment.edge_agent_id = agent.id
@@ -369,6 +383,7 @@ class DeploymentService:
         if agent is not None:
             deployment.edge_agent_id = agent.id
         deployment.status = DeploymentStatus.RUNNING.value
+        deployment.run_started_at = utcnow()
         db.commit()
         return deployment
 
@@ -429,6 +444,84 @@ class DeploymentService:
         if int(cast("CursorResult[Any]", result).rowcount or 0) != 1:
             return None
         return db.get(DeploymentRecord, deployment_id)
+
+    def fail_overdue_runs(self, db: Session, now: datetime | None = None) -> int:
+        """running 且过了**这条部署自己**的预算 → failed（N-134）。
+
+        为什么不沿用 N-133 那条全局判活窗口：`edge_agent_offline_after_seconds`（默认 90 s）
+        量的是"这台设备最后一次心跳距今多久"，运行预算量的是"这条运行已经开了多久"。
+        两个不同的事实取同一个数，结果是双向错：一次合法要跑 20 分钟的巡检会被 90 s
+        的静默判死，而一次 5 秒的推理拿到 90 s 等于几乎不设防。借的是 K8s Job 那一格的
+        形状——每个 Job 自带 `activeDeadlineSeconds`，相对它自己的 `.status.startTime`
+        量（本机装的 client 31.0.0 的字段注释原文：`duration in seconds relative to the
+        startTime that the job may be continuously active before the system tries to
+        terminate it; value must be positive integer`，
+        `.venv/lib/python3.12/site-packages/kubernetes/client/models/v1_job_spec.py:132`）。
+        本仓的 `run_started_at` 就是那个 startTime：`updated_at` 带 `onupdate`，任何一次
+        与运行无关的写都会把它顶新，不能拿来量预算。
+
+        判据三条都在 SQL 侧选，终态仍由条件 UPDATE 守：
+        - `status == running`：设备回报（`complete_from_agent_report`）与掉线收口
+          （`expire_stale_agents`）和本条 sweep 是三个写者竞争同一行，第一个赢家定案，
+          后到的 rowcount 0——超时的运行是一次**已结束的失败**，不由后到的读数复活；
+        - `run_deadline_seconds IS NOT NULL`：没人定过预算就不判。给一个缺省值就是凭空
+          替所有部署做决定（ADR 0008 的"未知不等于违规"这条同样适用）；
+        - `run_started_at IS NOT NULL`：迁移之前进过 running 的存量行没有起跑时刻，
+          不回填、不拿 `updated_at` 顶。
+
+        这一条同时收掉 N-133 故意跳过的那一档：`edge_agent_id IS NULL` 的 running 拿不出
+        "最后一次被看见"的证据，但它有自己的 `run_started_at`——预算量的是时间，不需要
+        设备在场。于是"人工在库外把部署推到 running 又没人负责"那一格第一次有了归属者。
+
+        逐行的预算换算放在 Python 侧（先按上面三条选出候选，再算谁真的超时，最后用
+        `id IN (…)` 加 `status == running` 写）：`run_started_at + N 秒` 这种逐行算术在
+        SQLite 与 PostgreSQL 两侧写法不同（`datetime(col,'+N seconds')` 对
+        `col + make_interval(secs => N)`），而 ADR 0005 要求这条通路两侧语义对等。
+        候选集与写入之间 `run_started_at` 不会被改动——只有"新进入 running"才盖章，
+        而候选已经是 running，`run_policy` 对已在 running 的调用不重盖章。
+        数字不进 `error_message`：那一列给人读一句话，秒数留在 `run_deadline_seconds`
+        与 `run_started_at` 两列里由 `DeploymentOut` 透出去，避免同一事实在两处各自过期。
+        """
+        anchor = now or utcnow()
+        candidates = list(
+            db.execute(
+                select(
+                    DeploymentRecord.id,
+                    DeploymentRecord.run_started_at,
+                    DeploymentRecord.run_deadline_seconds,
+                ).where(
+                    DeploymentRecord.status == DeploymentStatus.RUNNING.value,
+                    DeploymentRecord.run_deadline_seconds.is_not(None),
+                    DeploymentRecord.run_started_at.is_not(None),
+                )
+            )
+        )
+        overdue: list[str] = []
+        for dep_id, started, seconds in candidates:
+            if started is None or seconds is None:  # 列可空：SQL 已筛过，这里只满足类型
+                continue
+            # SQLite 会把 DateTime(timezone=True) 读成无时区值，与 ledger/orchestrator
+            # 同一处口径（`app/services/ledger.py:114`）：无 tz 就当 UTC。
+            moment = started if started.tzinfo else started.replace(tzinfo=UTC)
+            if anchor - moment >= timedelta(seconds=int(seconds)):
+                overdue.append(str(dep_id))
+        if not overdue:
+            return 0
+        result = db.execute(
+            update(DeploymentRecord)
+            .where(
+                DeploymentRecord.id.in_(overdue),
+                DeploymentRecord.status == DeploymentStatus.RUNNING.value,
+            )
+            .values(
+                status=DeploymentStatus.FAILED.value,
+                error_message="run exceeded its own deadline before reporting",
+            )
+            # SQL 层比较，避开 ORM 的 in-Python evaluator（同 complete_from_agent_report）
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        return int(cast("CursorResult[Any]", result).rowcount or 0)
 
     @staticmethod
     def _fail(db: Session, deployment: DeploymentRecord, message: str) -> DeploymentRecord:

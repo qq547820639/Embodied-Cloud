@@ -129,6 +129,19 @@ def _expire_stale_gpu_hosts() -> int:
         )
 
 
+def _fail_overdue_runs() -> int:
+    """过了自己预算的 `running` 判成 `failed`（N-134）。
+
+    预算不住在配置里，住在**行上**（`deployments.run_deadline_seconds`），所以这里没有
+    阈值可传——与两条时效档（`_expire_stale_edge_agents`／`_expire_stale_gpu_hosts`）的
+    差别就在这一处：那两份量的是"最后一次被看见距今多久"，这一份量的是"这条运行开了多久"。
+    引用 `deployment_service` 放在函数体里是必要的：它在文件更下方才装配（模块级
+    import 期取值会 NameError）。
+    """
+    with SessionFactory() as db:
+        return deployment_service.fail_overdue_runs(db)
+
+
 provider = make_provider()
 orchestrator = WorkspaceOrchestrator(
     SessionFactory,
@@ -158,6 +171,8 @@ worker = OperationWorker(
         (OperationWorker.PERIODIC_INVENTORY_EVERY, _refresh_gpu_inventory),
         # §3/N-110：host 的 `online` 要由最近一次同步背书（N-108 的节点版）
         (OperationWorker.PERIODIC_HOST_SWEEP_EVERY, _expire_stale_gpu_hosts),
+        # N-134：`running` 过了它自己的预算就要有人判死，不等设备回报、不看设备心跳
+        (OperationWorker.PERIODIC_RUN_DEADLINE_EVERY, _fail_overdue_runs),
     ],
 )
 # §7（P0）：provider 不支持运行时凭据轮换（如 Docker）→ warm pool 默认禁用。

@@ -101,6 +101,10 @@ class OperationWorker:
     # N-110：host 时效判定档。阈值住在配置里（`gpu_host_offline_after_seconds`），
     # 这一档只决定"多久看一眼"，与 `PERIODIC_EDGE_SWEEP_EVERY` 同形。
     PERIODIC_HOST_SWEEP_EVERY = 30
+    # N-134：部署自己的运行预算判定档。预算与起跑时刻都住在**行上**
+    # （`deployments.run_deadline_seconds` / `run_started_at`），这里只决定"多久看一眼"，
+    # 与上面两条时效档同形：30 tick ≈ 30 s，判死的误差由被核的那个数本身决定，不由这里。
+    PERIODIC_RUN_DEADLINE_EVERY = 30
 
     def __init__(
         self,

@@ -1051,7 +1051,7 @@ async function loadDeployments() {
     deployments = await api("/api/deployments");
     if (!deployments.length) { el.innerHTML = '<div class="empty">暂无部署记录。选择工作区与 checkpoint 路径创建第一个部署。</div>'; return; }
     el.innerHTML = `<table>
-      <thead><tr><th>工作区</th><th>机器人</th><th>模型版本</th><th>状态</th><th>校验码</th><th>创建时间</th><th>操作</th></tr></thead>
+      <thead><tr><th>工作区</th><th>机器人</th><th>模型版本</th><th>状态</th><th>校验码</th><th>运行预算</th><th>创建时间</th><th>操作</th></tr></thead>
       <tbody>${deployments.map((d) => {
         const w = workspaces.find((x) => x.id === d.workspace_id);
         let ops = "";
@@ -1065,6 +1065,7 @@ async function loadDeployments() {
           <td>${esc(d.model_version)}<span class="muted"> / tpl ${esc(d.template_version)}</span></td>
           <td><span class="badge ${esc(d.status)}">${DEPLOY_STATUS_CN[d.status] || esc(d.status)}</span>${d.error_message ? `<div class="muted" style="margin-top:4px">${esc(d.error_message)}</div>` : ""}</td>
           <td class="checksum">${esc(d.checksum).slice(0, 16)}…</td>
+          <td>${d.run_deadline_seconds ? `${d.run_deadline_seconds} 秒` : "未设预算"}${d.run_deadline_seconds && d.run_started_at ? `<span class="muted"> 自 ${fmtTime(d.run_started_at)}</span>` : ""}</td>
           <td>${fmtTime(d.created_at)}</td>
           <td><div class="actions-cell">${ops}</div></td>
         </tr>`;

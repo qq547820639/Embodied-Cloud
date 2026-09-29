@@ -82,7 +82,13 @@ def create_deployment(payload: DeploymentCreate, db: DB, user: CurrentUser):
         if user.role != Role.ADMIN.value and agent.owner_user_id != user.id:
             raise HTTPException(404, "edge agent not found")
     return deployment_service.deploy(
-        db, user, workspace, artifact, payload.robot_type, edge_agent=agent
+        db,
+        user,
+        workspace,
+        artifact,
+        payload.robot_type,
+        edge_agent=agent,
+        run_deadline_seconds=payload.run_deadline_seconds,
     )
 
 

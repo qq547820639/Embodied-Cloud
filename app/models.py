@@ -702,6 +702,16 @@ class DeploymentRecord(Base):
         index=True,
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # N-134：这次运行自带的时长预算，以及它自己的起跑时刻（K8s Job 的
+    # `activeDeadlineSeconds` 与 `.status.startTime` 那一格）。没有 `run_started_at` 就没法
+    # 判预算——`updated_at` 带 `onupdate`，任何一次写（含与运行无关的）都会把它顶新，
+    # 拿它当"最后一次被看见"的证据等于把时钟重置权交给所有写者。
+    # 两列都留 NULL 而不是 0／now：NULL 是"没人定过预算"与"还没进过 running"，
+    # 回填等于凭空造出从未发生过的判决（同 ADR 0008 的未知不等于缺席）。
+    run_deadline_seconds: Mapped[int | None] = mapped_column(nullable=True)
+    run_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False

@@ -318,6 +318,10 @@ class DeploymentCreate(BaseModel):
     model_version: str = "0.1.0"
     # §25/ADR 0007：部署时就把执行设备绑上，agent 之后凭 X-Agent-Token 自行发现并取件。
     edge_agent_id: str | None = None
+    # N-134：这次运行自带的时长预算（秒），从进入 running 那一刻起算。NULL=没定过，
+    # 控制面就不对该行做时效判决。下界 1 而不含 0：0 秒的预算等于"派工即判死"，
+    # 那不是运行预算，是要表达"不设预算"的另一种写法，后者由 NULL 负责。
+    run_deadline_seconds: int | None = Field(default=None, ge=1)
 
 
 class DeploymentOut(ORM):
@@ -331,6 +335,8 @@ class DeploymentOut(ORM):
     status: str
     edge_agent_id: str | None
     error_message: str | None
+    run_deadline_seconds: int | None
+    run_started_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
