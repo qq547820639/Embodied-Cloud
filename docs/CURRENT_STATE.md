@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 1011 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 1014 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **17 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -137,6 +137,7 @@
 | N-125 | **一列两主**（闭 N-124）：`gpus.status` 既答「占用」又答「管理员摘走」，所以 N-123 只能让 `/drain` 对占用中的卡回 409。改法按 K8s `spec.unschedulable`／`.status` 分栏：新增证据列 `gpus.drain_requested_at`（alembic 第 16 节，nullable、无 server default），`/drain` 占用中也判得动（当场记意图），`release`／recover 的 `case` 多一条 WHEN 把带意图的占用卡落成 drained，新增 `POST /api/gpus/{id}/undrain` 作唯一解除路径。 | 判据 `tests/test_gpu_drain_provenance.py` 21 支（本轮 +5：意图兑现、提前撤回、undrain 只撤自己的判决、HTTP 意图极、意图列写入者登记册）；五臂 F1 3 红／F2 2 红／F3 1 红／F4 1 红（只有结构档红＝结构档的存在理由）／F5 0 红。连带：迁移数 15→16、openapi 工件重生成、`/unhealthy` 覆盖占用登记为 N-126，并更正我上轮注释里把那行 `gpu_allocated` 指标说成 stuck 保护的假话。未证实：两方言该列的语义差异无专判、~~前端不显示「在用但已摘走」~~（N-128 闭）、存量库未 upgrade。 |
 | N-126 | **健康挤在状态列里**（ADR 0010 落地）：`mark_unhealthy` 没有状态前置，对一张在用的卡点 `/unhealthy` 会把 `status` 从 allocated 改成 unhealthy ⇒ 占用事实在 `gpus` 一侧消失（`gpu_allocated` 数的就是它），而格上归属还在——两张表打脸，没有判据会红。改法是三维度各一列：`status` 只答调度可用性（枚举里删掉 `UNHEALTHY`）、`gpus.health` 独立（迁移第 17 节，nullable 不回填）、下架意图仍是 `drain_requested_at`；`health_is_usable()` 与 `host_is_visible()` 同规矩只此一份，吃进候选筛选、等锁计数、池子余量与测试夹具四处；新增 `POST /api/gpus/{id}/healthy` 作唯一解除路径。 | 判据 `tests/test_gpu_drain_provenance.py` 24 支（+2：`health_writers` 登记册、前端以 `GpuHealth` 为分母），四臂 G1 7 红／G2 2 红／G3 2 红／G4 0 红，还原后与开局快照一致。连带重指 `tests/test_gpu_admin.py`／`tests/test_gpu_allocation_visibility.py`／`tests/test_gpu_host_liveness.py`／`tests/gpu_pool.py`；门禁 G0.113、链长 16→17、openapi 重生成。新登记 N-127（health 没有观察来源）。未证实：真机故障发现链路、两方言 NULL 语义无专判、`downgrade` 的一处已知不保真。 |
 | N-128 | **管理台还在拿被搬走的旧值作门**：`app/static/app.js:1253` 的 `g.status !== "unhealthy"` 在 N-126 之后恒为真，「标记异常」在任何卡上都不消失；`drain_requested_at` 有 API 读者却没有表格读者；`/undrain` 与 `/healthy` 两条解除路径在控制台里没有按钮。改法：行模板按维度给极（健康／下架各两颗按钮）并在状态格挂 `已请求排水`。 | 判据 `tests/test_gpu_drain_provenance.py` +4 支（`gpu_row_offenders` 钉「比较的对端必须在自己的枚举里」，别名现取、整行自证；端点↔`data-action`↔`actionHandlers` 三方对账，分母由路由 AST 给）＋常驻浏览器档以真 admin 走完两个维度的极性翻转；四臂 A 双侧红／B 只浏览器红／C 双侧红／D 对照不红。连带 G0.111／G0.112 两行措辞按现状改口、`docs/openapi.json` 重生成、N-125 那行的「前端不显示」未证实面闭合。新登记 N-129（GPU 表没有周期驱动者）。未证实：尺子只管字面量右端、只管 `refreshGpus` 这一处渲染位；确认弹窗话术与后端语义无人核。 |
+| N-130 | **管理台的 GPU 表是静态快照**（闭 N-129）：`refreshGpus()` 只在进视图与点完动作后被叫，`pollTick()` 只刷工作区与指标且在无瞬态工作区时整体停摆，而 `draining`／`drained`／`last_synced_at` 全由后台同步改判——`docs/OPERATIONS.md` 让运维「看到一批 `draining` 先查节点同步」，那句话在控制台上读的是快照。改法：`GPU_POLL_MS`＝15s 加 `startGpuPolling`／`stopGpuPolling`，接在 `showView` 这个唯一导航入口上 （`app/static/app.js:655`、`:657`、`:662`、`:305-306`），回调里带 `document.hidden`。 | 判据 `tests/test_gpu_drain_provenance.py` 的 `gpu_poll_wiring` 三格（driver／stops／scoped）＋三态反证（一次性刷新／摘 clearInterval／起了不停，各打一格；接线点缺失判红而非返回空串），`tests/test_browser_console.py` 一支三档互为前提的常驻用例（可见时确有 GET／后台改判自己翻极性／离开视图后缺席，毫秒数由页面自报）；四臂 E1／E2／E3 尺子与浏览器双侧红、E4 只改毫秒数两侧都不红。连带门禁 G0.115、§2 新行、`docs/OPERATIONS.md` 补刷新口径、N-129 划销。未证实：无 Chrome 时只剩接线尺、多标签页各起一份轮询未去重、没有「滞后不超过某值」的判据、真机降级时延未测。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）

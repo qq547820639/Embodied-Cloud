@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 1011 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 1014 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -1520,6 +1520,15 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 记账：新增门禁 G0.114；§2 新行 N-128；本轮 +4 支（认证读数 collected 1011／failed 0，迁移链 17 节不变）。N-125 那行「未证实：前端不显示『在用但已摘走』」随本轮闭合。新登记 N-129：管理台的 GPU 表没有周期驱动者——`pollTick` 只刷工作区与指标，且在没有瞬态工作区时整体停摆，于是 `draining`／`drained` 这些由后台同步改判的事实，运维不重新进视图就看不见。
 - 未证实／限度：死比较那把尺只看「字面量在 `===`／`!==` 右边」的形状，右端换成变量或 `GPU_STATUS_CN[...]` 索引不判；它的作用域是 `gpus.map` 那一个渲染位（今日全仓只有 `refreshGpus` 一处渲染 gpus，逐处 grep 过）；确认弹窗的话术与后端语义是否一致没有判据（本轮只顺手把「已有分配不受影响」改成按 N-125 的说法）；浏览器档按可用性整档可跳过，缺 Chrome 时这一支不产读数（环境读数在 `dist/VALIDATION_RUN.md`）；端点↔按钮对账不看按钮点了以后请求真的发出去（那半边由浏览器用例覆盖，但它只在有浏览器的那一遍跑）。
 
+### GPU 表的快照要有驱动者：进视图之外还得有人定时重读（N-130，闭 N-129）
+- 缺陷（登记项 N-129 的原话）：`refreshGpus()` 只在进视图和点完一次动作之后被叫，`app/static/app.js:644` 的 `pollTick()` 只刷工作区与指标，且 `has_transient()` 一为空就整体停摆。而 `draining`（缺席降级）、`drained`（意图被释放兑现）、`hosts.last_synced_at` 全部由后台同步改判——`docs/OPERATIONS.md` 的排查表让运维「看到一批 `draining` 先查那个节点的同步」，那句话在管理台上读的是一张静态快照。N-93／N-99／N-110 立过的规矩是「有周期驱动的收敛才叫被验证过」，这一格缺的正是驱动者。
+- 改法：`app/static/app.js:655` 新增 `GPU_POLL_MS = 15000`（取这个量级的理由写在常量旁：后台改判最慢 120s 一轮，`app/services/worker.py:100`，再密只是重读同一份事实），`app/static/app.js:657` 的 `startGpuPolling()` 与`app/static/app.js:662` 的 `stopGpuPolling()` 接在 `showView` 这个唯一的导航入口上（`:305-306`，进 gpus 起、离开即停），回调里带 `document.hidden`——与 `pollTick` 同一规矩，切到别的标签页不打请求。
+- 判据两把位点（`tests/test_gpu_drain_provenance.py`，本轮 +3）。接线尺 `gpu_poll_wiring` 分三格核「有驱动／停得下来／按视图作用域起停」，区段按顶层函数边界切；三种残缺形状（一次性刷新／摘掉 `clearInterval`／起了不随视图停）各打自己那一格，合规形状三格全真，**接线点读不到就判红而不是返回空串**——否则「驱动者被删了」会读成「没有违规」。浏览器档一支常驻用例三档互为前提：① 视图可见时确有 `GET /api/gpus`（没有这一档，③ 的缺席就是空转，从未存在的轮询同样一条都不发）；② 由 API 侧改一张卡、页面完全不碰，行内极性必须在下一个周期自己翻过来；③ 离开视图后的窗口里一条 GPU 读请求都不许有。节奏毫秒数由页面自己报（`page.evaluate("() => GPU_POLL_MS")`），用例不钉常量。
+- 四臂电池（`/tmp/n130-battery.py`，靶 `app/static/app.js`，跑完 `git diff app/` 与开局快照逐字节相同）：E1 摘掉 `clearInterval` ⇒ 尺子红（stops）＋浏览器红（③）；E2 把 `setInterval` 换成一次性 `refreshGpus()` ⇒ 尺子红（driver）＋浏览器红（①）；E3 起了不随视图停 ⇒ 尺子红（scoped）＋浏览器红（③）；E4 只把 15000 改成 12000 ⇒ 两侧都不许红（对照：判据不许钉具体毫秒数）。四臂读数全部落在预期上。
+- 排障留痕：浏览器判据第一版在 ① 处红——`time.sleep()` 期间 sync Playwright 不派发 `request` 事件，探针结构上收不到任何请求，于是「驱动者不在场」与「事件没送到」同形。改法是等待一律走 `wait_for_timeout`。这条不是判据太严，是采集手法会把假阴性写成结论。
+- 记账：新增门禁 G0.115；§2 新行 N-130；本轮 +3 支（读数以 `docs/VALIDATION.json` 为准，两面计数由 `docs_test_counts` 机核，此处不重抄）；`docs/OPERATIONS.md` 那句排查表补上刷新口径（15s 自读、切标签页不读）；登记项 N-129 就地划销。
+- 未证实／限度：没有 Chrome 时浏览器档整档干净跳过，那一遍只剩接线尺（它看不见回调真的发出请求，只看见接线在）；多个标签页各起一份轮询，本轮未做去重（`gpuTimer` 只在同一文档内幂等）；15s 与后台 120s／30s 的节奏匹配只按常量写死，没有一条「控制台滞后不超过某值」的判据；缺席降级在真机上要多久被看见仍未测（本机无 NVIDIA 设备）。
+
 ### 记账脚本在仓内留一个 tmp/，就把文档门顶红了（N-118）
 - 缺陷（工具的自我遮蔽，不在产品代码里）：`scripts/validate_release.py:732 _doc_roots()` 按 `ROOT.iterdir()` 现取顶层目录当「仓内根」，而文档门的存在性核对（`doc_reference_offenders` 的 :615-621 那段划界）写死了「只核以既有仓内根目录开头的路径」——它的前提是**根面等于仓库的组成面**。记账脚本把备份落进仓内 `tmp/anchor-patch-n116/` 之后，这个前提就塌了：`tmp` 成了根，CHANGELOG 与 CURRENT_STATE 里那两句**故意不作为指针**的示例路径 `tmp/probe.py` 各产一条假悬空引用，`doc_references` 当场翻红。红因不在文档，也不在产品代码，而在量具自己的落点。
 - 一手读数与机制隔离（不靠「删掉之后变绿」倒推）：同一进程里只换 `roots` 入参、其余全部取现值 ⇒「现行 8 个根 → 干净；roots 里加一个 `tmp` → 恰好 2 条同名 offender，差集 2」。`git check-ignore --stdin` 的语义在一次性夹具里实测：输入 `tmp/ dist/ app/ nosuch/` 只回吐被忽略的那两个；不在仓库里时 `fatal: not a git repository`、rc=128、stdout 为空 ⇒ 干净导出下新过滤器退化成 ∅，行为与改前逐位一致。
@@ -1590,7 +1599,7 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 
 - `N-32`：CI 改按锁装之后，`docs/VALIDATION.json` 才第一次"可能"在 runner 与本机之间逐字节相等；
   这条主张**未在真 runner 上验证过**（不能推送），本机侧只用"同树两次跑 + 换环境"两档做了替代实验。
-- `N-129`：**管理台的 GPU 表没有周期驱动者**。`app/static/app.js` 的 `pollTick()` 只刷工作区与指标，且 `has_transient()` 一为空就整体停摆；`refreshGpus()` 只在进视图和点完一次动作之后被叫到。于是`draining`／`drained`／`last_synced_at` 这些**由后台同步改判**的事实，管理员不重新进一次 `#/gpus` 就看不见——`docs/OPERATIONS.md` 的排查表让运维「看到一批 `draining` 先查那个节点的同步」，而它说的读法在控制台上是静态快照。N-93／N-99／N-110 立的规矩是「有周期驱动的收敛才叫被验证过」，这一格同样缺驱动者。要收口先拍两件事：刷新的作用域（只在 gpus 视图可见时轮，还是常驻轮）与节奏（后台同步本身是分钟级，秒级轮询只是把控制台的读压放大），并补一条常驻浏览器判据：卡在被同步改判之后，不改哈希、不点任何按钮，表格必须自己跟上。
+- ~~`N-129`：**管理台的 GPU 表没有周期驱动者**。`app/static/app.js` 的 `pollTick()` 只刷工作区与指标，且 `has_transient()` 一为空就整体停摆；`refreshGpus()` 只在进视图和点完一次动作之后被叫到。于是`draining`／`drained`／`last_synced_at` 这些**由后台同步改判**的事实，管理员不重新进一次 `#/gpus` 就看不见——`docs/OPERATIONS.md` 的排查表让运维「看到一批 `draining` 先查那个节点的同步」，而它说的读法在控制台上是静态快照。N-93／N-99／N-110 立的规矩是「有周期驱动的收敛才叫被验证过」，这一格同样缺驱动者。要收口先拍两件事：刷新的作用域（只在 gpus 视图可见时轮，还是常驻轮）与节奏（后台同步本身是分钟级，秒级轮询只是把控制台的读压放大），并补一条常驻浏览器判据：卡在被同步改判之后，不改哈希、不点任何按钮，表格必须自己跟上。~~ —— **已由 N-130 闭合**：`GPU_POLL_MS` 15s 的周期重读接在 `showView` 这个唯一导航入口上，起停按视图作用域；判据一把接线尺（driver／stops／scoped 三格＋三态反证）＋一支常驻浏览器用例（可见时确有 GET／后台改判自己翻极性／离开视图后一条都不许有），读数见上面 N-130 一节。
 - ~~`N-33`：`tests/test_gpu_pool_guard.py` 那两支带哨兵（缺余量时算合法跳过）~~ —— 已由 **N-41 闭合**：
   夹具显式达成前置并断言，哨兵与闭集条目一并删除，条件跳过归零。
 
