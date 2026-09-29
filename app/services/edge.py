@@ -8,10 +8,18 @@ import uuid
 from datetime import datetime, timedelta
 
 from fastapi import HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..models import AgentStatus, EdgeAgent, Role, TelemetryEvent, User
+from ..models import (
+    AgentStatus,
+    DeploymentRecord,
+    DeploymentStatus,
+    EdgeAgent,
+    Role,
+    TelemetryEvent,
+    User,
+)
 from ..security import generate_token, hash_token
 from ..utils import utcnow
 
@@ -75,6 +83,19 @@ class EdgeService:
         在这条 WHERE 下自然不被选中，不需要额外的判空。
         这里**不**顺手 gate 派工：本设计是设备侧拉取（`GET /deployments/assigned`），把任务派给
         一台暂时离线的设备是正常用法（它上线后自己取），所以状态列只负责说真话。
+
+        同一条判决把这台设备名下还挂着 `running` 的部署一起收口（N-133，闭登记项 N-115）：
+        `running` 也是一条存在性主张，它的唯一凭证就是"这台设备还会回来报结果"。设备被判离线
+        之后再没有人替它报，那一行就永远停在 `running`——运维看到的是一个还在跑的机器人任务，
+        而控制面已经再没听到过它的声音（N-109 的 `reported=false` 档、设备掉了而部署没重下、
+        以及人工在库外把部署推到 running，三种形状都落在这里）。判成 `failed` 而不是回退到
+        `pending`：借鉴 K8s Job 的 `activeDeadlineSeconds`／SLURM `--time` 那一档——超时的运行是
+        一次**已结束的失败**，重跑要人重新下部署，不由控制面私自重来一遍。
+        终态一旦写下就不许被后到的读数复活：设备恢复后补报的 `ok=true` 走
+        `complete_from_agent_report`，那条 UPDATE 的 WHERE 钉着 `status == running`，rowcount 0，
+        遥测事件照旧留档。未绑定设备（`edge_agent_id IS NULL`）的 `running` **不判**：
+        没有"最后一次被看见"的证据列可依据，把"没人报"读成"设备没了"就是 ADR 0008 禁止的
+        把未知当缺席——那一半另登登记项。
         """
         threshold = (now or utcnow()) - timedelta(seconds=offline_after_seconds)
         stale = list(
@@ -88,6 +109,19 @@ class EdgeService:
         for agent in stale:
             agent.status = AgentStatus.OFFLINE.value
         if stale:
+            db.execute(
+                update(DeploymentRecord)
+                .where(
+                    DeploymentRecord.edge_agent_id.in_([agent.id for agent in stale]),
+                    DeploymentRecord.status == DeploymentStatus.RUNNING.value,
+                )
+                .values(
+                    status=DeploymentStatus.FAILED.value,
+                    error_message="device went offline before reporting the run",
+                )
+                # SQL 层比较，避开 ORM 的 in-Python evaluator（同 complete_from_agent_report）
+                .execution_options(synchronize_session=False)
+            )
             db.commit()
         return len(stale)
 
