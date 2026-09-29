@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .agent import EdgeAgentRuntime
+from .agent import RUN_HEARTBEAT_SECONDS, EdgeAgentRuntime, RoundOutcome
 from .client import AgentClientError
 from .drivers import build_driver
 
@@ -26,6 +26,22 @@ ENV_SERVER = "EMBODIEDCLOUD_EDGE_SERVER"
 ENV_TOKEN = "EMBODIEDCLOUD_EDGE_TOKEN"  # noqa: S105 环境变量名，不是凭据
 ENV_AGENT_ID = "EMBODIEDCLOUD_EDGE_AGENT_ID"
 ENV_WORKDIR = "EMBODIEDCLOUD_EDGE_WORKDIR"
+
+
+def _exit_code(outcomes: list[RoundOutcome]) -> int:
+    """非零退出的三种形状，一种比一种难看见。
+
+    1. `action == "error"`：一条坏记录（原有）。
+    2. `reported is False`：机器人真动过而控制面不知道（N-109）。
+    3. `run_heartbeat_misses > 0`（N-137）：这次运行期间**存活证据没送达**。
+       它不等于运行失败——驱动可能跑完、结果也可能报成功了；它说的是这段时间里
+       控制面收不到心跳，于是那条 `running` 有可能已被判活 sweep 收成 `failed`，
+       而设备自己不知道。冒烟跑的绿灯不该盖住这种"两边的账可能对不上"。
+    """
+    for outcome in outcomes:
+        if outcome.action == "error" or not outcome.reported or outcome.run_heartbeat_misses:
+            return 1
+    return 0
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -47,6 +63,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--driver", default="mock", help="设备驱动名（当前：mock）")
     run.add_argument("--interval", type=float, default=5.0, help="轮询间隔秒")
+    run.add_argument(
+        "--run-heartbeat",
+        dest="run_heartbeat",
+        type=float,
+        default=RUN_HEARTBEAT_SECONDS,
+        help="一次物理运行期间的心跳间隔秒；必须显著小于控制面的判活阈值"
+        "（`edge_agent_offline_after_seconds`，默认 90 s），否则这段阻塞里设备会被判成离线",
+    )
     run.add_argument("--iterations", type=int, default=None, help="跑满 N 轮后退出（默认常驻）")
     run.add_argument("--json", action="store_true", help="把每轮处置结果按 JSON 打印")
     return root
@@ -92,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         agent_id=args.agent_id,
         workdir=Path(args.workdir),
         driver=build_driver(args.driver),
+        run_heartbeat_seconds=args.run_heartbeat,
     )
     try:
         outcomes = runtime.loop(interval_seconds=args.interval, iterations=args.iterations)
@@ -105,9 +130,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for o in outcomes:
             print(f"{o.deployment_id[:8]} {o.status_before}→{o.status_after} {o.action} {o.detail}")
-    # 非零退出的两种形状：一处坏记录（error），或一次**机器人真动过而控制面不知道**
-    # 的运行（reported=False）——后者若退 0，冒烟跑的绿灯会盖住一条无人知晓的物理动作。
-    return 1 if any(o.action == "error" or not o.reported for o in outcomes) else 0
+    # 非零退出的三种形状见 `_exit_code`：坏记录、一次没人知晓的物理运行、
+    # 一段没能送达的存活证据。后两种都不会让"这一格跑完了"看起来有问题。
+    return _exit_code(outcomes)
 
 
 if __name__ == "__main__":  # pragma: no cover

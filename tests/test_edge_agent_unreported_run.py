@@ -70,7 +70,11 @@ class _FakeControlPlane(AgentClient):
         return {"id": "evt-1"}
 
 
-def _runtime(client: AgentClient, workdir: Path, driver: MockRobotDriver) -> EdgeAgentRuntime:
+def _runtime(
+    client: AgentClient, workdir: Path, driver: MockRobotDriver, run_heartbeat_seconds: float = 15.0
+) -> EdgeAgentRuntime:
+    """`run_heartbeat_seconds` 是给 N-137 那组用例的旋钮；默认值与生产缺省一致，
+    所以本文件那三支"上报丢失"用例的行为一字未变。"""
     return EdgeAgentRuntime(
         server="http://control.example",
         token=TOKEN,
@@ -78,6 +82,7 @@ def _runtime(client: AgentClient, workdir: Path, driver: MockRobotDriver) -> Edg
         workdir=workdir,
         driver=driver,
         client=client,
+        run_heartbeat_seconds=run_heartbeat_seconds,
     )
 
 

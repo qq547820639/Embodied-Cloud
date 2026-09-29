@@ -21,10 +21,15 @@ from pathlib import Path
 
 from .client import AgentClient, AgentClientError
 from .drivers import MockRobotDriver, RobotDriver, RobotObservation
+from .keepalive import RunKeepalive
 
 RUN_TELEMETRY_KIND = "edge-run"
 #: 设备侧还能推进的状态；其余（running/success/failed）归控制面。
 DEVICE_ADVANCEABLE = ("pending", "downloading", "verified")
+#: 运行期间的心跳间隔。判活阈值（`edge_agent_offline_after_seconds`，默认 90 s）除以它
+#: 留 6 次机会，而单次请求自己的超时是 30 s——慢一次也还在窗口内。
+#: 这个数不是"越小越好"：它要保证的是**判活窗口里至少能落进一次心跳**。
+RUN_HEARTBEAT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,11 @@ class RoundOutcome:
     observation: RobotObservation | None = None
     #: 控制面是否知道这一格的处置。`False` 只有一种来源：机器人已经动过而上报失败。
     reported: bool = True
+    #: 这次运行期间替设备续命的心跳：发了几次、失败几次（N-137）。
+    #: `misses > 0` 说的是"这段时间控制面没能被我告知我还活着"——
+    #: 它不等于运行失败，但足以让那条 `running` 被判活 sweep 收走，所以必须能被看见。
+    run_heartbeats: int = 0
+    run_heartbeat_misses: int = 0
 
     def as_json(self) -> dict:
         return {
@@ -48,6 +58,8 @@ class RoundOutcome:
             "sha256": self.sha256,
             "detail": self.detail,
             "reported": self.reported,
+            "run_heartbeats": self.run_heartbeats,
+            "run_heartbeat_misses": self.run_heartbeat_misses,
             "observation": None
             if self.observation is None
             else {"ok": self.observation.ok, "steps": self.observation.steps, "detail": self.observation.detail},
@@ -65,6 +77,7 @@ class EdgeAgentRuntime:
         driver: RobotDriver | None = None,
         client: AgentClient | None = None,
         max_artifact_bytes: int | None = None,
+        run_heartbeat_seconds: float = RUN_HEARTBEAT_SECONDS,
     ) -> None:
         self.agent_id = agent_id
         self.workdir = Path(workdir)
@@ -72,6 +85,7 @@ class EdgeAgentRuntime:
         kwargs = {} if max_artifact_bytes is None else {"max_artifact_bytes": max_artifact_bytes}
         self.client = client or AgentClient(server, token, **kwargs)
         self.driver: RobotDriver = driver or MockRobotDriver()
+        self.run_heartbeat_seconds = run_heartbeat_seconds
 
     # ------------------------------------------------------------------
     def run_once(self, device_info: dict | None = None) -> list[RoundOutcome]:
@@ -131,15 +145,32 @@ class EdgeAgentRuntime:
             current = self.client.report_checksum(dep_id, fetch.sha256)
 
         after = str(current.get("status"))
-        observation = None
+        # 显式标注：赋值现在发生在 `with keepalive:` 的块里，靠隐式 None 推不出收窄，
+        # mypy 会在下面读 observation.ok 时报 union-attr。
+        observation: RobotObservation | None = None
+        run_heartbeats = 0
+        run_heartbeat_misses = 0
         action = "reported" if fetched else "no-op"
         # 只在**本轮自己把它推到 verified** 的那一次跑驱动：`assigned` 是轮询，
         # 若以"状态是 verified"为条件，一台常驻设备会把同一个模型无限重复上机。
         # 代价是"已 verified 但崩在跑之前"不会被自动补跑（没有运行游标），
         # 这条限制如实写进 ADR 0007 的后果段。
         if after == "verified" and fetched and dest.is_file():
-            self.driver.load(dest, str(current.get("robot_type") or ""))
-            observation = self.driver.run()
+            # 心跳通路必须与这段阻塞**并行**：一轮只发一次心跳时，一次 20 分钟的物理运行
+            # 在控制面上与"设备没了"完全同形，而那把判活尺还会顺手把这条 running 收成 failed
+            # （N-133 的连带判决）。发的是纯心跳，不带 device_info——`edge_service.heartbeat`
+            # 只在 device_info 非空时合并它，所以这一段不会改写运维看到的设备画像。
+            keepalive = RunKeepalive(
+                lambda: self.client.heartbeat(self.agent_id),
+                interval_seconds=self.run_heartbeat_seconds,
+            )
+            with keepalive:
+                self.driver.load(dest, str(current.get("robot_type") or ""))
+                observation = self.driver.run()
+            run_heartbeats, run_heartbeat_misses = (
+                keepalive.state.beats,
+                keepalive.state.misses,
+            )
             try:
                 self.client.telemetry(
                     self.agent_id,
@@ -167,6 +198,10 @@ class EdgeAgentRuntime:
         detail = "" if observation is None else observation.detail
         if unreported is not None:
             detail = f"{detail}；已运行但上报失败：{unreported}"
+        if run_heartbeat_misses:
+            # 上报本身可能成功了，但这段时间里控制面没收到过心跳——那条 running
+            # 可能已经被判活 sweep 收走。这一格必须能被读出来，不能只活在线程的账本里。
+            detail = f"{detail}；运行期间心跳失败 {run_heartbeat_misses} 次"
         return RoundOutcome(
             dep_id,
             action,
@@ -176,4 +211,6 @@ class EdgeAgentRuntime:
             detail=detail,
             observation=observation,
             reported=unreported is None,
+            run_heartbeats=run_heartbeats,
+            run_heartbeat_misses=run_heartbeat_misses,
         )
