@@ -91,12 +91,12 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/deployments` | 创建：workspace 产出路径 → Artifact（sha256）→ 部署记录（pending）；可选 `edge_agent_id` 当场指派执行设备（只能指派自己的） |
+| POST | `/api/deployments` | 创建：workspace 产出路径 → Artifact（sha256）→ 部署记录（pending）；可选 `edge_agent_id` 当场指派执行设备（只能指派自己的）；可选 `run_deadline_seconds`（正整数秒）给这次运行自带时长预算，缺省＝不做时效判决 |
 | GET | `/api/deployments?workspace_id=` | 我的部署（owner 隔离） |
 | GET | `/api/deployments/{id}` | 详情 |
 | POST | `/api/deployments/{id}/download` | pending → downloading（仅进入状态，绝不自动 VERIFIED） |
 | POST | `/api/deployments/{id}/verify` | 控制面侧幂等校验（对象存储 checksum 比对）；存储不可用 → **503** |
-| POST | `/api/deployments/{id}/run` | verified → running，可选绑定自己的 Edge Agent |
+| POST | `/api/deployments/{id}/run` | verified → running，可选绑定自己的 Edge Agent；进入 running 即盖 `run_started_at`（预算从这一刻起算，重复调用不重盖） |
 | POST | `/api/deployments/{id}/complete` | running → success/failed（终态） |
 | POST | `/api/deployments/{id}/report-checksum` | **Edge Agent 上报本地 sha256**（`X-Agent-Token` 认证）——唯一 edge→server 校验路径，防绕过/防 replay |
 | GET | `/api/deployments/{id}/artifact` | **Edge Agent 取件**（`X-Agent-Token`）：字节 + `X-Artifact-Sha256`/`X-Artifact-Size`/`ETag`；未 `begin` → 409，越权 → 404，存储故障 → 503 |
@@ -117,7 +117,7 @@
 | POST | `/api/edge/agents/{id}/heartbeat` | 心跳（`X-Agent-Token`） |
 | POST | `/api/edge/agents/{id}/telemetry` | 遥测（`X-Agent-Token`） |
 | GET | `/api/edge/agents/{id}/telemetry` | 遥测回读（用户侧，租户 scope，越权 404）——此前这张表只写不读 |
-| GET | `/api/edge/agents/{id}/deployments/assigned` | **设备侧工作发现**（`X-Agent-Token`）：只返回绑定给自己的部署 |
+| GET | `/api/edge/agents/{id}/deployments/assigned` | **设备侧工作发现**（`X-Agent-Token`）：只返回绑定给自己的部署，含 `run_deadline_seconds`／`run_started_at`——设备在跑之前就知道自己的预算 |
 | POST | `/api/edge/agents/{id}/deployments/{dep}/begin` | **设备侧开门**（`X-Agent-Token`）：pending → downloading，条件 UPDATE，重复调用幂等 |
 
 设备侧通路的完整一轮（`edge_agent` 包，标准库实现）与三道防线的开火读数，

@@ -40,7 +40,7 @@
   刷新窗口没再同步成功就改判 `offline`）。看到 `offline` 先查该档的同步源：docker 档是 `nvidia-smi`
   还在不在，k8s 档是 kubeconfig 与集群可达性（N-110）。管理台的主机表格已带这一列（N-135）：同步过的显示本地时刻，从没同步过的显示「从未同步」——那是未知，不是刚掉线。
 - **设备是否还看得见**：`GET /api/edge/agents/{id}` 的 `status` 由最近一次心跳背书，超时改判 `offline`
-  （阈值 `edge_agent_offline_after_seconds`，默认 90 s＝设备端 5 s 轮询 × 18，N-108）。同一条判决还负责一件事（N-133）：这台设备名下还挂在 `running` 的部署一起落成 `failed`，错误原因写 `device went offline before reporting the run`；设备之后回来补报改不动那一格终态，但遥测事件照旧留档，去 `GET /api/edge/agents/{id}/telemetry` 看得见。
+  （阈值 `edge_agent_offline_after_seconds`，默认 90 s＝设备端 5 s 轮询 × 18，N-108）。同一条判决还负责一件事（N-133）：这台设备名下还挂在 `running` 的部署一起落成 `failed`，错误原因写 `device went offline before reporting the run`；设备之后回来补报改不动那一格终态，但遥测事件照旧留档，去 `GET /api/edge/agents/{id}/telemetry` 看得见。**这条尺量的不是运行时长**（N-136）：它问的是「这台设备还在不在」，而一条运行该开多久由部署自己那一列 `run_deadline_seconds` 说（NULL＝没定过预算，控制面不判），起算点是进入 running 时盖的 `run_started_at`，不是会被任何写顶新的 `updated_at`；超时的运行由 worker 的第八档周期任务落成 `failed`，错误原因写 `run exceeded its own deadline before reporting`。运维口径：一次合法要跑很久的工作**必须**带上预算，否则它只有设备判活那把 90 s 尺在管（未闭的一半见 N-137——设备在 `driver.run()` 期间停发心跳，长任务仍会被那把尺误杀）。
 
 ## 3. 容量模型
 

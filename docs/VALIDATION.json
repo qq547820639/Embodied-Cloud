@@ -4,7 +4,7 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 1027
+      "count": 1041
     },
     "test_run": {
       "status": "PASS",
@@ -20,7 +20,7 @@
     },
     "migration": {
       "status": "PASS",
-      "chain": 17
+      "chain": 18
     },
     "build": {
       "status": "PASS"
@@ -51,11 +51,11 @@
     },
     "doc_references": {
       "status": "PASS",
-      "note": "文档里的行号指针与章节锚点都落在实物上；指针写法四桶 已限定 258／缩写 0／歧义 0／外部 2（外部那几处按形状豁免，不当违规也不当通过）"
+      "note": "文档里的行号指针与章节锚点都落在实物上；指针写法四桶 已限定 261／缩写 0／歧义 0／外部 2（外部那几处按形状豁免，不当违规也不当通过）"
     },
     "doc_symbol_pointers": {
       "status": "PASS",
-      "note": "账面里『命名符号 ↔ 位置』配对 14 处：定义区间覆盖 14／所引行同现 0／对不上 0"
+      "note": "账面里『命名符号 ↔ 位置』配对 16 处：定义区间覆盖 16／所引行同现 0／对不上 0"
     },
     "reason_references": {
       "status": "PASS",

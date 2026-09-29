@@ -15,9 +15,9 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 1027 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 1041 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
-| Migration | PASS（clean DB empty→head **17 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
+| Migration | PASS（clean DB empty→head **18 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
 | Integration Docker | **PASS**（真容器；`--gpus` 参数的守护进程侧记账 3 例自 v0.6.0 起在册；本轮 +3 例＝镜像层清单的接线与分流判据） |
 | Integration Browser | **PASS**（Playwright 驱动系统 Chrome 真 DOM） |
@@ -141,6 +141,7 @@
 | N-131 | **指针行还在、说的不是它**（闭 N-120 的第二半）：`doc_references` 只判文件在不在、行越不越界，账面里 14 处「命名符号 ↔ 位置」配对有 9 处指错——`_settle_run` 被指到 `app/services/orchestrator.py:405-439`（那里今天是 `stop()`），`mark_unhealthy` 第三次漂。改法：`symbol_pointer_offenders` 要求符号定义区间覆盖所引行或符号就在其上，只认两种紧邻配对语法；指针语料顺带扩到 `docs/adr/`（此前 `glob("*.md")` 不递归，整个 ADR 面没人扫）。 | 判据 `tests/test_validation_matrix.py` +3 支（六形状合成反证含真语料走不到的 `inline` 档；真账面读数＋分母自证 `pairs>=12`；接线与 ADR 扩面）；四臂 Q1 改回坏指针／Q2 废掉配对语法／Q3 摘注册 ⇒ 红，Q4 只改注释 ⇒ 不红。连带 9 处指针改回实物、`docs/adr/0009` 的外部源引法改成「第 N 行」、`docs/code-walkthrough-2026-08-13.md` 一条双错更正、N-121 节里「仍未闭」改口、门禁 G0.116。新登记 N-132（裸指针与注释指针仍无符号读者）。未证实：`scripts/` 不在 typecheck 射程；装饰器改写行号的定义未覆盖。 |
 | N-133 | **设备掉了，它名下那次运行永远挂在 running**（闭 N-115）：N-113 的收口是事件驱动的，设备不再回来报（跑完即被掐／掉了没重下／库外推进 running）时那一行没有结局，而 `running` 与 `online` 同形——都是存在性主张。改法：`expire_stale_agents` 在同一趟 sweep、同一事务里补一条条件 UPDATE（归属钉 `edge_agent_id`、来源态钉 `status == running`），把这台设备名下还挂着的运行判成 `failed`；不新开证据列、不加迁移，判决挂在 N-108 就已存在的心跳证据上。 | 判据 `tests/test_edge_offline_closes_runs.py` 7 支（收口与设备判决同时落地／补报不复活且遥测留档／归属极性／来源态极性／未绑定不判／周期驱动者走得到／跨包常量同源），前提由真 HTTP 生产者造；四臂 R1 改回没人收口、R2 摘来源态、R3 摘归属 ⇒ 各自红在预期的那两支，R4 只改 docstring ⇒ 不红。连带 §2、门禁 G0.117、`docs/OPERATIONS.md` 那条改判补上新后果、N-115 就地划销。新登记 N-134（缺每次部署自带的运行时长预算，全局阈值会误杀长任务；无绑定的 running 仍无人收口）。未证实：真机断连重连补报的形状（本机无机器人）、阈值与任务时长的关系。 |
 | N-135 | **主机表格没有 `status` 的凭证列**：`last_synced_at` 由 N-110 立着、`app/schemas.py:156-158` 的注释和 `docs/OPERATIONS.md` 的排查表都指着它，但管理台只有 主机／地址／Provider／状态 四列——唯一的人类读端拿不到凭证，能信的只剩 `status` 一个词。改法：主机行加第五列「最后同步」，同步过的走既有 `fmtTime`，NULL 给「从未同步」（未知不等于缺席，ADR 0008）。 | 判据两把各管一半：`host_row_offenders`（① 读 `last_synced_at` ② 有 NULL 兜底；三态反证各判各格、模板读不到判红）＋一支常驻浏览器用例（表头有那一列、行数＝API 主机数、同步过的行是真时刻、没同步过的是「从未同步」，末行分母自证）；四臂 S1 整格删＝双侧红、S2 兜底换破折号＝只尺子红、S3 删表头列＝只浏览器红、S4 加无关类名＝不红。连带 §2 新行、门禁 G0.118、`docs/OPERATIONS.md` 补一句管理台已带这一列。未证实：NULL 那一支的真渲染（造它要给控制面自己写的证据列改回 NULL，周期同步会填回来＝造竞态）、窄屏列宽、未做「距今多久」的相对时间。 |
+| N-136 | **`running` 的时效只有一把全局尺，量的是设备而不是运行**（闭 N-134）：N-133 那条判活窗口默认 90 s，一次合法要跑 20 分钟的巡检会被静默判死，而 5 秒的推理拿到 90 s 几乎不设防；另一半是 `edge_agent_id IS NULL` 的 `running` 没人负责。改法借 K8s Job 的形状：`deployments` 加 `run_deadline_seconds`＋`run_started_at`（迁移 `b7d41e9f2c63`，链 18），`run_policy` 在 verified→running 盖章，`fail_overdue_runs` 用条件 UPDATE 判死，NULL 一律不判。 | 判据 `tests/test_run_deadline_closes_runs.py` 15 支（超时／预算内／无预算／无盖章／无绑定那档第一次被管／两写者只落一次终态两极／重复 `/run` 两种 body 不重盖章／对外面读得到／0 与负数 422／周期驱动者／静态钉「读 `run_started_at` 不读 `updated_at`」／行尺子三态＋表头与格数相等），前提由真 HTTP 生产者造，时钟前进用 `now` 注入与真挪 `run_started_at` 两种手法各管一边；九臂电池各红在预期位，其中两臂必须**同时摘两层**才可见（SELECT 谓词＋Python 类型收窄），单层摘除是等价变异。连带 §2 新行、门禁 G0.119、迁移链 17→18、`docs/API.md` 三行、`docs/OPERATIONS.md` 那条改判补预算口径、管理台部署表加「运行预算」列、N-134 就地划销、新登记 N-137（设备在 `driver.run()` 期间不发心跳，长任务仍会被那把全局尺误杀）。未证实：真机长任务下两把尺的相互作用（本机无机器人）、存量 `running` 行的预算读者、预算不下令中止物理动作的理由。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）
