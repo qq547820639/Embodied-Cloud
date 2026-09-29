@@ -112,11 +112,11 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/edge/agents/register` | 注册（绑定当前用户），**token 仅返回一次** |
-| GET | `/api/edge/agents` | 我的设备（admin 全量） |
+| GET | `/api/edge/agents` | 我的设备（admin 全量），每台带 `current_deployment_id`——设备自报「此刻在跑哪一条」的投影（N-140），null 读作「没有未闭合的开跑声明」 |
 | GET | `/api/edge/agents/{id}` | 详情（越权 404） |
 | POST | `/api/edge/agents/{id}/heartbeat` | 心跳（`X-Agent-Token`） |
 | POST | `/api/edge/agents/{id}/telemetry` | 遥测（`X-Agent-Token`） |
-| GET | `/api/edge/agents/{id}/telemetry` | 遥测回读（用户侧，租户 scope，越权 404）——此前这张表只写不读 |
+| GET | `/api/edge/agents/{id}/telemetry` | 遥测回读（用户侧，租户 scope，越权 404）——此前这张表只写不读。运行类两种：`edge-run-started`（按下驱动之前的自报，N-140，**不改权威状态**）与 `edge-run`（结果，驱动收口） |
 | GET | `/api/edge/agents/{id}/deployments/assigned` | **设备侧工作发现**（`X-Agent-Token`）：只返回绑定给自己的部署，含 `run_deadline_seconds`／`run_started_at`——设备在跑之前就知道自己的预算 |
 | POST | `/api/edge/agents/{id}/deployments/{dep}/begin` | **设备侧开门**（`X-Agent-Token`）：pending → downloading，条件 UPDATE，重复调用幂等 |
 
