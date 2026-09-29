@@ -16,6 +16,7 @@ GPU/K8s/Streaming/Robot 物理状态。CURRENT_STATE 引用本文件输出。
 用法：python scripts/validate_release.py
 """
 
+import ast
 import contextlib
 import json
 import os
@@ -674,7 +675,12 @@ def doc_reference_offenders(
 def _doc_pointer_texts() -> dict[str, str]:
     out: dict[str, str] = {}
     candidates = [
-        *sorted((ROOT / "docs").glob("*.md")), ROOT / "README.md", ROOT / "DELIVERY.md", ROOT / "CHANGELOG.md"
+        *sorted((ROOT / "docs").glob("*.md")),
+        # `docs/adr/` 是账面里指针密度最高的一面，此前 `glob("*.md")` 不递归，整个 ADR 面
+        # 不在任何指针读者的分母里（N-131 一手读数：扩面 10 个文件，只多出 1 条违规，
+        # 那条是把 site-packages 的文件写成了仓内 `path.py:NN` 形状 —— 外部源要写「第 N 行」）。
+        *sorted((ROOT / "docs" / "adr").glob("*.md")),
+        ROOT / "README.md", ROOT / "DELIVERY.md", ROOT / "CHANGELOG.md"
     ]
     for path in candidates:
         if path.exists():
@@ -828,6 +834,112 @@ def doc_pointer_spelling_readings() -> dict[str, int]:
     """
     _, counts = unqualified_pointer_readings(_doc_pointer_texts(), _repo_file_index(), _doc_roots())
     return counts
+
+
+# --------------------------------------------------------------------------------------
+# 命名符号 ↔ 位置 的一致性（N-131，闭 N-120 的第二半）
+#
+# `doc_references` 只判"文件在不在、行有没有越界"。账面里另一类病它看不见：行还在范围内，
+# 说的却不是那句里点名的符号。一手代价量（`/tmp/n131-cost4.py`，2026-09-29 现跑）：
+# 在"紧邻配对"这一窄口径下 14 处配对里 8 处对不上 —— 例如 `_settle_run` 被指到
+# `app/services/orchestrator.py:405-439`，而那里现在是 `stop()`，`_settle_run` 在 511-519。
+#
+# 只认两种有明确语法的配对形状：
+#   A) `符号`（`app/x.py:12-15`…   B) `app/x.py:12-15` 的/处/里 `符号`
+# 这条窄口径是被代价量逼出来的：第一版把"同一行里最近的一个反引号 token"当对端，
+# 186 处指针判出 87 条不合格，逐条读发现大半是配对错（SLURM 的 `sinfo` 被当成 Python 符号；
+# 「`app/models.py:55-58` 新增 `GpuHealth`」里符号在指针**之后**，却被前一处的 `status` 顶了名）。
+# 假阳率盖过真漂移的判据等于没有判据，所以宁窄不宽，并在 note 里把配对总数报出来。
+# --------------------------------------------------------------------------------------
+_SYMBOL_ROOTS = "|".join(re.escape(r) for r in DOC_SCAN_DIRS)
+_SYMBOL_PATH = rf"(?:{_SYMBOL_ROOTS})/[\w./-]*\.py"
+SYMBOL_BEFORE_RE = re.compile(
+    r"`([A-Za-z_][A-Za-z_0-9]*)`\s*[（(][^`]{0,3}`(" + _SYMBOL_PATH + r"):(\d+)(?:-(\d+))?`"
+)
+SYMBOL_AFTER_RE = re.compile(
+    r"`(" + _SYMBOL_PATH + r"):(\d+)(?:-(\d+))?`\s*(?:的|处|里)\s*`([A-Za-z_][A-Za-z_0-9]*)`"
+)
+
+
+def _symbol_spans(src: str) -> dict[str, list[tuple[int, int]]]:
+    """符号 → 定义区间：函数／类／模块级赋值名。解析不了的源文件返回空表。"""
+    out: dict[str, list[tuple[int, int]]] = {}
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return out
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.setdefault(node.name, []).append((node.lineno, node.end_lineno or node.lineno))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    out.setdefault(target.id, []).append((node.lineno, node.end_lineno or node.lineno))
+    return out
+
+
+def symbol_pointer_pairs(text: str) -> list[tuple[str, str, int, int]]:
+    """从一句账面里取 (符号, 路径, 起行, 止行)：两种紧邻形状都算，按出现顺序保留。"""
+    pairs: list[tuple[str, str, int, int]] = []
+    for m in SYMBOL_BEFORE_RE.finditer(text):
+        name, path, a, b = m.group(1), m.group(2), int(m.group(3)), m.group(4)
+        pairs.append((name, path, a, a + (int(b) - a) if b else a))
+    for m in SYMBOL_AFTER_RE.finditer(text):
+        path, a, b, name = m.group(1), int(m.group(2)), m.group(3), m.group(4)
+        pairs.append((name, path, a, a + (int(b) - a) if b else a))
+    return pairs
+
+
+def symbol_pointer_offenders(
+    texts: dict[str, str], sources: dict[str, str | None]
+) -> tuple[list[str], dict[str, int]]:
+    """纯函数：所引行必须真在说那个符号——符号的定义区间覆盖 [起,止]，或就在这些行上出现。
+
+    分母为空即判红（与 `doc_reference_offenders` 同一规矩）：配对一条都没扫到，通常不是账面干净，
+    而是配对语法或指针写法变了 —— 那种"绿"与"删掉了判据"同形。
+    """
+    if not texts:
+        return ["没有一份文档被扫：这条判据无事可做（与恒真同形）"], {}
+    out: list[str] = []
+    counts = {"pairs": 0, "span": 0, "inline": 0, "bad": 0}
+    spans_cache: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    for doc, text in sorted(texts.items()):
+        for lineno, line in enumerate(text.split("\n"), 1):
+            for name, path, a, b in symbol_pointer_pairs(line):
+                counts["pairs"] += 1
+                src = sources.get(path)
+                if src is None:
+                    counts["bad"] += 1
+                    out.append(f"{doc}:{lineno}: 「{name}」指到 {path}:{a}-{b}，但该文件读不到")
+                    continue
+                if path not in spans_cache:
+                    spans_cache[path] = _symbol_spans(src)
+                spans = spans_cache[path].get(name, [])
+                if any(s <= a and b <= e for s, e in spans):
+                    counts["span"] += 1
+                    continue
+                lines = src.split("\n")
+                cited = "\n".join(lines[max(0, a - 1):min(len(lines), b)])
+                if re.search(rf"\b{re.escape(name)}\b", cited):
+                    counts["inline"] += 1
+                    continue
+                counts["bad"] += 1
+                where = "、".join(f"{s}-{e}" for s, e in spans[:3]) or "该文件里没有这个符号"
+                out.append(f"{doc}:{lineno}: 「{name}」与 {path}:{a}-{b} 对不上（现定义在 {where}，所引行没有它）")
+    if counts["pairs"] == 0:
+        out.append("账面里一处『命名符号 ↔ 位置』配对都没扫到：分母为空，这条判据在假绿")
+    return out, counts
+
+
+def dangling_symbol_pointer_offenders() -> tuple[list[str], dict[str, int]]:
+    texts = _doc_pointer_texts()
+    paths = {p for text in texts.values() for _, p, _, _ in symbol_pointer_pairs(text)}
+    sources = {
+        p: (ROOT / p).read_text(encoding="utf-8", errors="replace") if (ROOT / p).is_file() else None
+        for p in sorted(paths)
+    }
+    return symbol_pointer_offenders(texts, sources)
 
 
 def doc_reference_stats() -> dict[str, int]:
@@ -1013,6 +1125,16 @@ def main() -> int:
     checks["doc_references"] = {
         "status": "FAIL" if doc_ref_offenders else "PASS",
         "note": "; ".join(doc_ref_offenders) if doc_ref_offenders else doc_ref_note,
+    }
+    # 行在范围内还不够：那句里点名的符号得真的住在所引行上（N-131，闭 N-120 的第二半）。
+    symbol_offenders, symbol_counts = dangling_symbol_pointer_offenders()
+    symbol_note = (
+        f"账面里『命名符号 ↔ 位置』配对 {symbol_counts['pairs']} 处："
+        f"定义区间覆盖 {symbol_counts['span']}／所引行同现 {symbol_counts['inline']}／对不上 {symbol_counts['bad']}"
+    )
+    checks["doc_symbol_pointers"] = {
+        "status": "FAIL" if symbol_offenders else "PASS",
+        "note": "; ".join(symbol_offenders) if symbol_offenders else symbol_note,
     }
     # 操作指针（变量名 / make 目标 / extra）必须能在仓内找到出处：文档与档位原因一起扫。
     ref_offenders = dangling_reference_offenders(pointer_bearing_texts(), reference_catalog())

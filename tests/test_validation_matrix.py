@@ -962,3 +962,63 @@ def test_doc_reference_gate_is_wired_into_the_summary() -> None:
     assert src.index("dangling_doc_reference_offenders(") < src.index('"checks": reproducible_checks(checks)')
     body = src[src.index("def doc_reference_offenders") : src.index("def dangling_doc_reference_offenders")]
     assert "不做" in body, "判据的边界（哪些路径有意不核）必须写在函数里，防止将来悄悄扩面"
+
+
+# ----------------------------------------------------------------------------------
+# 命名符号 ↔ 位置（N-131，闭 N-120 的第二半）
+# ----------------------------------------------------------------------------------
+_SYM_SRC = (
+    "def outer():\n"          # 1-3
+    "    x = 1\n"
+    "    return x\n"
+    "\n"
+    "\n"
+    "def use_site():\n"       # 6-7
+    "    return outer()\n"
+    "\n"
+    "CONST = 3\n"             # 9
+)
+
+
+def test_the_symbol_pointer_criterion_fires_on_each_shape() -> None:
+    """六种形状各判各的：合规两态、漂移、符号根本不存在、文件读不到、以及分母为空。
+
+    `inline` 那一档必须在常驻语料里靠合成夹具覆盖——真账面 14 处配对今天全部走"定义区间覆盖"，
+    少一条反证就等于那条分支从没被跑到过（第一轮实测：`inline` 读数为 0）。
+    """
+    v = _load_validator()
+    src = {"app/x.py": _SYM_SRC}
+    assert v.symbol_pointer_offenders({"docs/A.md": "改法见 `outer`（`app/x.py:1-3`）。"}, src) == (
+        [], {"pairs": 1, "span": 1, "inline": 0, "bad": 0}
+    )
+    assert v.symbol_pointer_offenders({"docs/A.md": "调用位点 `app/x.py:7` 的 `outer`。"}, src) == (
+        [], {"pairs": 1, "span": 0, "inline": 1, "bad": 0}
+    )
+    drift, counts = v.symbol_pointer_offenders({"docs/A.md": "`outer`（`app/x.py:9`）里赋值 CONST。"}, src)
+    assert counts == {"pairs": 1, "span": 0, "inline": 0, "bad": 1} and "对不上" in drift[0], drift
+    assert "现定义在 1-3" in drift[0], drift
+    ghost, _ = v.symbol_pointer_offenders({"docs/A.md": "`ghost_fn`（`app/x.py:1-3`）存在。"}, src)
+    assert "该文件里没有这个符号" in ghost[0], ghost
+    missing, _ = v.symbol_pointer_offenders({"docs/A.md": "`outer`（`app/gone.py:1-2`）。"}, {})
+    assert "该文件读不到" in missing[0], missing
+    empty, counts = v.symbol_pointer_offenders({"docs/A.md": "这一页没有任何配对形状的指针。"}, src)
+    assert counts["pairs"] == 0 and "分母为空" in empty[0], (empty, counts)
+    assert v.symbol_pointer_offenders({}, {})[0], "没有一份文档被扫必须与恒真区分开"
+
+
+def test_the_ledger_names_pointers_at_things_that_live_there() -> None:
+    """真账面：每一处「`符号`（`path.py:起-止`）」都必须对得上（本轮把这类的 9 处漂移全改了）。"""
+    v = _load_validator()
+    offenders, counts = v.dangling_symbol_pointer_offenders()
+    assert counts["pairs"] >= 12, f"配对分母掉到 {counts}：语料或配对语法变了，这条判据就成了摆设"
+    assert offenders == [], offenders
+
+
+def test_the_symbol_pointer_gate_is_wired_into_the_report() -> None:
+    src = (ROOT / "scripts" / "validate_release.py").read_text(encoding="utf-8")
+    assert "dangling_symbol_pointer_offenders()" in src and '"doc_symbol_pointers"' in src
+    assert src.index('"doc_symbol_pointers"') < src.index('"checks": reproducible_checks(checks)')
+    body = src[src.index("def _doc_pointer_texts") : src.index("def _doc_line_counts")]
+    assert "adr" in body, (
+        "ADR 面要在指针语料的分母里：`glob(\"*.md\")` 不递归，`docs/adr/*.md` 曾整面不在任何指针读者眼里"
+    )

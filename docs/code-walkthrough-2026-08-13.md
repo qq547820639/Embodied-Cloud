@@ -456,7 +456,7 @@ sequenceDiagram
 
 ### 11.3 P2 · 建议（18 项，摘要）
 
-- **重复/死代码**：`utcnow()` 在 9 个模块重复定义；`recover_stuck_workspaces`（`app/services/scheduler.py:185-194`）从未被调用；`_finalize_stop` 与 `_settle_running_segment` 结算逻辑重复；ledger `rate` 变量只进描述不参与计费。
+- **重复/死代码**：`utcnow()` 在 9 个模块重复定义；（2026-09-29 更正：本条原指一个 `scheduler.py` 185 到 194 行一带的 recover 函数「从未被调用」——仓内没有那个符号，那几行今天是 `sync_host` 的函数体，而 `recover_stuck_gpu_allocations` 有调用者（`app/services/orchestrator.py:724`）；N-131 的符号↔位置判据把这句抓了出来。）；`_finalize_stop` 与 `_settle_running_segment` 结算逻辑重复；ledger `rate` 变量只进描述不参与计费。
 - **一致性**：streaming 路由重复装配 `StreamingSessionService`/`WarmPoolManager` 实例；`Workspace.password` 列 `String(128)` 对 Fernet 密文余量极紧；生产启动未校验 `password_pepper`/`auto_create_tables`；`demo-workspace` 端点无鉴权；端口分配 TOCTOU；k8s 凭据轮换不等待滚动重启完成；course 配额门禁在 provision 重试路径可被绕过；`upsert_submission` 不校验 workspace 归属；日志脱敏只覆盖 extra 不覆盖 message。
 - **健壮性**：`course_completions` 三循环 N+1；`create_course`/`deploy` 先查再插无唯一约束兜底；`S3.exists` 吞掉鉴权/网络异常返回 False；`reconcile_all` O(N) 全表子进程调用。
 - **测试缺口**：无 P0-1/P0-2/P1-1/P1-6/P1-9/P1-10 回归保护；无 `cli.py`、`RedactingFormatter` 脱敏、独立安全专项测试。

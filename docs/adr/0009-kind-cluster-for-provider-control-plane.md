@@ -48,8 +48,8 @@ ADR 0005（两层验证：能在软件里跑的一律跑，剩下的登记为物
 
 ## 新增配置项 `k8s_kubeconfig`
 
-`_load_client()` 原本调 `config.load_kube_config()`（无参）。kubernetes Python SDK 在
-**模块 import 时**就把环境变量固化：`.venv/.../kubernetes/config/kube_config.py:48`
+`_load_client()` 原本调 `config.load_kube_config()`（无参）。kubernetes Python SDK（site-packages 里的 `config/kube_config.py` 第 48 行是 `KUBE_CONFIG_DEFAULT_LOCATION`）在
+**模块 import 时**就把环境变量固化：上面那一行
 `KUBE_CONFIG_DEFAULT_LOCATION = os.environ.get('KUBECONFIG', '~/.kube/config')`——
 本机实测：进程起来后再设 `KUBECONFIG`，无参加载直接
 `ConfigException: Invalid kube-config file. No configuration found.`。
