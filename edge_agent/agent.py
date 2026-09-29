@@ -24,6 +24,10 @@ from .drivers import MockRobotDriver, RobotDriver, RobotObservation
 from .keepalive import RunKeepalive
 
 RUN_TELEMETRY_KIND = "edge-run"
+#: 按下驱动之前那一条「我要开始跑这一格了」。与 `app/services/edge.py` 同名常量是一对
+#: **跨包**重复（设备包刻意不 import 服务端），相等关系由常驻判据钉住
+#: （tests/test_agent_current_run.py）——这条是**事实声明**，不改任何权威状态列。
+RUN_START_TELEMETRY_KIND = "edge-run-started"
 #: 设备侧还能推进的状态；其余（running/success/failed）归控制面。
 DEVICE_ADVANCEABLE = ("pending", "downloading", "verified")
 #: 运行期间的心跳间隔。判活阈值（`edge_agent_offline_after_seconds`，默认 90 s）除以它
@@ -48,6 +52,9 @@ class RoundOutcome:
     #: 它不等于运行失败，但足以让那条 `running` 被判活 sweep 收走，所以必须能被看见。
     run_heartbeats: int = 0
     run_heartbeat_misses: int = 0
+    #: 开跑那一条声明（`edge-run-started`）有没有送达。`False` 不等于没跑——
+    #: 跑照跑，只是控制面这段时间读不到"它在跑哪一条"（N-139）。
+    start_reported: bool = True
 
     def as_json(self) -> dict:
         return {
@@ -60,6 +67,7 @@ class RoundOutcome:
             "reported": self.reported,
             "run_heartbeats": self.run_heartbeats,
             "run_heartbeat_misses": self.run_heartbeat_misses,
+            "start_reported": self.start_reported,
             "observation": None
             if self.observation is None
             else {"ok": self.observation.ok, "steps": self.observation.steps, "detail": self.observation.detail},
@@ -125,6 +133,30 @@ class EdgeAgentRuntime:
             time.sleep(interval_seconds)
         return seen
 
+    def _announce_start(self, dep_id: str, sha256: str, record: dict) -> bool:
+        """发一条「我要开始跑这一格了」，返回有没有送达。
+
+        发不出去**也照跑**：一次物理运行的价值高于一条遥测， abort 一台正在动的机器
+        反而是新危险（与 N-136「预算不下令中止物理动作」同一条理由）。但这件事必须
+        被记下来——控制面这段时间读不到"它在跑哪一条"，读的人有权知道。
+        """
+        try:
+            self.client.telemetry(
+                self.agent_id,
+                RUN_START_TELEMETRY_KIND,
+                {
+                    "deployment_id": dep_id,
+                    "driver": getattr(self.driver, "name", "unknown"),
+                    "sha256": sha256,
+                    "robot_type": str(record.get("robot_type") or ""),
+                    "run_deadline_seconds": record.get("run_deadline_seconds"),
+                },
+            )
+        except AgentClientError as exc:
+            print(f"[edge-agent] {dep_id} 已开跑，但开跑声明未能送达：{exc}", file=sys.stderr)
+            return False
+        return True
+
     # ------------------------------------------------------------------
     def _handle(self, record: dict) -> RoundOutcome:
         dep_id = str(record["id"])
@@ -150,6 +182,7 @@ class EdgeAgentRuntime:
         observation: RobotObservation | None = None
         run_heartbeats = 0
         run_heartbeat_misses = 0
+        start_reported = True
         action = "reported" if fetched else "no-op"
         # 只在**本轮自己把它推到 verified** 的那一次跑驱动：`assigned` 是轮询，
         # 若以"状态是 verified"为条件，一台常驻设备会把同一个模型无限重复上机。
@@ -165,6 +198,9 @@ class EdgeAgentRuntime:
                 interval_seconds=self.run_heartbeat_seconds,
             )
             with keepalive:
+                start_reported = self._announce_start(
+                    dep_id, fetched or checksum, {**record, **current}
+                )
                 self.driver.load(dest, str(current.get("robot_type") or ""))
                 observation = self.driver.run()
             run_heartbeats, run_heartbeat_misses = (
@@ -198,6 +234,8 @@ class EdgeAgentRuntime:
         detail = "" if observation is None else observation.detail
         if unreported is not None:
             detail = f"{detail}；已运行但上报失败：{unreported}"
+        if not start_reported:
+            detail = f"{detail}；开跑声明未送达（控制面读不到本条运行）"
         if run_heartbeat_misses:
             # 上报本身可能成功了，但这段时间里控制面没收到过心跳——那条 running
             # 可能已经被判活 sweep 收走。这一格必须能被读出来，不能只活在线程的账本里。
@@ -213,4 +251,5 @@ class EdgeAgentRuntime:
             reported=unreported is None,
             run_heartbeats=run_heartbeats,
             run_heartbeat_misses=run_heartbeat_misses,
+            start_reported=start_reported,
         )

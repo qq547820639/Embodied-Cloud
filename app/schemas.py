@@ -289,6 +289,10 @@ class EdgeAgentOut(ORM):
     device_info: dict
     last_heartbeat: datetime | None
     created_at: datetime
+    # N-139：设备自己声明「此刻在跑哪一条部署」。派生值，不是列——`services.edge.agent_out`
+    # 是唯一生产者（四个面都走它），null 读作"没有声明／声明的那行已不是 running"，
+    # 而不是"这台设备坏了/没在干活"。
+    current_deployment_id: str | None = None
 
 
 class EdgeAgentRegisterIn(BaseModel):

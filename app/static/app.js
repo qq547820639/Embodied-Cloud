@@ -1165,12 +1165,13 @@ async function loadAgents() {
     agents = await api("/api/edge/agents");
     if (!agents.length) { el.innerHTML = '<div class="empty">还没有设备。注册一台边缘设备（如实验室的 Franka 工控机）。</div>'; return; }
     el.innerHTML = `<table>
-      <thead><tr><th>设备</th><th>状态</th><th>最近心跳</th><th>设备信息</th><th>操作</th></tr></thead>
+      <thead><tr><th>设备</th><th>状态</th><th>最近心跳</th><th>在跑哪一条</th><th>设备信息</th><th>操作</th></tr></thead>
       <tbody>${agents.map((a) => `
         <tr>
           <td>${esc(a.name)} <span class="muted">#${shortId(a.id)}</span></td>
           <td><span class="badge ${esc(a.status)}">${AGENT_STATUS_CN[a.status] || esc(a.status)}</span></td>
           <td>${fmtTime(a.last_heartbeat)}</td>
+          <td>${a.current_deployment_id ? "#" + shortId(a.current_deployment_id) : "无开跑声明"}</td>
           <td class="checksum">${esc(JSON.stringify(a.device_info || {}))}</td>
           <td><div class="actions-cell">
             <button class="secondary small" data-action="agent-heartbeat" data-id="${esc(a.id)}" ${agentTokens[a.id] ? "" : "disabled title='token 仅注册时返回一次；本浏览器未保存，无法代发心跳'"}>心跳</button>

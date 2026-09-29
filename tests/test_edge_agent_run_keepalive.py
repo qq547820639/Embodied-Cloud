@@ -256,7 +256,7 @@ def test_heartbeat_misses_move_the_exit_code() -> None:
 
 def test_the_run_telemetry_is_still_the_single_closure_signal(tmp_path: Path) -> None:
     """补一条作用域断言：这段心跳不能顺带把遥测重复发出去（收口只认那一条 edge-run）。"""
-    from app.services.edge import RUN_TELEMETRY_KIND
+    from app.services.edge import RUN_START_TELEMETRY_KIND, RUN_TELEMETRY_KIND
 
     driver = _SlowDriver(seconds=0.2)
     ctrl = _plane(driver)
@@ -264,6 +264,7 @@ def test_the_run_telemetry_is_still_the_single_closure_signal(tmp_path: Path) ->
     _runtime(ctrl, tmp_path, driver, run_heartbeat_seconds=0.05).run_once()
 
     kinds = [p["kind"] for p in ctrl.payloads]
-    assert kinds == [RUN_TELEMETRY_KIND], kinds
-    assert ctrl.calls.count("telemetry") == 1
+    # 两条各一次：开跑声明（事实，不改权威）与收口回报（唯一能改 `running` 的那条）。
+    assert kinds == [RUN_START_TELEMETRY_KIND, RUN_TELEMETRY_KIND], kinds
+    assert kinds.count(RUN_TELEMETRY_KIND) == 1, "心跳再多也不许多一条收口信号"
     assert ctrl.calls[0] == "heartbeat", "轮首心跳仍在，运行期心跳是**额外**的那几次"

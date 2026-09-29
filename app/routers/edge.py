@@ -41,14 +41,15 @@ def register_agent(payload: EdgeAgentRegisterIn, db: DB, user: CurrentUser):
     short-lived pairing code 扩展）。
     """
     agent, token = edge_service.register(db, payload.name, payload.device_info, owner=user)
-    return AgentRegisterOut(agent=EdgeAgentOut.model_validate(agent), token=token)
+    return AgentRegisterOut(agent=edge_service.agent_out(db, agent), token=token)
 
 
 @router.post("/agents/{agent_id}/heartbeat", response_model=EdgeAgentOut)
 def heartbeat(agent_id: str, payload: EdgeHeartbeatIn, db: DB, agent: Agent):
     if agent.id != agent_id:
         raise HTTPException(404, "agent not found")
-    return edge_service.heartbeat(db, agent, payload.device_info)
+    agent = edge_service.heartbeat(db, agent, payload.device_info)
+    return edge_service.agent_out(db, agent)
 
 
 @router.post("/agents/{agent_id}/telemetry", response_model=TelemetryOut)
@@ -91,8 +92,12 @@ def begin_assigned_deployment(agent_id: str, deployment_id: str, db: DB, agent: 
 
 @router.get("/agents", response_model=list[EdgeAgentOut])
 def list_agents(db: DB, user: CurrentUser):
-    """租户 scope：普通用户只见自己的 agent；admin 全量。"""
-    return edge_service.list_agents(db, user)
+    """租户 scope：普通用户只见自己的 agent；admin 全量。
+
+    逐行走 `agent_out` 而不是 `model_validate`：`current_deployment_id` 是派生值，
+    在这张列表面上漏算一次，读端看到的 null 就与"这台设备没在跑东西"同形。
+    """
+    return [edge_service.agent_out(db, a) for a in edge_service.list_agents(db, user)]
 
 
 @router.get("/agents/{agent_id}", response_model=EdgeAgentOut)
@@ -101,7 +106,7 @@ def get_agent(agent_id: str, db: DB, user: CurrentUser):
     agent = edge_service.get_agent(db, agent_id, user)
     if agent is None:
         raise HTTPException(404, "agent not found")
-    return agent
+    return edge_service.agent_out(db, agent)
 
 
 @router.get("/agents/{agent_id}/telemetry", response_model=list[TelemetryOut])

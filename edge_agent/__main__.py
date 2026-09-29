@@ -39,7 +39,12 @@ def _exit_code(outcomes: list[RoundOutcome]) -> int:
        而设备自己不知道。冒烟跑的绿灯不该盖住这种"两边的账可能对不上"。
     """
     for outcome in outcomes:
-        if outcome.action == "error" or not outcome.reported or outcome.run_heartbeat_misses:
+        if (
+            outcome.action == "error"
+            or not outcome.reported
+            or not outcome.start_reported
+            or outcome.run_heartbeat_misses
+        ):  # 开跑声明没送达＝这一格在控制面上是"看不见在跑"的（N-139）
             return 1
     return 0
 

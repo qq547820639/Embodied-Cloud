@@ -20,6 +20,7 @@ from ..models import (
     TelemetryEvent,
     User,
 )
+from ..schemas import EdgeAgentOut
 from ..security import generate_token, hash_token
 from ..utils import utcnow
 
@@ -28,6 +29,13 @@ from ..utils import utcnow
 #: 服务端（`edge_agent/drivers.py` 的模块 docstring 写了理由），所以相等关系由常驻判据
 #: 钉住（tests/test_edge_run_closes_deployment.py），而不是靠共享模块。
 RUN_TELEMETRY_KIND = "edge-run"
+#: 设备在**按下驱动之前**发的那一条：「我要开始跑这一格了」。
+#: 它与 `edge-run` 是一对，但不是一个——`edge-run` 是结果（并把 `running` 收成终态），
+#: 这条只是自报进度，**不改任何权威列**（N-139 要的就是这条投影，见 `announced_run_id`）。
+RUN_START_TELEMETRY_KIND = "edge-run-started"
+#: 往回扫多少条开跑声明。超出的形状（设备连着报了几十次开跑，却没有一次落在当前
+#: 这批 `running` 里）本身就说明状态该查，不由这里猜一个答案。
+_STARTED_SCAN = 20
 
 
 class EdgeService:
@@ -170,6 +178,92 @@ class EdgeService:
             .limit(limit)
         )
         return list(db.scalars(stmt))
+
+    def announced_run_id(self, db: Session, agent_id: str) -> str | None:
+        """这台设备自己声明的「此刻在跑哪一条部署」——只从 append-only 遥测派生。
+
+        形状是**两个集合的差**，不是"最新一条"：`开跑过` − `已经报完`。
+        为什么不看 `deployments.status == running`：那个状态是控制面的人为闸（
+        ADR 0007 把 `verified → running` 归控制面），而设备的物理运行常常发生在有人按下
+        `/run` **之前**（`_handle` 里报完摘要就直接上机）。拿一个人为闸去决定
+        "设备说它在跑什么"这个问题，答案会常年是 null，而那是假读数。
+        反向的闸要留：哪条记录已经被任何权威收口了（`success`／`failed`——
+        设备自报 N-113、掉线收口 N-133、超时判决 N-136 三条路都算），那条声明就作废，
+        否则这里会永远挂着一件已经结束的事。
+
+        为什么不新开一列 `edge_agents.current_deployment_id`：那一列会变成第二个「运行进展」
+        的权威，还得靠设备记得清它；而这里读的是设备已经写进 `telemetry_events` 的事实，
+        控制面的权威状态列一个字没动。
+
+        不可判的几种形状一律回 None（宁可不答也不替设备猜）：没有未闭合的声明、
+        声明指的行根本不归这台设备（越权声明不参与判定）、有多条未闭合的声明
+        （这台设备是单线程的，两条并存本身就说明状态该查）、声明指的那行已被
+        任何权威收口，以及要往回翻超过 `_STARTED_SCAN` 条才找得到（那说明声明早就没人管了）。
+        """
+        started = self._announced_ids(db, agent_id, RUN_START_TELEMETRY_KIND)
+        finished = self._announced_ids(db, agent_id, RUN_TELEMETRY_KIND)
+        open_ids = started - finished
+        if not open_ids:
+            return None
+        # 只认**绑给自己**的那些行：一台设备替别人的部署声明在跑，既不该显示在它的格上，
+        # 也不该因此把自己那格清空（越权的声明直接不参与判定）。
+        mine = set(
+            db.scalars(
+                select(DeploymentRecord.id).where(
+                    DeploymentRecord.id.in_(open_ids),
+                    DeploymentRecord.edge_agent_id == agent_id,
+                )
+            )
+        )
+        if not mine:
+            return None
+        closed = set(
+            db.scalars(
+                select(DeploymentRecord.id).where(
+                    DeploymentRecord.id.in_(mine),
+                    DeploymentRecord.status.in_(
+                        [DeploymentStatus.SUCCESS.value, DeploymentStatus.FAILED.value]
+                    ),
+                )
+            )
+        )
+        alive = mine - closed
+        if len(alive) != 1:
+            return None
+        return next(iter(alive))
+
+    def _announced_ids(self, db: Session, agent_id: str, kind: str) -> set[str]:
+        """某一类运行声明点名的 deployment_id 集合（JSON 路径在两侧写法不同，解析放 Python）.
+
+        `payload ->> 'deployment_id'`（PostgreSQL）与 `json_extract(payload, '$.deployment_id')`
+        （SQLite）不是同一句话，ADR 0005 要求这条通路两侧语义对等，所以这里只按
+        `kind` 在 SQL 侧筛行、取回 payload 在 Python 里读那一个键——与
+        `DeploymentService.fail_overdue_runs` 里"逐行时间换算放 Python"同一个取舍。
+        """
+        rows: list[dict] = list(
+            db.scalars(
+                select(TelemetryEvent.payload)
+                .where(
+                    TelemetryEvent.edge_agent_id == agent_id,
+                    TelemetryEvent.kind == kind,
+                )
+                .order_by(TelemetryEvent.created_at.desc())
+                .limit(_STARTED_SCAN)
+            )
+        )
+        return {str((payload or {}).get("deployment_id") or "") for payload in rows} - {""}
+
+    def agent_out(self, db: Session, agent: EdgeAgent) -> EdgeAgentOut:
+        """`EdgeAgentOut` 的唯一生产者——四个面（register／heartbeat／list／detail）都走这里。
+
+        `current_deployment_id` 是**派生**值而不是 ORM 列，所以 `model_validate(agent)` 不会带上它。
+        若放某个面各自 validate 原始对象，那一面这一格就永远是 null，而 null 在读端与
+        "这台设备没在跑东西"完全同形（N-135 给 `last_synced_at` 立的规矩在这里同样成立）。
+        """
+        out = EdgeAgentOut.model_validate(agent)
+        return out.model_copy(
+            update={"current_deployment_id": self.announced_run_id(db, agent.id)}
+        )
 
 
 def get_agent_from_header(request: Request, db: Session) -> EdgeAgent:

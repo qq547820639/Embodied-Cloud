@@ -2085,7 +2085,7 @@
           "edge"
         ],
         "summary": "List Agents",
-        "description": "\u79df\u6237 scope\uff1a\u666e\u901a\u7528\u6237\u53ea\u89c1\u81ea\u5df1\u7684 agent\uff1badmin \u5168\u91cf\u3002",
+        "description": "\u79df\u6237 scope\uff1a\u666e\u901a\u7528\u6237\u53ea\u89c1\u81ea\u5df1\u7684 agent\uff1badmin \u5168\u91cf\u3002\n\n\u9010\u884c\u8d70 `agent_out` \u800c\u4e0d\u662f `model_validate`\uff1a`current_deployment_id` \u662f\u6d3e\u751f\u503c\uff0c\n\u5728\u8fd9\u5f20\u5217\u8868\u9762\u4e0a\u6f0f\u7b97\u4e00\u6b21\uff0c\u8bfb\u7aef\u770b\u5230\u7684 null \u5c31\u4e0e\"\u8fd9\u53f0\u8bbe\u5907\u6ca1\u5728\u8dd1\u4e1c\u897f\"\u540c\u5f62\u3002",
         "operationId": "list_agents_api_edge_agents_get",
         "responses": {
           "200": {
@@ -3076,6 +3076,17 @@
             "type": "string",
             "format": "date-time",
             "title": "Created At"
+          },
+          "current_deployment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Deployment Id"
           }
         },
         "type": "object",

@@ -20,6 +20,7 @@ import pytest
 
 import edge_agent.__main__ as agent_main
 import edge_agent.client as client_mod
+from app.services.edge import RUN_TELEMETRY_KIND
 from edge_agent.agent import EdgeAgentRuntime
 from edge_agent.client import AgentClient, AgentClientError, ArtifactFetch
 from edge_agent.drivers import MockRobotDriver
@@ -122,7 +123,9 @@ def test_a_delivered_report_stays_quiet_and_reports_green(tmp_path: Path, capsys
 
     assert (outcome.action, outcome.status_after, outcome.reported) == ("ran", "verified", True)
     assert "上报失败" not in outcome.detail
-    assert ctrl.payloads[0]["deployment_id"] == "d-1" and ctrl.payloads[0]["ok"] is True
+    runs = [p for p in ctrl.payloads if p["kind"] == RUN_TELEMETRY_KIND]
+    assert len(runs) == 1, ctrl.payloads
+    assert runs[0]["deployment_id"] == "d-1" and runs[0]["ok"] is True
     assert capsys.readouterr().err == ""
 
 
