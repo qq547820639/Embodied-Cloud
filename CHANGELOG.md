@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 1024 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 1027 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -1547,6 +1547,15 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 四臂电池（`/tmp/n133-battery.py`，靶 `app/services/edge.py`，跑完 `git diff` 与开局快照逐字节相同）：R1 把来源态换成 `PENDING`（＝改前「没人收口」的形状）⇒ 红在收口那两支；R2 整条摘掉来源态谓词 ⇒ 红在「已成功的运行不被翻」那一支；R3 整条摘掉归属谓词 ⇒ 红在越权与未绑定那两支；R4 只改 docstring 措辞 ⇒ 不许红（对照）。四臂读数全部落在预期上。
 - 落账：新增门禁 G0.117；§2 新行 N-133；N-115 就地划销；`docs/OPERATIONS.md` 那条「设备是否还看得见」补上它的新后果。`docs/adr/0007` 的后果段仍然为真（收口由设备回报驱动），本轮只是给「没人回报」那一档补了结局。
 - 未证实／限度：阈值沿用 `edge_agent_offline_after_seconds`（默认 90s），本轮没有单独回答「多久没心跳算放弃这次运行」——它继承设备侧的判活窗口，如果将来某类任务合法地跑得更久（一次 20 分钟的巡检），这条判决会误杀，那时需要的是**每次部署自带的运行时长预算**而不是全局阈值（N-134 记这一格）；真机设备断连后重连补报的形状本机无法测（无物理机器人），只测到 HTTP 层。
+
+### 主机表格得把 `status` 的凭证也摆出来，NULL 要有自己的说法（N-135，主机行的凭证列）
+- 缺陷（写端齐全、读端缺一半）：N-110 给 `gpu_hosts` 立了 `last_synced_at`，`app/schemas.py:156-158` 的注释写着「读端自己就能核结论，不必信那一列单边写的词」，`docs/OPERATIONS.md` 的排查表也直接指着这一列。但管理台的主机表只有 主机／地址／Provider／状态 四列——唯一那个人类读端拿不到凭证，能信的仍然只是 `status` 一个词。N-110 当初要避免的就是这个形状，只是当时缺的是写端，这次缺的是读端。
+- 改法（`app/static/app.js` 的主机行加第五列「最后同步」）：同步过的给本地化时刻（复用文件里已有的 `fmtTime`，不新写一份格式化），`last_synced_at IS NULL` 给「从未同步」。兜底那一支不是装饰：「从没同步过」是**未知**，渲染成空、破折号或任何一个时间都是在替设备编造结论（ADR 0008 那一支）。
+- 判据分两把，各管一半，四臂把极性矩阵填满：`host_row_offenders`（`tests/test_gpu_drain_provenance.py`）要求主机行 ① 读 `last_synced_at` ② 给 NULL 一条兜底写法，三态反证各判各的格；常驻浏览器用例一支（`tests/test_browser_console.py::test_the_host_row_renders_the_sync_credential`）以真 admin 进 `#/gpus`，核表头有那一列、行数与 API 返回的主机数相等、同步过的行是真时刻、没同步过的行是「从未同步」，末行是分母自证（一台都没同步过时上面那些断言全是空转）。
+- 四臂（`/tmp/n135-battery.py`，靶 `app/static/app.js`，跑完 `git diff app/` 与开局快照逐字节相同）：S1 整格删掉（＝改前形状）⇒ 尺子与浏览器双侧红；S2 只把 NULL 兜底换成破折号 ⇒ 只尺子红（mock 主机是同步过的，浏览器看不出这一档）；S3 只删表头那一列（列错位）⇒ 只浏览器红；S4 只加一个无关类名 ⇒ 双侧都不许红。两把判据互不遮蔽，这一点是靠 S2／S3 各自单侧开火证明的。
+- 排障留痕（本会话第二次）：上一支提交是带着 `ruff` 的两条红落库的——我把检查写成 `ruff check … | tail -1 && … && git commit`，管线退码是 `tail` 的，判据的退码被吃掉。同一轮改正后固定为 `ruff check … > /tmp/ruff.out 2>&1; echo RUFF_RC=$?` 且检查与提交分两次调用（`d231a58` 补上 B905 与 E501）。
+- 落账：新增门禁 G0.118；§2 新行 N-135；`docs/OPERATIONS.md` 那句「看到 `offline` 先查同步源」补上管理台已带这一列。本轮不新开证据列、不动 API：缺的只是把已有的一列摆到页面上。
+- 未证实／限度：「从未同步」那一支的真渲染没在浏览器里跑（要造它就得把控制面自己写下的证据列改成 NULL，而周期同步会在 15 秒的表格刷新里把它填回去，那是在造竞态而不是在测断言）——只钉了渲染式里有那条兜底分支；列宽与换行没测（表格里第五列是时刻串，窄屏是否挤压操作列未看）；这一列没有做「距今多久」的相对时间显示，运维仍要自己按 600s 阈值比对。
 
 ### 记账脚本在仓内留一个 tmp/，就把文档门顶红了（N-118）
 - 缺陷（工具的自我遮蔽，不在产品代码里）：`scripts/validate_release.py:732 _doc_roots()` 按 `ROOT.iterdir()` 现取顶层目录当「仓内根」，而文档门的存在性核对（`doc_reference_offenders` 的 :615-621 那段划界）写死了「只核以既有仓内根目录开头的路径」——它的前提是**根面等于仓库的组成面**。记账脚本把备份落进仓内 `tmp/anchor-patch-n116/` 之后，这个前提就塌了：`tmp` 成了根，CHANGELOG 与 CURRENT_STATE 里那两句**故意不作为指针**的示例路径 `tmp/probe.py` 各产一条假悬空引用，`doc_references` 当场翻红。红因不在文档，也不在产品代码，而在量具自己的落点。

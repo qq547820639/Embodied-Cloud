@@ -4,7 +4,7 @@
   "checks": {
     "test_collected": {
       "status": "PASS",
-      "count": 1024
+      "count": 1027
     },
     "test_run": {
       "status": "PASS",
@@ -51,7 +51,7 @@
     },
     "doc_references": {
       "status": "PASS",
-      "note": "文档里的行号指针与章节锚点都落在实物上；指针写法四桶 已限定 256／缩写 0／歧义 0／外部 2（外部那几处按形状豁免，不当违规也不当通过）"
+      "note": "文档里的行号指针与章节锚点都落在实物上；指针写法四桶 已限定 258／缩写 0／歧义 0／外部 2（外部那几处按形状豁免，不当违规也不当通过）"
     },
     "doc_symbol_pointers": {
       "status": "PASS",
