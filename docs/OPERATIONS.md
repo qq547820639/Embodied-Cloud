@@ -40,7 +40,7 @@
   刷新窗口没再同步成功就改判 `offline`）。看到 `offline` 先查该档的同步源：docker 档是 `nvidia-smi`
   还在不在，k8s 档是 kubeconfig 与集群可达性（N-110）。
 - **设备是否还看得见**：`GET /api/edge/agents/{id}` 的 `status` 由最近一次心跳背书，超时改判 `offline`
-  （阈值 `edge_agent_offline_after_seconds`，默认 90 s＝设备端 5 s 轮询 × 18，N-108）。
+  （阈值 `edge_agent_offline_after_seconds`，默认 90 s＝设备端 5 s 轮询 × 18，N-108）。同一条判决还负责一件事（N-133）：这台设备名下还挂在 `running` 的部署一起落成 `failed`，错误原因写 `device went offline before reporting the run`；设备之后回来补报改不动那一格终态，但遥测事件照旧留档，去 `GET /api/edge/agents/{id}/telemetry` 看得见。
 
 ## 3. 容量模型
 

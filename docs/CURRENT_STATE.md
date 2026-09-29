@@ -15,7 +15,7 @@
 
 | Gate | 结果 |
 |---|---|
-| Test | **PASS（collected 1017 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
+| Test | **PASS（collected 1024 / failed 0）**（本串与 `docs/VALIDATION.json` 由常驻判据对账；本次跑跳过哪几支按用例名记在 `dist/VALIDATION_RUN.md`，不钉在面上） |
 | Lint / Type | PASS（ruff 0 / mypy 46 files：`app` + 本轮入册的 `edge_agent`） |
 | Migration | PASS（clean DB empty→head **17 文件链** + schema 落地 + downgrade 循环 + **模型↔迁移对账**） |
 | Integration PostgreSQL | **PASS**（自建一次性容器，真行锁语义；含本轮的锁等待窗口与持锁时长实测） |
@@ -139,6 +139,7 @@
 | N-128 | **管理台还在拿被搬走的旧值作门**：`app/static/app.js:1253` 的 `g.status !== "unhealthy"` 在 N-126 之后恒为真，「标记异常」在任何卡上都不消失；`drain_requested_at` 有 API 读者却没有表格读者；`/undrain` 与 `/healthy` 两条解除路径在控制台里没有按钮。改法：行模板按维度给极（健康／下架各两颗按钮）并在状态格挂 `已请求排水`。 | 判据 `tests/test_gpu_drain_provenance.py` +4 支（`gpu_row_offenders` 钉「比较的对端必须在自己的枚举里」，别名现取、整行自证；端点↔`data-action`↔`actionHandlers` 三方对账，分母由路由 AST 给）＋常驻浏览器档以真 admin 走完两个维度的极性翻转；四臂 A 双侧红／B 只浏览器红／C 双侧红／D 对照不红。连带 G0.111／G0.112 两行措辞按现状改口、`docs/openapi.json` 重生成、N-125 那行的「前端不显示」未证实面闭合。新登记 N-129（GPU 表没有周期驱动者）。未证实：尺子只管字面量右端、只管 `refreshGpus` 这一处渲染位；确认弹窗话术与后端语义无人核。 |
 | N-130 | **管理台的 GPU 表是静态快照**（闭 N-129）：`refreshGpus()` 只在进视图与点完动作后被叫，`pollTick()` 只刷工作区与指标且在无瞬态工作区时整体停摆，而 `draining`／`drained`／`last_synced_at` 全由后台同步改判——`docs/OPERATIONS.md` 让运维「看到一批 `draining` 先查节点同步」，那句话在控制台上读的是快照。改法：`GPU_POLL_MS`＝15s 加 `startGpuPolling`／`stopGpuPolling`，接在 `showView` 这个唯一导航入口上 （`app/static/app.js:655`、`:657`、`:662`、`:305-306`），回调里带 `document.hidden`。 | 判据 `tests/test_gpu_drain_provenance.py` 的 `gpu_poll_wiring` 三格（driver／stops／scoped）＋三态反证（一次性刷新／摘 clearInterval／起了不停，各打一格；接线点缺失判红而非返回空串），`tests/test_browser_console.py` 一支三档互为前提的常驻用例（可见时确有 GET／后台改判自己翻极性／离开视图后缺席，毫秒数由页面自报）；四臂 E1／E2／E3 尺子与浏览器双侧红、E4 只改毫秒数两侧都不红。连带门禁 G0.115、§2 新行、`docs/OPERATIONS.md` 补刷新口径、N-129 划销。未证实：无 Chrome 时只剩接线尺、多标签页各起一份轮询未去重、没有「滞后不超过某值」的判据、真机降级时延未测。 |
 | N-131 | **指针行还在、说的不是它**（闭 N-120 的第二半）：`doc_references` 只判文件在不在、行越不越界，账面里 14 处「命名符号 ↔ 位置」配对有 9 处指错——`_settle_run` 被指到 `app/services/orchestrator.py:405-439`（那里今天是 `stop()`），`mark_unhealthy` 第三次漂。改法：`symbol_pointer_offenders` 要求符号定义区间覆盖所引行或符号就在其上，只认两种紧邻配对语法；指针语料顺带扩到 `docs/adr/`（此前 `glob("*.md")` 不递归，整个 ADR 面没人扫）。 | 判据 `tests/test_validation_matrix.py` +3 支（六形状合成反证含真语料走不到的 `inline` 档；真账面读数＋分母自证 `pairs>=12`；接线与 ADR 扩面）；四臂 Q1 改回坏指针／Q2 废掉配对语法／Q3 摘注册 ⇒ 红，Q4 只改注释 ⇒ 不红。连带 9 处指针改回实物、`docs/adr/0009` 的外部源引法改成「第 N 行」、`docs/code-walkthrough-2026-08-13.md` 一条双错更正、N-121 节里「仍未闭」改口、门禁 G0.116。新登记 N-132（裸指针与注释指针仍无符号读者）。未证实：`scripts/` 不在 typecheck 射程；装饰器改写行号的定义未覆盖。 |
+| N-133 | **设备掉了，它名下那次运行永远挂在 running**（闭 N-115）：N-113 的收口是事件驱动的，设备不再回来报（跑完即被掐／掉了没重下／库外推进 running）时那一行没有结局，而 `running` 与 `online` 同形——都是存在性主张。改法：`expire_stale_agents` 在同一趟 sweep、同一事务里补一条条件 UPDATE（归属钉 `edge_agent_id`、来源态钉 `status == running`），把这台设备名下还挂着的运行判成 `failed`；不新开证据列、不加迁移，判决挂在 N-108 就已存在的心跳证据上。 | 判据 `tests/test_edge_offline_closes_runs.py` 7 支（收口与设备判决同时落地／补报不复活且遥测留档／归属极性／来源态极性／未绑定不判／周期驱动者走得到／跨包常量同源），前提由真 HTTP 生产者造；四臂 R1 改回没人收口、R2 摘来源态、R3 摘归属 ⇒ 各自红在预期的那两支，R4 只改 docstring ⇒ 不红。连带 §2、门禁 G0.117、`docs/OPERATIONS.md` 那条改判补上新后果、N-115 就地划销。新登记 N-134（缺每次部署自带的运行时长预算，全局阈值会误杀长任务；无绑定的 running 仍无人收口）。未证实：真机断连重连补报的形状（本机无机器人）、阈值与任务时长的关系。 |
 ## 3. 上一轮交付（v0.6.0 / v0.5.0）
 
 ### v0.6.0（2026-09-26）

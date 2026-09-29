@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-09-26（Sim2Real 从"控制面替设备走状态机"变成真设备通路）
 
-`docs/VALIDATION.json`（`make validate` 生成）：collected 1017 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
+`docs/VALIDATION.json`（`make validate` 生成）：collected 1024 / failed 0。这份提交面现在**只放换机器重跑逐字节相同**的门禁；"本次跑跳过哪几支、各集成档是 PASS 还是 PENDING"属环境读数，改落 `dist/VALIDATION_RUN.{json,md}`（gitignored）——理由与判据见下方"计数面按可复现性分档"一节。
 overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac 流媒体面 / 真机器人）。
 
 ### 计数面按"可复现 / 环境读数"分档，skip 从数字改成闭集（N-31 闭合）
@@ -1538,6 +1538,16 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 - 落账：新增门禁 G0.116；§2 新行 N-131；N-120 的第二半就地划销，N-121 节里那句「仍未闭」同步改口；9 处漂移指针改到符号今天的定义区间（更正里不重抄旧的坏配对，否则判据自己再造一条要判红的句子）。
 - 未证实／限度：只覆盖「紧邻配对」这一窄口径——句子里不带符号名的裸指针（形如「见 path:行号」）仍只有存在性与边界读者，另登 N-132；写在代码注释里的指针（例如 `app/services/warmpool.py:429` 引用 那条注释引用 scheduler 的行号时省掉了仓内前缀）不在语料面内；判据要求符号名与路径在同一句里相邻，跨句引用看不见；`scripts/` 不在 `make typecheck` 的射程（`mypy app edge_agent`），新函数只过了 ruff 与常驻用例；区间判定用 AST 的 `end_lineno`，对被装饰器改写过行号的定义不作保证（本仓未见该形状）。
 
+### 设备被判离线的那一刻，它名下挂着的运行也得有个结局（N-133，闭 N-115）
+- 缺陷（登记项 N-115 的原话）：N-113 的收口是事件驱动的——设备 POST 一条 `edge-run` 才改判。于是三种形状永远停在 `running`：设备跑完即被掐（N-109 的 `reported=false` 档）、设备掉了而部署没重下、人工在库外把部署推到 running。这一格与 N-110 是同一个病：`running` 是一条存在性主张，它的唯一凭证是「这台设备还会回来报结果」；而设备侧那份「最后一次被看见」的证据（`edge_agents.last_heartbeat`）早在 N-108 就被读着了，缺的只是把判决传下去。
+- 修法：`app/services/edge.py` 的 `expire_stale_agents` 在同一趟 sweep、同一事务里补一条条件 UPDATE——归属钉 `edge_agent_id`、来源态钉 `status == running`，授权不在 Python 里判（与 `complete_from_agent_report`／`begin_agent_download` 同一形状）。**不新开证据列、不加迁移**：N-115 当时担心的是 `DeploymentRecord.updated_at` 带 `onupdate`、它是「最后一次被改动」不是「最后一次被看见」，不能当证据用——这一点今天仍然成立，所以判决挂在设备那一侧的心跳上，而不是给部署再抄一份时钟。
+- 择一决定（借成熟方案，不引依赖）：判成 `failed` 而不是退回 `pending` 重派。候选 A 是 K8s Job 的 `activeDeadlineSeconds`（超时 ⇒ `Failed`，reason `DeadlineExceeded`，终态不被后到的 Pod 状态改写）；候选 B 是 SLURM `--time`（超时 ⇒ 作业被取消并记 `TIMEOUT`）。两者共同点是把超时算作「一次已结束的失败」，重跑要由人重新提交，而不是控制器私自重来一遍——私自重跑在机器人这一侧意味着再动一次物理设备，这个授权不在控制面手上。故借其语义、自研一条 UPDATE，不引任何依赖。
+- 后到的读数改不动已写的终态：设备恢复后补报 `ok=true` 仍走 N-113 那条路，WHERE 里的来源态让 rowcount 落 0，而遥测事件照旧全部留档——「不复活」不等于「把证据一起丢了」。`last_heartbeat IS NULL` 与「没绑定设备」的 `running` 一律不判：没有最后一次被看见的证据可依，把「没人报」读成「设备没了」正是 ADR 0008 禁止的那一步，那一半另登 N-134。
+- 判据 7 支（`tests/test_edge_offline_closes_runs.py`，本轮 +7）。前提一律由真实生产者造：HTTP 注册 → 心跳 → begin → 报摘要 → run，只有「库外写进来的 running」那一档例外（它本来就没有 API 生产者）。极性各管一边：收口与设备判决同时落地；补报不复活且遥测留档；别的设备的运行不被碰（归属半边）；已成功的运行之后设备掉线不被翻（来源态半边）；未绑定的 running 不判；周期驱动者走得到（经 `app/deps.py` 那个入口，不是直接叫服务）；跨包线协议常量仍是同一份。
+- 四臂电池（`/tmp/n133-battery.py`，靶 `app/services/edge.py`，跑完 `git diff` 与开局快照逐字节相同）：R1 把来源态换成 `PENDING`（＝改前「没人收口」的形状）⇒ 红在收口那两支；R2 整条摘掉来源态谓词 ⇒ 红在「已成功的运行不被翻」那一支；R3 整条摘掉归属谓词 ⇒ 红在越权与未绑定那两支；R4 只改 docstring 措辞 ⇒ 不许红（对照）。四臂读数全部落在预期上。
+- 落账：新增门禁 G0.117；§2 新行 N-133；N-115 就地划销；`docs/OPERATIONS.md` 那条「设备是否还看得见」补上它的新后果。`docs/adr/0007` 的后果段仍然为真（收口由设备回报驱动），本轮只是给「没人回报」那一档补了结局。
+- 未证实／限度：阈值沿用 `edge_agent_offline_after_seconds`（默认 90s），本轮没有单独回答「多久没心跳算放弃这次运行」——它继承设备侧的判活窗口，如果将来某类任务合法地跑得更久（一次 20 分钟的巡检），这条判决会误杀，那时需要的是**每次部署自带的运行时长预算**而不是全局阈值（N-134 记这一格）；真机设备断连后重连补报的形状本机无法测（无物理机器人），只测到 HTTP 层。
+
 ### 记账脚本在仓内留一个 tmp/，就把文档门顶红了（N-118）
 - 缺陷（工具的自我遮蔽，不在产品代码里）：`scripts/validate_release.py:732 _doc_roots()` 按 `ROOT.iterdir()` 现取顶层目录当「仓内根」，而文档门的存在性核对（`doc_reference_offenders` 的 :615-621 那段划界）写死了「只核以既有仓内根目录开头的路径」——它的前提是**根面等于仓库的组成面**。记账脚本把备份落进仓内 `tmp/anchor-patch-n116/` 之后，这个前提就塌了：`tmp` 成了根，CHANGELOG 与 CURRENT_STATE 里那两句**故意不作为指针**的示例路径 `tmp/probe.py` 各产一条假悬空引用，`doc_references` 当场翻红。红因不在文档，也不在产品代码，而在量具自己的落点。
 - 一手读数与机制隔离（不靠「删掉之后变绿」倒推）：同一进程里只换 `roots` 入参、其余全部取现值 ⇒「现行 8 个根 → 干净；roots 里加一个 `tmp` → 恰好 2 条同名 offender，差集 2」。`git check-ignore --stdin` 的语义在一次性夹具里实测：输入 `tmp/ dist/ app/ nosuch/` 只回吐被忽略的那两个；不在仓库里时 `fatal: not a git repository`、rc=128、stdout 为空 ⇒ 干净导出下新过滤器退化成 ∅，行为与改前逐位一致。
@@ -1600,7 +1610,9 @@ overall = `PASS_WITH_PHYSICAL_PENDING`（物理待验仍是 GPU 真机 / Isaac �
 
 - `N-127`：**`gpus.health` 只有人在写，没有任何观察来源**。ADR 0010 把判决放对了格子，但「谁发现一张卡坏了」这条链路仍然不存在：mock provider 永远报同样的 8 张卡，`sync_host` 只带 model/memory/index，edge agent 的遥测里也没有温度／ECC 一类健康信号。于是今天的运维现实是：卡坏了没人知道，只有人点了 `/unhealthy` 才算数——而 `draining` 那一档已经证明「有观察、有归位」是可以做的（`health_is_usable()` 与它同层）。要收口得先回答两件事：观察从哪来（provider 上报？设备遥测新增字段？），以及一次坏是否要像缺席那样自动恢复（若自动恢复，就必须再分一档「人工确认过坏了」）。
 
-- `N-115`：**跑完却再也报不上来的部署，今天没有人负责**。N-113 的收口是事件驱动的：设备 POST 一条 `edge-run` 才改判。于是三种形状都会一直停在 `running`——设备跑完即被掐（N-109 的 `reported=false` 档）、设备掉了而部署没重下、以及人工在库外把部署推到 running。要么给 `running` 配一个时效判决，要么在写入侧要求设备在 run 前重新登记；两条都要先回答“谁有权把一条运行判成超时失败”。另外 `DeploymentRecord.updated_at` 带 `onupdate`，它是“最后一次被改动”而不是“最后一次被看见”，不能直接当证据列用——这一格与 N-110 的差别正在这里，故登记不收口。
+- `N-115`：**跑完却再也报不上来的部署，今天没有人负责**。N-113 的收口是事件驱动的：设备 POST 一条 `edge-run` 才改判。于是三种形状都会一直停在 `running`——设备跑完即被掐（N-109 的 `reported=false` 档）、设备掉了而部署没重下、以及人工在库外把部署推到 running。要么给 `running` 配一个时效判决，要么在写入侧要求设备在 run 前重新登记；两条都要先回答“谁有权把一条运行判成超时失败”。另外 `DeploymentRecord.updated_at` 带 `onupdate`，它是“最后一次被改动”而不是“最后一次被看见”，不能直接当证据列用——这一格与 N-110 的差别正在这里，故登记不收口。~~要么给 `running` 配一个时效判决，要么在写入侧要求设备在 run 前重新登记；两条都要先回答“谁有权把一条运行判成超时失败”~~ —— **已由 N-133 闭合（取第一支）**：时效判决挂在设备侧已有的「最后一次被看见」证据上（`expire_stale_agents` 同一趟 sweep 里一条条件 UPDATE），有权判决的是那条超时判据本身，理由与 K8s／SLURM 的对照见上面 N-133 一节；没绑定设备、因而无证据可依的那一档另登 N-134。
+- `N-134`：**部署缺一个属于自己的运行时长预算**。N-133 收掉了「设备掉了」那一档，用的是全局判活窗口（`edge_agent_offline_after_seconds`，默认 90 s）。这意味着一次合法地要跑 20 分钟的巡检任务，只要设备中途 90 秒没心跳，就会被判成失败——阈值与任务时长本来就是两件事。要补的是每次部署自带的 `run_deadline_seconds`（K8s Job 的 `activeDeadlineSeconds` 那一格），并且设备侧在跑之前要知道它；顺带还欠一档：N-133 的判据对 `edge_agent_id IS NULL` 的 `running` 不判（没有证据），那一档要有归属者——要么禁止「无设备绑定却进入 running」的写法，要么给它一条独立的时效。
+
 
 - ~~`N-117`：**`_finalize_stop` 是全仓唯一一处「本函数不终结会话却写终态」的位置，它的配对证据在调用链上**。`app/services/orchestrator.py:597` 写 `STOPPED` 而函数体里没有 `terminate_for_workspace`；两个正常入口都先在同一趟里终结过（`_stop_cleanup:448` → `:472`；reconcile 的 STOPPING 档 `:837` → `:846`），所以今天的读数不出错。但 `stop():421-427` 那一档是「已 STOPPED 就只补做结算与释放」，它假定「STOPPED 蕴含会话已闭」，而这句既没有判据守着、也不是结构性质：`_stop_cleanup` 的 `try` 把 `terminate_for_workspace` 与 `provider.stop` 放在同一段（`:446-452`），except 不 `db.rollback()`（`:453-456`），于是「终结那一半抛错、provider 又说 runtime 没了（`admitted=True`）」这一形状会把 STOPPED 与仍为 `connected` 的会话一起提交，此后每次重试 stop 都只走那条幂等档，永远补不回来。修法候选：把终结收进 `_finalize_stop` 本体（它是 STOPPED 的唯一写点、函数幂等），并把结构尺子从 `_reconcile_one` 扩到全部 5 处终态写入；动手前要先补一支能开火的判据把上面那个形状做出来——现无任何用例走「终结抛错＋admitted」这一档，所以本轮只登记不修。~~ —— **已由 N-119 闭合**：终结收进 `_finalize_stop` 本体（`app/services/orchestrator.py:596`，写在 `:597`），尺子从 `_reconcile_one` 宽成全 `app/` 逐 def 扫、读数 `set()`；判据 `tests/test_finalize_stop_closes_streaming.py` 7 支＋四臂（F1 3 红／F2 1 红／F3 1 红／F4 2 红）。F3 更正了上面那句猜测：两处并存不是冗余——早期抛错只损失端口回收，晚期抛错会把整段收尾退回非终态。
 
